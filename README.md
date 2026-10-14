@@ -1,18 +1,33 @@
 # Moscow Transport Reachability Map
 
-Moscow Transport Reachability Map is an interactive browser map for exploring public-transport accessibility in Moscow using OpenStreetMap data.
+Moscow Transport Reachability Map is an interactive browser map for exploring public-transport
+accessibility in Moscow using OpenStreetMap data.
 
-`build-transport-map.py` downloads and preprocesses OSM data, extracts Moscow bus, tram, and trolleybus routes and stops, and generates `routes.html` with the transport data embedded in the page. Leaflet and the OpenStreetMap background tiles are loaded from the network.
+`build-transport-map.py` downloads and preprocesses OSM data, extracts Moscow bus, tram,
+trolleybus, metro, MCC and MCD routes and stops, and generates `routes.html` with the
+transport data embedded in the page. Leaflet and the OpenStreetMap background tiles are loaded
+from the network.
 
-The page can calculate approximate reachable areas with zero, one, or two transfers and can build route variants to a selected destination. It is designed for exploratory accessibility analysis rather than exact trip planning: walking distance is approximated geometrically and vehicle travel time is estimated from the transport graph rather than a live timetable.
+The page can calculate approximate reachable areas with zero, one, or two transfers and can
+build route variants to a selected destination. It is designed for exploratory accessibility
+analysis rather than exact trip planning: walking distance is approximated geometrically and
+vehicle travel time is estimated from the transport graph rather than a live timetable.
 
 ## Описание
 
-Moscow Transport Reachability Map - интерактивная браузерная карта для исследования транспортной доступности в Москве на основе данных OpenStreetMap.
+Moscow Transport Reachability Map - интерактивная браузерная карта для исследования
+транспортной доступности в Москве на основе данных OpenStreetMap.
 
-`build-transport-map.py` загружает и предварительно обрабатывает данные OSM, извлекает московские маршруты и остановки автобусов, трамваев и троллейбусов и генерирует `routes.html` со встроенными транспортными данными. Библиотека Leaflet и фоновые тайлы OpenStreetMap загружаются из сети.
+`build-transport-map.py` загружает и предварительно обрабатывает данные OSM, извлекает
+московские маршруты и остановки автобусов, трамваев, троллейбусов, метро, МЦК и МЦД и
+генерирует `routes.html` со встроенными транспортными данными. Библиотека Leaflet и фоновые
+тайлы OpenStreetMap загружаются из сети.
 
-Страница может рассчитывать приблизительные зоны доступности без пересадок, с одной или двумя пересадками, а также строить варианты маршрута до выбранной точки. Проект предназначен для исследовательского анализа доступности, а не для точного планирования поездок: расстояние пешком оценивается геометрически, а время движения транспорта рассчитывается по транспортному графу, а не по актуальному расписанию.
+Страница может рассчитывать приблизительные зоны доступности без пересадок, с одной или двумя
+пересадками, а также строить варианты маршрута до выбранной точки. Проект предназначен для
+исследовательского анализа доступности, а не для точного планирования поездок: расстояние
+пешком оценивается геометрически, а время движения транспорта рассчитывается по транспортному
+графу, а не по актуальному расписанию.
 
 ## Готовая версия
 
@@ -24,7 +39,10 @@ https://bus-routing.e7s.site/
 
 ## Возможности
 
-- автобусы, трамваи и троллейбусы Московского транспорта;
+- автобус, трамвай, троллейбус, метро, МЦК и МЦД;
+- отдельные кнопки-переключатели с SVG-иконками для каждого вида транспорта;
+- по умолчанию включены только автобус, трамвай и троллейбус;
+- фильтры одновременно влияют на отображение, доступность, пересадки и поиск поездок;
 - отображение маршрутов и остановок;
 - расчет доступности от произвольной точки;
 - 0, 1 или 2 пересадки;
@@ -34,7 +52,9 @@ https://bus-routing.e7s.site/
 - несколько вариантов маршрута;
 - адаптивный интерфейс для desktop/mobile.
 
-Расстояние пешком рассчитывается по прямой, а время движения транспорта является оценочным, поэтому карта предназначена прежде всего для анализа транспортной доступности, а не для точного планирования поездок.
+Расстояние пешком рассчитывается по прямой, а время движения транспорта является оценочным,
+поэтому карта предназначена прежде всего для анализа транспортной доступности, а не для
+точного планирования поездок.
 
 ## Требования
 
@@ -51,13 +71,14 @@ pip install osmium
 python3 build-transport-map.py
 ```
 
-При первом запуске скрипт скачает PBF Центрального федерального округа с Geofabrik, создаст транспортный кеш и сгенерирует:
+При первом запуске скрипт скачает PBF Центрального федерального округа с Geofabrik, создаст
+транспортный кеш и сгенерирует:
 
 ```text
 routes.html
 cache/
   central-fed-district.osm.pbf
-  moscow-transport.osm.pbf
+  moscow-transport-v2.osm.pbf
 ```
 
 После этого достаточно открыть `routes.html` в браузере.
@@ -68,6 +89,7 @@ cache/
 
 В панели можно изменить:
 
+- виды транспорта: автобус, трамвай, троллейбус, метро, МЦК, МЦД (любая комбинация);
 - максимальное время пешком;
 - количество пересадок: 0-2;
 - максимальное время поездки;
@@ -89,7 +111,35 @@ python3 build-transport-map.py --update
 python3 build-transport-map.py --rebuild
 ```
 
-Обычный запуск повторно использует существующий кеш.
+Обычный запуск повторно использует существующий кеш. В версии 0.2.0 имя транспортного кеша
+изменено на `moscow-transport-v2.osm.pbf`: ранее сгенерированный кеш, содержащий только
+наземный транспорт, не используется, однако исходный `central-fed-district.osm.pbf` скачивать
+повторно не требуется.
+
+## Модель скорости и ограничения
+
+Средние скорости заданы как **приблизительные скорости движения** по геометрии маршрута. К ним
+дополнительно прибавляются 0,35 мин на остановку и оценка ожидания при каждой посадке:
+
+| Вид транспорта | Скорость движения | Ожидание посадки |
+| --- | ---: | ---: |
+| Автобус | 19,2 км/ч | 4 мин |
+| Трамвай | 18 км/ч | 4 мин |
+| Троллейбус | 16,8 км/ч | 4 мин |
+| Метро | 37,8 км/ч | 2,5 мин |
+| МЦК | 46,8 км/ч | 4 мин |
+| МЦД | 54 км/ч | 5 мин |
+
+Эти значения - эвристики для карты, не статистика по фактическим рейсам. Время пересадок
+зависит от геометрического расстояния между остановками, а не от реальных переходов по
+станциям. У входов в метро, на платформах и при пересадках сквозь крупные станции это может
+давать заметную ошибку. Нет расписаний, расчёта по дорожному графу для пешеходов, интервалов
+движения или учёта платных зон.
+
+Данные метро выбираются по OSM `route=subway` (и московскому `light_rail`), МЦК и МЦД - по
+признакам линий на железнодорожных `route=train` / `route_master=train`, включая `ref`, `name`
+и `network`. Включённые режимы используют только маршруты, найденные в OSM; если линия
+отсутствует или неверно размечена, переключатель не создаст её искусственно.
 
 ## Основные параметры
 
@@ -117,4 +167,6 @@ python3 build-transport-map.py \
 
 Источник транспортных данных - OpenStreetMap / Geofabrik.
 
-Транспортные данные упаковываются непосредственно в сгенерированный HTML. Leaflet и фоновые тайлы OpenStreetMap загружаются из сети, поэтому для полноценного отображения карты требуется доступ в интернет.
+Транспортные данные упаковываются непосредственно в сгенерированный HTML. Leaflet и фоновые
+тайлы OpenStreetMap загружаются из сети, поэтому для полноценного отображения карты требуется
+доступ в интернет.

@@ -5,6 +5,7 @@ import base64
 import gzip
 import json
 import math
+import re
 import time
 import urllib.error
 import urllib.request
@@ -14,7 +15,7 @@ from pathlib import Path
 import osmium
 
 EARTH_RADIUS_M = 6371000.0
-PROJECT_VERSION = "0.1.0"
+PROJECT_VERSION = "0.2.0"
 
 
 def parse_args():
@@ -106,7 +107,73 @@ NETWORK = (
     "\u041c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0439 "
     "\u0442\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442"
 )
-ROUTE_TYPES = {"bus", "tram", "trolleybus"}
+SURFACE_MODES = {"bus", "tram", "trolleybus"}
+RAIL_ROUTE_TYPES = {"subway", "train", "light_rail"}
+SUPPORTED_ROUTE_TYPES = SURFACE_MODES | RAIL_ROUTE_TYPES
+MCD_REF_PATTERN = re.compile(
+    r"(?<![A-Za-z\u0410-\u042f\u0430-\u044f0-9])"
+    r"[D\u0414][1-4]"
+    r"(?![A-Za-z\u0410-\u042f\u0430-\u044f0-9])",
+    re.IGNORECASE,
+)
+
+MCC_SHORT = "\u043c\u0446\u043a"
+MCC_FULL = (
+    "\u043c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u043e\u0435 "
+    "\u0446\u0435\u043d\u0442\u0440\u0430\u043b\u044c\u043d\u043e"
+    "\u0435 \u043a\u043e\u043b\u044c\u0446\u043e"
+)
+MCD_SHORT = "\u043c\u0446\u0434"
+MCD_FULL = (
+    "\u043c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0435 "
+    "\u0446\u0435\u043d\u0442\u0440\u0430\u043b\u044c\u043d\u044b"
+    "\u0435 \u0434\u0438\u0430\u043c\u0435\u0442\u0440\u044b"
+)
+METROPOLITAN = (
+    "\u043c\u0435\u0442\u0440\u043e\u043f\u043e\u043b\u0438\u0442" "\u0435\u043d"
+)
+MOSCOW_METROPOLITAN = (
+    "\u043c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0439 "
+    "\u043c\u0435\u0442\u0440\u043e\u043f\u043e\u043b\u0438\u0442"
+    "\u0435\u043d"
+)
+
+
+def transport_mode(tags, route_type):
+    """Classify a Moscow route/route_master from OSM tags, conservatively."""
+    network = (tags.get("network") or "").casefold()
+    name = (tags.get("name") or "").casefold()
+    ref = (tags.get("ref") or "").strip()
+    text = " ".join((network, name, ref.casefold()))
+
+    if route_type in SURFACE_MODES:
+        return route_type if network == NETWORK.casefold() else None
+
+    if route_type not in RAIL_ROUTE_TYPES:
+        return None
+
+    if any(
+        value in text for value in (MCC_SHORT, MCC_FULL, "moscow central circle")
+    ) or (ref == "14" and METROPOLITAN in network):
+        return "mcc"
+
+    if (
+        MCD_REF_PATTERN.search(text)
+        or MCD_SHORT in text
+        or MCD_FULL in text
+        or "moscow central diameters" in text
+    ):
+        return "mcd"
+
+    if route_type == "subway":
+        # The source extract covers the Central Federal District; Moscow
+        # is its only subway network. The network tag may be absent.
+        return "metro"
+
+    if route_type == "light_rail" and MOSCOW_METROPOLITAN in network:
+        return "metro"
+
+    return None
 
 
 def download_source(source_path):
@@ -194,7 +261,7 @@ def build_cache(cache_dir, update=False, rebuild=False):
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     source = cache_dir / "central-fed-district.osm.pbf"
-    transport_pbf = cache_dir / "moscow-transport.osm.pbf"
+    transport_pbf = cache_dir / "moscow-transport-v2.osm.pbf"
 
     if update:
         print("Downloading fresh Central Federal District data...")
@@ -210,7 +277,7 @@ def build_cache(cache_dir, update=False, rebuild=False):
         transport_pbf.unlink(missing_ok=True)
 
     if not transport_pbf.exists():
-        print("Selecting Moscow bus, tram and trolleybus routes...")
+        print("Selecting Moscow surface transport, metro, MCC and MCD routes...")
         build_transport_extract(source, transport_pbf)
     else:
         print(f"Using cached: {transport_pbf}")
@@ -251,33 +318,22 @@ class TransportSelectionHandler(osmium.SimpleHandler):
 
     def relation(self, relation):
         relation_type = relation.tags.get("type")
-        network = relation.tags.get("network")
-
-        if network != NETWORK:
+        if relation_type not in ("route", "route_master"):
             return
 
-        if relation_type == "route_master":
-            route_type = relation.tags.get("route_master")
-            ref = relation.tags.get("ref")
-
-            if route_type not in ROUTE_TYPES or is_night_route(route_type, ref):
-                return
-
-            self.writer.add_relation(relation)
-            self.selected_masters += 1
-            return
-
-        if relation_type != "route":
-            return
-
-        route_type = relation.tags.get("route")
-        ref = relation.tags.get("ref")
-
-        if route_type not in ROUTE_TYPES or is_night_route(route_type, ref):
+        route_type = relation.tags.get(
+            "route_master" if relation_type == "route_master" else "route"
+        )
+        if transport_mode(relation.tags, route_type) is None or is_night_route(
+            route_type, relation.tags.get("ref")
+        ):
             return
 
         self.writer.add_relation(relation)
-        self.selected_routes += 1
+        if relation_type == "route_master":
+            self.selected_masters += 1
+        else:
+            self.selected_routes += 1
 
 
 class RelationHandler(osmium.SimpleHandler):
@@ -293,7 +349,8 @@ class RelationHandler(osmium.SimpleHandler):
             route_type = relation.tags.get("route_master")
             ref = relation.tags.get("ref")
 
-            if route_type not in ROUTE_TYPES or is_night_route(route_type, ref):
+            mode = transport_mode(relation.tags, route_type)
+            if mode is None or is_night_route(route_type, ref):
                 return
 
             members = [member.ref for member in relation.members if member.type == "r"]
@@ -302,6 +359,7 @@ class RelationHandler(osmium.SimpleHandler):
                 {
                     "relation_id": relation.id,
                     "route": route_type,
+                    "mode": mode,
                     "ref": ref,
                     "roundtrip": relation.tags.get("roundtrip"),
                     "members": members,
@@ -315,8 +373,11 @@ class RelationHandler(osmium.SimpleHandler):
         route_type = relation.tags.get("route")
         ref = relation.tags.get("ref")
 
-        if route_type not in ROUTE_TYPES or is_night_route(route_type, ref):
+        # Child routes can inherit MCC/MCD identity from a route_master.
+        # These are already limited to selected relations in transport_pbf.
+        if route_type not in SUPPORTED_ROUTE_TYPES or is_night_route(route_type, ref):
             return
+        mode = transport_mode(relation.tags, route_type)
 
         members = [
             (member.type, member.ref, member.role or "") for member in relation.members
@@ -347,6 +408,7 @@ class RelationHandler(osmium.SimpleHandler):
             {
                 "relation_id": relation.id,
                 "route": route_type,
+                "mode": mode,
                 "ref": ref,
                 "from": relation.tags.get("from"),
                 "to": relation.tags.get("to"),
@@ -549,12 +611,16 @@ def build_transport_data(transport_pbf):
 
     for route in relations.routes:
         relation_id = route["relation_id"]
-        geometry = route_geometry(route, objects.route_ways)
-
-        if geometry is None:
+        master_key = master_for_relation.get(relation_id)
+        mode = route["mode"] or (
+            master_info[master_key]["mode"] if master_key is not None else None
+        )
+        if mode is None:
             continue
 
-        master_key = master_for_relation.get(relation_id)
+        geometry = route_geometry(route, objects.route_ways)
+        if geometry is None:
+            continue
 
         if master_key is not None:
             master = master_info[master_key]
@@ -562,11 +628,7 @@ def build_transport_data(transport_pbf):
             ref = master.get("ref") or route.get("ref")
         else:
             ref = route.get("ref")
-            route_key = (
-                f"{route['route']}:{ref}"
-                if ref
-                else f"{route['route']}:relation:{relation_id}"
-            )
+            route_key = f"{mode}:{ref}" if ref else f"{mode}:relation:{relation_id}"
 
         resolved_stops = []
         resolved_stop_roles = []
@@ -591,6 +653,7 @@ def build_transport_data(transport_pbf):
                     "feature_type": "route",
                     "route_key": route_key,
                     "route": route["route"],
+                    "mode": mode,
                     "ref": ref,
                     "relation_id": relation_id,
                     "from": route["from"],
@@ -746,6 +809,7 @@ def build_index(data_json, grid_size):
             route_key,
             {
                 "route": props.get("route"),
+                "mode": props.get("mode") or props.get("route"),
                 "ref": props.get("ref"),
                 "roundtrip": None,
                 "directions": [],
@@ -842,6 +906,36 @@ def build_html(
     initial_circle_opacity = max(
         0.0,
         min(100.0, initial_circle_opacity),
+    )
+
+    mcd_icon_outline = (
+        "M4 17V7a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v10" "a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"
+    )
+
+    # Keep localized labels ASCII-encoded in the source and generated HTML.
+    mode_names = {
+        "heading": (
+            "&#1042;&#1080;&#1076;&#1099; &#1090;&#1088;&#1072;&#1085;&#1089;"
+            "&#1087;&#1086;&#1088;&#1090;&#1072;"
+        ),
+        "bus": "&#1040;&#1074;&#1090;&#1086;&#1073;&#1091;&#1089;",
+        "tram": "&#1058;&#1088;&#1072;&#1084;&#1074;&#1072;&#1081;",
+        "trolleybus": (
+            "&#1058;&#1088;&#1086;&#1083;&#1083;&#1077;&#1081;&#1073;&#1091;" "&#1089;"
+        ),
+        "metro": "&#1052;&#1077;&#1090;&#1088;&#1086;",
+        "mcc": "&#1052;&#1062;&#1050;",
+        "mcd": "&#1052;&#1062;&#1044;",
+    }
+    mode_hint = (
+        "&#1055;&#1086; &#1091;&#1084;&#1086;&#1083;&#1095;&#1072;&#1085;"
+        "&#1080;&#1102; &#1074;&#1082;&#1083;&#1102;&#1095;&#1105;&#1085; "
+        "&#1085;&#1072;&#1079;&#1077;&#1084;&#1085;&#1099;&#1081; &#1090;"
+        "&#1088;&#1072;&#1085;&#1089;&#1087;&#1086;&#1088;&#1090;. &#1057;"
+        "&#1082;&#1086;&#1088;&#1086;&#1089;&#1090;&#1080; &#1080; &#1074;"
+        "&#1088;&#1077;&#1084;&#1103; &#1086;&#1078;&#1080;&#1076;&#1072;"
+        "&#1085;&#1080;&#1103; &#1087;&#1088;&#1080;&#1073;&#1083;&#1080;"
+        "&#1079;&#1080;&#1090;&#1077;&#1083;&#1100;&#1085;&#1099;&#1077;."
     )
 
     html = f"""<!doctype html>
@@ -1039,6 +1133,73 @@ def build_html(
             text-align: right;
         }}
 
+
+        /* Icon-based transport filters: the input stays keyboard accessible. */
+        .mode-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+        }}
+        .mode-option {{
+            position: relative;
+            display: block;
+            cursor: pointer;
+        }}
+        .mode-input {{
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+        }}
+        .mode-pill {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 5px;
+            box-sizing: border-box;
+            min-height: 72px;
+            padding: 10px 3px 8px;
+            border: 1px solid rgb(203 213 225);
+            border-radius: 12px;
+            color: rgb(100 116 139);
+            background: rgb(248 250 252);
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1.1;
+            text-align: center;
+            transition: background-color 130ms, border-color 130ms, color 130ms;
+            user-select: none;
+        }}
+        .mode-pill svg {{
+            width: 27px;
+            height: 27px;
+            flex: 0 0 auto;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            fill: none;
+        }}
+        .mode-input:checked + .mode-pill {{
+            color: #1d4ed8;
+            border-color: #93c5fd;
+            background: #eff6ff;
+            box-shadow: inset 0 0 0 1px rgb(59 130 246 / 0.18);
+        }}
+        .mode-input:focus-visible + .mode-pill {{
+            outline: 3px solid #93c5fd;
+            outline-offset: 2px;
+        }}
+        .mode-option:hover .mode-pill {{
+            border-color: #60a5fa;
+        }}
+        .mode-hint {{
+            margin-top: 8px;
+            color: rgb(100 116 139);
+            font-size: 11px;
+            line-height: 1.4;
+        }}
         /* =========================================================
            RANGE
            ========================================================= */
@@ -2086,6 +2247,110 @@ def build_html(
             <div class="project-version">v{PROJECT_VERSION}</div>
         </div>
 
+        <div class="control" id="transport-modes">
+            <div class="control-label">
+                <span>{mode_names['heading']}</span>
+            </div>
+            <div
+                class="mode-grid"
+                role="group"
+                aria-label="{mode_names['heading']}"
+            >
+                <label
+                    class="mode-option"
+                    title="{mode_names['bus']} &#183; ~19,2 &#1082;&#1084;/&#1095;"
+                >
+                    <input class="mode-input" type="checkbox" value="bus" checked>
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="4" y="3" width="16" height="16" rx="3"/>
+                            <path d="M4 11h16M8 19v2m8-2v2M8 15h.01M16 15h.01M8 7h8"/>
+                        </svg>
+                        <span>{mode_names['bus']}</span>
+                    </span>
+                </label>
+                <label
+                    class="mode-option"
+                    title="{mode_names['tram']} &#183; ~18 &#1082;&#1084;/&#1095;"
+                >
+                    <input class="mode-input" type="checkbox" value="tram" checked>
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="5" y="5" width="14" height="14" rx="3"/>
+                            <path
+                                d="M5 12h14M9 5V2m6 3V2M8 22l3-3m5 3-3-3M8 15h.01M16 15h.01"
+                            />
+                        </svg>
+                        <span>{mode_names['tram']}</span>
+                    </span>
+                </label>
+                <label
+                    class="mode-option"
+                    title="{mode_names['trolleybus']} &#183; ~16,8 &#1082;&#1084;/&#1095;"
+                >
+                    <input
+                        class="mode-input"
+                        type="checkbox"
+                        value="trolleybus"
+                        checked
+                    >
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="4" y="6" width="16" height="13" rx="3"/>
+                            <path
+                                d="M4 13h16M8 6l-2-4m9 4 3-4M7 19v2m10-2v2M8 16h.01M16 16h.01"
+                            />
+                        </svg>
+                        <span>{mode_names['trolleybus']}</span>
+                    </span>
+                </label>
+                <label
+                    class="mode-option"
+                    title="{mode_names['metro']} &#183; ~37,8 &#1082;&#1084;/&#1095;"
+                >
+                    <input class="mode-input" type="checkbox" value="metro">
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 20V5l8 10 8-10v15M2 21h20"/>
+                        </svg>
+                        <span>{mode_names['metro']}</span>
+                    </span>
+                </label>
+                <label
+                    class="mode-option"
+                    title="{mode_names['mcc']} &#183; ~46,8 &#1082;&#1084;/&#1095;"
+                >
+                    <input class="mode-input" type="checkbox" value="mcc">
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="4" y="4" width="16" height="15" rx="4"/>
+                            <path
+                                d="M4 12h16M8 19l-2 3m10-3 2 3M8 8h8M8 15h.01M16 15h.01"
+                            />
+                            <circle cx="12" cy="12" r="8" stroke-dasharray="2 6"/>
+                        </svg>
+                        <span>{mode_names['mcc']}</span>
+                    </span>
+                </label>
+                <label
+                    class="mode-option"
+                    title="{mode_names['mcd']} &#183; ~54 &#1082;&#1084;/&#1095;"
+                >
+                    <input class="mode-input" type="checkbox" value="mcd">
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="{mcd_icon_outline}"/>
+                            <path
+                                d="M4 12h16M8 19l-2 3m10-3 2 3M8 8h8M8 15h.01M16 15h.01"
+                            />
+                        </svg>
+                        <span>{mode_names['mcd']}</span>
+                    </span>
+                </label>
+            </div>
+            <div class="mode-hint">{mode_hint}</div>
+        </div>
+
         <div class="control">
             <div class="control-label">
                 <label for="walk-time">Max walking time</label>
@@ -2319,8 +2584,23 @@ const WALK_SPEED_M_PER_MIN = {walk_speed:.6f};
 const BUS_SPEED_M_PER_MIN = 320.0;
 const TRAM_SPEED_M_PER_MIN = 300.0;
 const TROLLEYBUS_SPEED_M_PER_MIN = 280.0;
+const METRO_SPEED_M_PER_MIN = 630.0;
+const MCC_SPEED_M_PER_MIN = 780.0;
+const MCD_SPEED_M_PER_MIN = 900.0;
 const STOP_DELAY_MIN = 0.35;
 const BOARDING_WAIT_MIN = 4.0;
+const MODE_SPEEDS = {{
+    bus: BUS_SPEED_M_PER_MIN,
+    tram: TRAM_SPEED_M_PER_MIN,
+    trolleybus: TROLLEYBUS_SPEED_M_PER_MIN,
+    metro: METRO_SPEED_M_PER_MIN,
+    mcc: MCC_SPEED_M_PER_MIN,
+    mcd: MCD_SPEED_M_PER_MIN
+}};
+const MODE_BOARDING_WAITS = {{
+    bus: 4.0, tram: 4.0, trolleybus: 4.0,
+    metro: 2.5, mcc: 4.0, mcd: 5.0
+}};
 const ROUGH_STOP_MIN = 1.4;
 const WALK_PREFERENCE_EXTRA = 0.8;
 const MAX_EVIDENCE_PER_PATH = 4;
@@ -2342,6 +2622,21 @@ const ORIGIN_LAT_RAD = ORIGIN_LAT * Math.PI / 180.0;
 const stops = data.stops;
 const routes = data.routes;
 const grid = data.grid;
+const modeInputs = Array.from(document.querySelectorAll(".mode-input"));
+let enabledModes = new Set(
+    modeInputs.filter(input => input.checked).map(input => input.value)
+);
+
+function isRouteEnabled(routeKey) {{
+    const route = routes[routeKey];
+    return !!route && enabledModes.has(route.mode || route.route);
+}}
+
+function boardingWaitForRoute(routeKey) {{
+    const route = routes[routeKey];
+    const mode = route ? (route.mode || route.route) : "bus";
+    return MODE_BOARDING_WAITS[mode] ?? BOARDING_WAIT_MIN;
+}}
 
 const TEXT = {{
     stop: "Stop",
@@ -2633,6 +2928,9 @@ function findNearbyStopsXY(x, y) {{
 
     for (const stopIndex of candidates) {{
         const stop = stops[stopIndex];
+        if (!stop.routes.some(isRouteEnabled)) {{
+            continue;
+        }}
         const dx = stop.x - x;
         const dy = stop.y - y;
 
@@ -2680,10 +2978,23 @@ function clearResult() {{
 }}
 
 function routeLabel(route) {{
-    const type = route.route || "";
+    if (!route) {{
+        return "?";
+    }}
+    const names = {{
+        bus: "\\u0410\\u0432\\u0442\\u043E\\u0431\\u0443\\u0441",
+        tram: "\\u0422\\u0440\\u0430\\u043C\\u0432\\u0430\\u0439",
+        trolleybus: (
+            "\\u0422\\u0440\\u043E\\u043B\\u043B"
+            + "\\u0435\\u0439\\u0431\\u0443\\u0441"
+        ),
+        metro: "\\u041C\\u0435\\u0442\\u0440\\u043E",
+        mcc: "\\u041C\\u0426\\u041A",
+        mcd: "\\u041C\\u0426\\u0414"
+    }};
+    const type = route.mode || route.route || "";
     const ref = route.ref || "?";
-
-    return type + " " + ref;
+    return (names[type] || type) + " " + ref;
 }}
 
 function drawOrigin(lat, lon) {{
@@ -2920,7 +3231,7 @@ function stopRouteDetails(stopIndex) {{
     for (const routeKey of ordered) {{
         const route = routes[routeKey];
 
-        if (!route) {{
+        if (!route || !isRouteEnabled(routeKey)) {{
             continue;
         }}
 
@@ -3105,7 +3416,7 @@ function directionsBetween(routeKey, startStopIndex, endStopIndex) {{
     const route = routes[routeKey];
     const result = [];
 
-    if (!route) {{
+    if (!route || !isRouteEnabled(routeKey)) {{
         return result;
     }}
 
@@ -3143,17 +3454,8 @@ function directionsBetween(routeKey, startStopIndex, endStopIndex) {{
 
 function routeSpeedMetersPerMin(routeKey) {{
     const route = routes[routeKey];
-    const type = route ? route.route : "";
-
-    if (type === "tram") {{
-        return TRAM_SPEED_M_PER_MIN;
-    }}
-
-    if (type === "trolleybus") {{
-        return TROLLEYBUS_SPEED_M_PER_MIN;
-    }}
-
-    return BUS_SPEED_M_PER_MIN;
+    const mode = route ? (route.mode || route.route) : "bus";
+    return MODE_SPEEDS[mode] ?? BUS_SPEED_M_PER_MIN;
 }}
 
 function geometryLengthMeters(geometry) {{
@@ -3298,10 +3600,10 @@ function prepareItineraryMetrics(itinerary) {{
 
     itinerary.transitMeters = transitMeters;
     itinerary.boardings = boardings;
-    itinerary.totalMinutes =
-        walkTime +
-        transitMinutes +
-        boardings * BOARDING_WAIT_MIN;
+    const waitingMinutes = candidateLegs(itinerary).reduce(
+        (total, leg) => total + boardingWaitForRoute(leg.routeKey), 0
+    );
+    itinerary.totalMinutes = walkTime + transitMinutes + waitingMinutes;
     itinerary.generalizedMinutes =
         itinerary.totalMinutes +
         walkTime * WALK_PREFERENCE_EXTRA;
@@ -3379,7 +3681,9 @@ function roughItineraryMinutes(itinerary) {{
     return (
         itinerary.walkMeters / WALK_SPEED_M_PER_MIN +
         itinerary.rideStops * ROUGH_STOP_MIN +
-        boardings * BOARDING_WAIT_MIN
+        (boardings ? candidateLegs(itinerary).reduce(
+            (total, leg) => total + boardingWaitForRoute(leg.routeKey), 0
+        ) : 0)
     );
 }}
 
@@ -5078,6 +5382,7 @@ function selectionKey() {{
         selectedPoint.lat.toFixed(6),
         selectedPoint.lon.toFixed(6),
         walkRadius.toFixed(1),
+        Array.from(enabledModes).sort().join(","),
         String(maxTransfers),
         Number.isFinite(maxTravelMinutes)
             ? maxTravelMinutes.toFixed(0)
@@ -5488,7 +5793,7 @@ function boardingOptionsAtStop(stopIndex) {{
     for (const routeKey of stop.routes) {{
         const route = routes[routeKey];
 
-        if (!route) {{
+        if (!route || !isRouteEnabled(routeKey)) {{
             continue;
         }}
 
@@ -5556,7 +5861,8 @@ function reachabilitySearchKey() {{
     return [
         selectedPoint.lat.toFixed(6),
         selectedPoint.lon.toFixed(6),
-        walkRadius.toFixed(1)
+        walkRadius.toFixed(1),
+        Array.from(enabledModes).sort().join(",")
     ].join(":");
 }}
 
@@ -5978,7 +6284,7 @@ function seedRaptorRound(boardSources, roundIndex) {{
                     pos: option.boardPos,
                     transfersUsed: roundIndex,
                     elapsedMinutes:
-                        source.elapsedMinutes + BOARDING_WAIT_MIN,
+                        source.elapsedMinutes + boardingWaitForRoute(option.routeKey),
                     walkMeters: source.walkMeters,
                     initialWalk: source.initialWalk,
                     rideStops: source.rideStops,
@@ -6787,6 +7093,23 @@ function scheduleRender() {{
             }}
         }}
     );
+}}
+
+for (const input of modeInputs) {{
+    input.addEventListener("change", () => {{
+        enabledModes = new Set(
+            modeInputs.filter(item => item.checked).map(item => item.value)
+        );
+        nearbyStopCache.clear();
+        boardingOptionsCache.clear();
+        reachabilitySearchCache.clear();
+        itineraryCache.clear();
+        analysisCacheKey = null;
+        analysisCache = null;
+        selectedRouteFocus = null;
+        tripAlternativeIndex = 0;
+        scheduleRender();
+    }});
 }}
 
 walkTimeInput.addEventListener(
