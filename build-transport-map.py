@@ -16,7 +16,7 @@ from pathlib import Path
 import osmium
 
 EARTH_RADIUS_M = 6371000.0
-PROJECT_VERSION = "0.2.3"
+PROJECT_VERSION = "0.2.5"
 
 
 def parse_args():
@@ -109,7 +109,7 @@ NETWORK = (
     "\u0442\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442"
 )
 SURFACE_MODES = {"bus", "tram", "trolleybus"}
-RAIL_ROUTE_TYPES = {"subway", "train", "light_rail"}
+RAIL_ROUTE_TYPES = {"subway", "train", "light_rail", "railway"}
 SUPPORTED_ROUTE_TYPES = SURFACE_MODES | RAIL_ROUTE_TYPES
 MCD_REF_PATTERN = re.compile(
     r"(?<![A-Za-z\u0410-\u042f\u0430-\u044f0-9])"
@@ -145,7 +145,22 @@ def transport_mode(tags, route_type):
     network = (tags.get("network") or "").casefold()
     name = (tags.get("name") or "").casefold()
     ref = (tags.get("ref") or "").strip()
-    text = " ".join((network, name, ref.casefold()))
+    text = " ".join(
+        (tags.get(key) or "").casefold()
+        for key in (
+            "network",
+            "network:short",
+            "name",
+            "name:ru",
+            "alt_name",
+            "official_name",
+            "short_name",
+            "description",
+            "ref",
+            "line",
+            "brand",
+        )
+    )
 
     if route_type in SURFACE_MODES:
         return route_type if network == NETWORK.casefold() else None
@@ -154,7 +169,7 @@ def transport_mode(tags, route_type):
         return None
 
     if any(
-        value in text for value in (MCC_SHORT, MCC_FULL, "moscow central circle")
+        value in text for value in (MCC_SHORT, MCC_FULL, "moscow central circle", "mcc")
     ) or (ref == "14" and route_type in RAIL_ROUTE_TYPES):
         return "mcc"
 
@@ -264,7 +279,7 @@ def build_cache(cache_dir, update=False, rebuild=False):
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     source = cache_dir / "central-fed-district.osm.pbf"
-    transport_pbf = cache_dir / "moscow-transport-v3.osm.pbf"
+    transport_pbf = cache_dir / "moscow-transport-v4.osm.pbf"
 
     if update:
         print("Downloading fresh Central Federal District data...")
@@ -317,7 +332,13 @@ def station_in_area(lon, lat):
 
 
 def is_station(tags):
-    return tags.get("railway") in ("station", "halt") and bool(tags.get("name"))
+    if not tags.get("name"):
+        return False
+    if tags.get("railway") in ("station", "halt"):
+        return True
+    if tags.get("public_transport") == "station":
+        return True
+    return tags.get("railway") == "platform" and tags.get("train") == "yes"
 
 
 class TransportMasterDiscovery(osmium.SimpleHandler):
@@ -494,6 +515,7 @@ class ObjectHandler(osmium.SimpleHandler):
                 "name": node.tags.get("name"),
                 "subway": node.tags.get("station") == "subway"
                 or node.tags.get("subway") == "yes",
+                "mcc": transport_mode(node.tags, "train") == "mcc",
             }
         if node.id not in self.node_ids:
             return
@@ -544,6 +566,7 @@ class ObjectHandler(osmium.SimpleHandler):
                 "name": way.tags.get("name"),
                 "subway": way.tags.get("station") == "subway"
                 or way.tags.get("subway") == "yes",
+                "mcc": transport_mode(way.tags, "train") == "mcc",
             }
         if way.id in self.stop_way_ids:
             self.objects[f"w{way.id}"] = {
@@ -770,6 +793,194 @@ def fallback_route_geometry(route, objects):
     return {"type": "LineString", "coordinates": coords}
 
 
+# Ordered clockwise along the Moscow Central Circle, starting at Okruzhnaya.
+# Only the names are fixed. Coordinates are always read from the user's OSM PBF.
+MCC_STATION_NAMES = (
+    ("\u041e\u043a\u0440\u0443\u0436\u043d\u0430\u044f",),
+    ("\u0412\u043b\u0430\u0434\u044b\u043a\u0438\u043d\u043e",),
+    (
+        "\u0411\u043e\u0442\u0430\u043d\u0438\u0447\u0435\u0441\u043a"
+        "\u0438\u0439 \u0441\u0430\u0434",
+    ),
+    ("\u0420\u043e\u0441\u0442\u043e\u043a\u0438\u043d\u043e",),
+    ("\u0411\u0435\u043b\u043e\u043a\u0430\u043c\u0435\u043d\u043d" "\u0430\u044f",),
+    (
+        "\u0411\u0443\u043b\u044c\u0432\u0430\u0440 \u0420\u043e"
+        "\u043a\u043e\u0441\u0441\u043e\u0432\u0441\u043a\u043e\u0433"
+        "\u043e",
+    ),
+    ("\u041b\u043e\u043a\u043e\u043c\u043e\u0442\u0438\u0432",),
+    ("\u0418\u0437\u043c\u0430\u0439\u043b\u043e\u0432\u043e",),
+    (
+        "\u0421\u043e\u043a\u043e\u043b\u0438\u043d\u0430\u044f "
+        "\u0413\u043e\u0440\u0430",
+    ),
+    (
+        "\u0428\u043e\u0441\u0441\u0435 \u042d\u043d\u0442\u0443"
+        "\u0437\u0438\u0430\u0441\u0442\u043e\u0432",
+    ),
+    ("\u0410\u043d\u0434\u0440\u043e\u043d\u043e\u0432\u043a\u0430",),
+    (
+        "\u041d\u0438\u0436\u0435\u0433\u043e\u0440\u043e\u0434\u0441"
+        "\u043a\u0430\u044f",
+    ),
+    (
+        "\u041d\u043e\u0432\u043e\u0445\u043e\u0445\u043b\u043e\u0432"
+        "\u0441\u043a\u0430\u044f",
+    ),
+    ("\u0423\u0433\u0440\u0435\u0448\u0441\u043a\u0430\u044f",),
+    ("\u0414\u0443\u0431\u0440\u043e\u0432\u043a\u0430",),
+    (
+        "\u0410\u0432\u0442\u043e\u0437\u0430\u0432\u043e\u0434\u0441"
+        "\u043a\u0430\u044f",
+    ),
+    ("\u0417\u0418\u041b",),
+    ("\u0412\u0435\u0440\u0445\u043d\u0438\u0435 \u041a\u043e" "\u0442\u043b\u044b",),
+    ("\u041a\u0440\u044b\u043c\u0441\u043a\u0430\u044f",),
+    (
+        "\u041f\u043b\u043e\u0449\u0430\u0434\u044c \u0413\u0430"
+        "\u0433\u0430\u0440\u0438\u043d\u0430",
+    ),
+    ("\u041b\u0443\u0436\u043d\u0438\u043a\u0438",),
+    ("\u041a\u0443\u0442\u0443\u0437\u043e\u0432\u0441\u043a\u0430" "\u044f",),
+    (
+        "\u0414\u0435\u043b\u043e\u0432\u043e\u0439 \u0446\u0435" "\u043d\u0442\u0440",
+        "\u041c\u043e\u0441\u043a\u0432\u0430-\u0421\u0438\u0442" "\u0438",
+    ),
+    ("\u0428\u0435\u043b\u0435\u043f\u0438\u0445\u0430",),
+    ("\u0425\u043e\u0440\u043e\u0448\u0451\u0432\u043e",),
+    ("\u0417\u043e\u0440\u0433\u0435",),
+    ("\u041f\u0430\u043d\u0444\u0438\u043b\u043e\u0432\u0441\u043a" "\u0430\u044f",),
+    ("\u0421\u0442\u0440\u0435\u0448\u043d\u0435\u0432\u043e",),
+    ("\u0411\u0430\u043b\u0442\u0438\u0439\u0441\u043a\u0430\u044f",),
+    ("\u041a\u043e\u043f\u0442\u0435\u0432\u043e",),
+    ("\u041b\u0438\u0445\u043e\u0431\u043e\u0440\u044b",),
+)
+
+
+def mcc_station_name(name):
+    name = name.casefold().replace("\u0451", "\u0435")
+    name = name.split("(")[0].strip()
+    return name
+
+
+def recover_mcc_ring(objects, stop_routes, stop_relations, route_features):
+    """Fallback when route relations fail to expose most MCC stations.
+
+    This is a station-to-station approximation, not a railway track trace.
+    """
+    existing_ids = {
+        stop_id
+        for feature in route_features
+        if feature["properties"]["mode"] == "mcc"
+        for stop_id in feature["properties"]["stops"]
+    }
+    expected_names = {
+        mcc_station_name(alias) for aliases in MCC_STATION_NAMES for alias in aliases
+    }
+    present_names = {
+        mcc_station_name(objects.objects[key]["name"])
+        for key in existing_ids
+        if key in objects.objects and objects.objects[key].get("name")
+    }
+    if len(present_names & expected_names) >= len(MCC_STATION_NAMES):
+        return
+
+    candidates = defaultdict(list)
+    for key, station in objects.stations.items():
+        if station["subway"]:
+            continue
+        lon, lat = station["lon"], station["lat"]
+        if not (37.40 <= lon <= 37.86 and 55.66 <= lat <= 55.91):
+            continue
+        candidates[mcc_station_name(station["name"])].append((key, station))
+
+    selected = []
+    missing = []
+    for names in MCC_STATION_NAMES:
+        matches = [
+            item
+            for alias in names
+            for item in candidates.get(mcc_station_name(alias), [])
+        ]
+        if not matches:
+            missing.append(names[0])
+            continue
+        # Prefer a named rail station over a duplicate subway-station feature.
+        matches.sort(
+            key=lambda item: (
+                not item[1].get("mcc", False),
+                item[0].startswith("w"),
+            )
+        )
+        selected.append(matches[0])
+
+    print(
+        f"MCC station fallback: found {len(selected)}/31 stations in OSM; "
+        f"existing route stops: {len(existing_ids)}"
+    )
+    if missing:
+        print("  missing MCC stations: " + ", ".join(missing))
+    if len(selected) < 24:
+        print("WARNING: MCC station fallback requires at least 24 stations")
+        return
+
+    route_key = "mcc:osm-station-ring-fallback"
+    station_ids = [key for key, _station in selected]
+    points = [
+        [round(station["lon"], 5), round(station["lat"], 5)]
+        for _key, station in selected
+    ]
+    forward_ids = station_ids + [station_ids[0]]
+    backward_ids = [station_ids[0]] + list(reversed(station_ids[1:])) + [station_ids[0]]
+    forward_points = points + [points[0]]
+    backward_points = [points[0]] + list(reversed(points[1:])) + [points[0]]
+
+    for key, station in selected:
+        objects.objects.setdefault(
+            key,
+            {
+                "lon": station["lon"],
+                "lat": station["lat"],
+                "name": station["name"],
+                "ref": None,
+            },
+        )
+        stop_routes[key].add(route_key)
+        stop_relations[key].add(-1)
+
+    for direction, (ids, coords) in enumerate(
+        (
+            (forward_ids, forward_points),
+            (backward_ids, backward_points),
+        )
+    ):
+        route_features.append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "feature_type": "route",
+                    "route_key": route_key,
+                    "route": "train",
+                    "mode": "mcc",
+                    "ref": "14",
+                    "relation_id": -(direction + 1),
+                    "from": selected[0][1]["name"],
+                    "to": selected[0][1]["name"],
+                    "roundtrip": "yes",
+                    "stops": ids,
+                    "stop_roles": ["stop"] * len(ids),
+                    "approximate_geometry": True,
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coords,
+                },
+            }
+        )
+    print("WARNING: using approximate MCC ring between OSM station positions")
+
+
 def build_transport_data(transport_pbf):
     print("Reading route relations...")
     relations = RelationHandler()
@@ -814,8 +1025,10 @@ def build_transport_data(transport_pbf):
     for route in relations.routes:
         relation_id = route["relation_id"]
         master_key = master_for_relation.get(relation_id)
-        mode = route["mode"] or (
-            master_info[master_key]["mode"] if master_key is not None else None
+        # The route_master carries the line identity. A child route=subway
+        # without MCC tags is otherwise incorrectly classified as metro.
+        mode = (
+            master_info[master_key]["mode"] if master_key is not None else route["mode"]
         )
         if mode is None:
             continue
@@ -871,6 +1084,8 @@ def build_transport_data(transport_pbf):
                 "geometry": geometry,
             }
         )
+
+    recover_mcc_ring(objects, stop_routes, stop_relations, route_features)
 
     stop_features = []
 
@@ -1988,6 +2203,14 @@ def build_html(
             background: rgb(124 58 237 / 0.12);
         }}
 
+        #legend-mcc[hidden] {{
+            display: none;
+        }}
+
+        .legend-route-mcc {{
+            border-top-color: #b45309 !important;
+        }}
+
         .legend-route {{
             display: inline-block;
 
@@ -2777,7 +3000,11 @@ def build_html(
     </div>
     <div class="legend-row">
         <span class="legend-route" aria-hidden="true">x</span>
-        <span>selected routes</span>
+        <span>reachable routes</span>
+    </div>
+    <div id="legend-mcc" class="legend-row" hidden>
+        <span class="legend-route legend-route-mcc" aria-hidden="true">x</span>
+        <span>MCC network (full line)</span>
     </div>
 </div>
 
@@ -3012,6 +3239,7 @@ function createMapPane(name, zIndex, pointerEvents) {{
 }}
 
 createMapPane("coveragePane", 410, "none");
+createMapPane("mccNetworkPane", 415, "none");
 createMapPane("routePane", 420, "none");
 createMapPane("tripWalkPane", 430, "none");
 createMapPane("tripRoutePane", 440, "none");
@@ -3071,6 +3299,7 @@ for (const transferCount of [2, 1, 0]) {{
 
 map.getPane("coveragePane").appendChild(coverageSvg);
 
+const mccNetworkLayer = L.layerGroup().addTo(map);
 const twoTransferRouteLayer = L.layerGroup().addTo(map);
 const transferRouteLayer = L.layerGroup().addTo(map);
 const directRouteLayer = L.layerGroup().addTo(map);
@@ -3327,6 +3556,85 @@ function drawOrigin(lat, lon) {{
             pane: "originPane"
         }}
     ).addTo(originLayer);
+}}
+
+// Context layer: the full MCC line is separate from reachable route highlights.
+// Use OSM track geometry if present, or a clearly approximate stop chain.
+function mccDirectionGeometry(direction) {{
+    const fallback = stopChainGeometry(
+        direction, 0, direction.stops.length - 1
+    );
+    const sourceLines = geometryLines(direction.geometry);
+
+    if (!sourceLines.some(line => line.length >= 2)) {{
+        return fallback;
+    }}
+
+    if (!fallback) {{
+        return direction.geometry;
+    }}
+
+    // Incomplete OSM ways may contain only a fraction of the ring.
+    // Validate that the ordered line stays near most recorded stops.
+    const anchors = getDirectionShape(direction).anchors;
+    const closeStops = anchors.filter(
+        anchor => anchor && anchor.distance <= 300.0
+    ).length;
+
+    if (closeStops < 0.8 * direction.stops.length) {{
+        return fallback;
+    }}
+
+    return direction.geometry;
+}}
+
+function drawMccNetwork() {{
+    mccNetworkLayer.clearLayers();
+    const showMcc = enabledModes.has("mcc");
+    document.getElementById("legend-mcc").hidden = !showMcc;
+
+    if (!showMcc) {{
+        return;
+    }}
+
+    let directionCount = 0;
+    let visibleCount = 0;
+    const uniqueStops = new Set();
+
+    for (const route of Object.values(routes)) {{
+        if ((route.mode || route.route) !== "mcc") {{
+            continue;
+        }}
+
+        for (const direction of route.directions) {{
+            ++directionCount;
+            direction.stops.forEach(stopIndex => uniqueStops.add(stopIndex));
+            const geometry = mccDirectionGeometry(direction);
+
+            if (!geometry) {{
+                continue;
+            }}
+
+            L.geoJSON(
+                {{ type: "Feature", properties: {{}}, geometry: geometry }},
+                {{
+                    pane: "mccNetworkPane",
+                    interactive: false,
+                    style: {{ color: "#b45309", weight: 3, opacity: 0.65 }}
+                }}
+            ).addTo(mccNetworkLayer);
+            ++visibleCount;
+        }}
+    }}
+
+    console.info(
+        "MCC network:", directionCount, "directions,",
+        uniqueStops.size, "stations,", visibleCount, "drawn geometries"
+    );
+
+    if (visibleCount === 0) {{
+        console.warn("No MCC route geometry in transport data");
+    }}
 }}
 
 function drawRoute(routeKey, transferCount, reachableSegments) {{
@@ -4816,6 +5124,35 @@ function routeSinglePartGeometry(part) {{
     }};
 }}
 
+function stopChainGeometry(direction, startPos, endPos) {{
+    if (!direction || !direction.stops || endPos <= startPos) {{
+        return null;
+    }}
+
+    const coords = [];
+
+    for (let pos = startPos; pos <= endPos; ++pos) {{
+        const stop = stops[direction.stops[pos]];
+
+        if (!stop || !Number.isFinite(stop.lon) || !Number.isFinite(stop.lat)) {{
+            continue;
+        }}
+
+        const coord = [stop.lon, stop.lat];
+        const previous = coords[coords.length - 1];
+
+        if (!previous || previous[0] !== coord[0] || previous[1] !== coord[1]) {{
+            coords.push(coord);
+        }}
+    }}
+
+    if (coords.length < 2) {{
+        return null;
+    }}
+
+    return {{ type: "LineString", coordinates: coords }};
+}}
+
 function routeSegmentGeometry(leg) {{
     const lines = [];
 
@@ -4824,13 +5161,18 @@ function routeSegmentGeometry(leg) {{
             continue;
         }}
 
-        const geometry = routeSinglePartGeometry(part);
+        // Rail route ways may be incomplete or unordered in OSM.
+        // Never hide an otherwise reachable segment merely because map
+        // matching failed: join its ordered stations as a fallback.
+        const geometry = routeSinglePartGeometry(part) || stopChainGeometry(
+            part.direction,
+            part.startPos,
+            part.endPos
+        );
 
-        if (!geometry) {{
-            continue;
+        if (geometry) {{
+            lines.push(...geometryLines(geometry));
         }}
-
-        lines.push(...geometryLines(geometry));
     }}
 
     if (lines.length === 0) {{
@@ -7402,6 +7744,7 @@ for (const input of modeInputs) {{
         analysisCache = null;
         selectedRouteFocus = null;
         tripAlternativeIndex = 0;
+        drawMccNetwork();
         scheduleRender();
     }});
 }}
@@ -7563,6 +7906,7 @@ map.on(
 );
 
 updateControls();
+drawMccNetwork();
 }})().catch(error => {{
     console.error(error);
     alert("Failed to initialize transport map: " + error.message);

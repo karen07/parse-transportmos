@@ -10,6 +10,13 @@ background are loaded from the network.
 OpenFreeMap needs no API key. The only map background is Bright, with no style selector.
 The updated OSM extraction preserves child routes of route_master relations and attempts to
 recover railway stations omitted from route stops by snapping mapped stations to rail routes.
+If the MCC toggle is enabled, its entire available line is shown as a thin brown
+reference line, independently of the colored reachable route sections. If an OSM
+route segment cannot be matched to railway geometry, the browser renders an
+approximate station-to-station segment rather than hiding it.
+When MCC route relations are incomplete, the generator can build an approximate ring from
+at least 24 named MCC station objects found in the local OSM extract. This station-to-station
+fallback is not the actual railway track geometry.
 
 The page can calculate approximate reachable areas with zero, one, or two transfers and can
 build route variants to a selected destination. It is designed for exploratory accessibility
@@ -27,6 +34,11 @@ Moscow Transport Reachability Map - интерактивная браузерн�
 MapLibre GL и векторная подложка Bright от OpenFreeMap загружаются из сети.
 Переключателя стилей нет. Пропущенные станции метро и железнодорожных линий дополнительно
 ищутся среди самостоятельных объектов OSM и привязываются к геометрии маршрутов.
+При включённом МЦК показывается тонкая коричневая линия всей найденной сети,
+независимо от цветных достижимых участков. Если геометрия OSM не подходит для
+отрисовки, участок соединяется по координатам последовательных станций.
+Если отношения МЦК неполные, из станций OSM может строиться приблизительное кольцо.
+Это соединение станций прямыми сегментами, а не точная геометрия железной дороги.
 
 Страница может рассчитывать приблизительные зоны доступности без пересадок, с одной или двумя
 пересадками, а также строить варианты маршрута до выбранной точки. Проект предназначен для
@@ -56,7 +68,11 @@ https://bus-routing.e7s.site/
 - построение маршрута до произвольной точки;
 - несколько вариантов маршрута;
 - подложка OpenFreeMap Bright без переключателя стилей;
+- отдельная тонкая линия МЦК при включенном режиме МЦК;
+- восстановление недоступных для отрисовки участков по станциям;
 - восстановление части отсутствующих станций по отдельным объектам OSM;
+- резервное построение МЦК по 24-31 станциям OSM при неполных маршрутах;
+- отчет о найденных станциях МЦК и предупреждение об упрощенной геометрии;
 - адаптивный интерфейс для desktop/mobile.
 
 Расстояние пешком рассчитывается по прямой, а время движения транспорта является оценочным,
@@ -85,7 +101,7 @@ python3 build-transport-map.py
 routes.html
 cache/
   central-fed-district.osm.pbf
-  moscow-transport-v3.osm.pbf
+  moscow-transport-v4.osm.pbf
 ```
 
 После этого достаточно открыть `routes.html` в браузере. Для отображения подложки требуется
@@ -135,7 +151,7 @@ python3 build-transport-map.py --rebuild
 ```
 
 Обычный запуск повторно использует существующий кеш. В версии 0.2.3 имя транспортного кеша
-изменено на `moscow-transport-v3.osm.pbf` для принудительной пересборки транспорта по
+изменено на `moscow-transport-v4.osm.pbf` для принудительной пересборки транспорта по
 обновлённым правилам OSM. Исходный `central-fed-district.osm.pbf` скачивать повторно не нужно,
 если он уже есть. Для действительно свежего источника используйте `--update`.
 
@@ -204,7 +220,38 @@ MapLibre GL и векторные тайлы OpenFreeMap загружаются 
 поддержка WebGL необходима в браузере.
 
 Подложка всегда использует OpenFreeMap Bright. Для новой обработки станций необходимо
-пересоздать транспортный кеш: генератор автоматически создаст версию `v3`.
+пересоздать транспортный кеш: генератор автоматически создаст версию `v4`.
 
 OpenFreeMap: https://openfreemap.org/ и https://openfreemap.org/quick_start/
 OSM Tile Usage Policy: https://operations.osmfoundation.org/policies/tiles/
+
+## MCC line rendering (v0.2.5)
+
+An enabled MCC mode now shows the full *available* MCC network as a thin brown
+reference line. It is intentionally independent of the reachability-colored
+segments, so an inaccessible section is not mistaken for a reachable one.
+The legend identifies the two kinds of line. If OSM route ways are incomplete
+or cannot be matched to most stations, the line is approximated by connecting
+ordered station coordinates. This approximation does not claim to follow tracks.
+
+The in-browser console logs the number of MCC route directions, stops and
+rendered line geometries. If no route geometry is available, inspect the
+building diagnostics below: this drawing fix cannot create missing OSM data.
+
+This is an HTML/JavaScript rendering change. It reuses the existing
+`moscow-transport-v4.osm.pbf` cache without re-extraction.
+
+## MCC data diagnostics (v0.2.4)
+
+When MCC does not appear, check the console after building:
+
+```text
+MCC station fallback: found N/31 stations in OSM; existing route stops: M
+  mcc: K route directions
+```
+
+If the full route relation is missing, the fallback uses local OSM station coordinates
+and connects them in station order (straight segments, not actual tracks). If fewer than
+24 stations are found, the fallback is not constructed and a warning is printed.
+This does not modify the source PBF. The versioned v4 transport cache is rebuilt
+on the first run; later runs reuse it. Enable the MCC toggle in the map to show it.
