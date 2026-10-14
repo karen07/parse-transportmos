@@ -27,7 +27,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.5.4"
+PROJECT_VERSION = "0.5.6"
 
 
 # OSM extraction and normalization
@@ -1602,7 +1602,22 @@ PAGE_HTML = r"""<!doctype html>
 
     <div id="info-content">
         <div class="info-intro">
-            <div id="info-title">Transport reachability</div>
+            <div class="info-heading-row">
+                <div id="info-title">Transport reachability</div>
+                <button
+                    id="reset-origin"
+                    type="button"
+                    title="Clear the selected start point and route"
+                    aria-label="Clear selected start point and route"
+                    disabled
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"></circle>
+                        <path d="M9 9l6 6m0-6-6 6"></path>
+                    </svg>
+                    <span>Reset</span>
+                </button>
+            </div>
             <div class="info-row">
                 Click once for a start point. Double-click anywhere for
                 route to any point while keeping reachability mode.
@@ -2024,6 +2039,55 @@ MAP_CSS = r"""
             line-height: 1.35;
             font-weight: 700;
             letter-spacing: -0.015em;
+        }
+
+        .info-heading-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        #reset-origin {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            flex-shrink: 0;
+            min-height: 32px;
+            padding: 5px 9px;
+            border: 1px solid rgb(203 213 225);
+            border-radius: 9px;
+            color: rgb(51 65 85);
+            background: #fff;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        #reset-origin svg {
+            width: 15px;
+            height: 15px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+        }
+
+        #reset-origin:not(:disabled):hover {
+            color: #b91c1c;
+            border-color: #fca5a5;
+            background: #fef2f2;
+        }
+
+        #reset-origin:disabled {
+            opacity: 0.4;
+            cursor: default;
+        }
+
+        #reset-origin:focus-visible {
+            outline: 3px solid rgb(147 197 253 / 0.65);
+            outline-offset: 2px;
         }
 
         .info-intro {
@@ -3332,6 +3396,7 @@ const tripTitle = document.getElementById("trip-title");
 const tripAlternatives = document.getElementById("trip-alternatives");
 const tripSteps = document.getElementById("trip-steps");
 const tripBack = document.getElementById("trip-back");
+const resetOrigin = document.getElementById("reset-origin");
 
 const TRAVEL_TIME_INFINITY_SLIDER_VALUE = 185;
 let walkMinutes = Number(walkTimeInput.value);
@@ -3353,7 +3418,7 @@ const MAP_DOUBLE_CLICK_DELAY_MS = 260;
 let pendingMapClickTimer = null;
 let suppressMapClickUntil = 0;
 let displayedStopIndexes = new Set();
-let stopMarkers = new Map();
+// Stop dots use one Canvas, not one Leaflet object per stop.
 const directionShapeCache = new WeakMap();
 const routeContinuationCache = new WeakMap();
 const routeLegTraversalCache = new Map();
@@ -3439,6 +3504,22 @@ const twoTransferRouteLayer = L.layerGroup().addTo(map);
 const transferRouteLayer = L.layerGroup().addTo(map);
 const directRouteLayer = L.layerGroup().addTo(map);
 const stopLayer = L.layerGroup().addTo(map);
+const stopCanvas = document.createElement("canvas");
+stopCanvas.style.position = "absolute";
+stopCanvas.style.pointerEvents = "none";
+map.getPane("stopPane").appendChild(stopCanvas);
+const stopContext = stopCanvas.getContext("2d", {alpha: true});
+let stopCanvasOrigin = L.point(0, 0);
+let stopCanvasScale = 1;
+let stopCanvasRedrawFrame = null;
+let stopCanvasRepaintTimer = null;
+let stopCanvasZooming = false;
+let stopCanvasRedrawItems = [];
+let stopCanvasRedrawIndex = 0;
+let stopCanvasBounds = null;
+const visibleStopIndexes = new Set();
+const stopHitGrid = new Map();
+const STOP_HIT_CELL = 32;
 const originLayer = L.layerGroup().addTo(map);
 const tripWalkLayer = L.layerGroup().addTo(map);
 const tripRouteLayer = L.layerGroup().addTo(map);
@@ -3961,6 +4042,7 @@ function walkXYToLatLng(point) {
 }
 
 function clearResult() {
+    clearProgressiveStops();
     pendingCoverageDisks = [[], [], []];
     activeCoverageDisks = [[], [], []];
     for (let i = 0; i < 3; ++i) activeCoverageLines[i] = [];
@@ -3975,7 +4057,8 @@ function clearResult() {
     tripRouteLayer.clearLayers();
     tripMarkerLayer.clearLayers();
     displayedStopIndexes.clear();
-    stopMarkers.clear();
+    cancelStopCanvasRedraw();
+    clearStopPixels();
 }
 
 function routeLabel(route) {
@@ -4604,123 +4687,263 @@ function stopRouteDetails(stopIndex) {
     return rows.join("");
 }
 
+// A single viewport-sized Canvas replaces thousands of Leaflet circleMarkers.
+// All hit testing and popups are handled by the existing map events.
+const stopOutlineColors = ["#1565c0", "#ef6c00", "#6d28d9"];
+const stopFillColors = ["#42a5f5", "#ffb74d", "#a78bfa"];
+
 function stopMarkerRadiusForZoom() {
     return 2.5;
 }
 
-function updateStopMarkerSizes() {
-    const radius = stopMarkerRadiusForZoom();
+function positionStopCanvas() {
+    const size = map.getSize();
+    const scale = Math.min(window.devicePixelRatio || 1, 1.5);
+    stopCanvasOrigin = map.containerPointToLayerPoint([0, 0]);
+    stopCanvasScale = scale;
+    stopCanvasBounds = map.getBounds().pad(0.02);
+    L.DomUtil.setPosition(stopCanvas, stopCanvasOrigin);
+    stopCanvas.style.width = size.x + "px";
+    stopCanvas.style.height = size.y + "px";
+    const width = Math.max(1, Math.round(size.x * scale));
+    const height = Math.max(1, Math.round(size.y * scale));
+    if (stopCanvas.width !== width) stopCanvas.width = width;
+    if (stopCanvas.height !== height) stopCanvas.height = height;
+    stopContext.setTransform(scale, 0, 0, scale, 0, 0);
+}
 
-    for (const marker of stopMarkers.values()) {
-        if (marker && typeof marker.setRadius === "function") {
-            marker.setRadius(radius);
-        }
+function clearStopPixels() {
+    stopContext.clearRect(
+        0, 0, stopCanvas.width / stopCanvasScale,
+        stopCanvas.height / stopCanvasScale
+    );
+    visibleStopIndexes.clear();
+    stopHitGrid.clear();
+}
+
+function paintStopDot(stopIndex, tier) {
+    const stop = stops[stopIndex];
+    if (!stop || !stopCanvasBounds.contains([stop.lat, stop.lon])) {
+        return;
+    }
+    const point = map.latLngToLayerPoint([stop.lat, stop.lon]);
+    const x = point.x - stopCanvasOrigin.x;
+    const y = point.y - stopCanvasOrigin.y;
+    stopContext.beginPath();
+    stopContext.arc(x, y, stopMarkerRadiusForZoom(), 0, Math.PI * 2);
+    stopContext.fillStyle = stopFillColors[tier];
+    stopContext.strokeStyle = stopOutlineColors[tier];
+    stopContext.lineWidth = 1;
+    stopContext.fill();
+    stopContext.stroke();
+    if (!visibleStopIndexes.has(stopIndex)) {
+        const key = Math.floor(x / STOP_HIT_CELL) + ":" +
+            Math.floor(y / STOP_HIT_CELL);
+        const list = stopHitGrid.get(key) || [];
+        list.push(stopIndex);
+        stopHitGrid.set(key, list);
+        visibleStopIndexes.add(stopIndex);
     }
 }
 
-function drawStop(stopIndex, transferCount) {
-    const stop = stops[stopIndex];
-    const colors = ["#1565c0", "#ef6c00", "#6d28d9"];
-    const fillColors = ["#42a5f5", "#ffb74d", "#a78bfa"];
-    const color = colors[transferCount];
-    const fillColor = fillColors[transferCount];
-    const radius = stopMarkerRadiusForZoom();
-    const weight = 1;
+function cancelStopCanvasRedraw() {
+    if (stopCanvasRedrawFrame !== null) {
+        cancelAnimationFrame(stopCanvasRedrawFrame);
+        stopCanvasRedrawFrame = null;
+    }
+    if (stopCanvasRepaintTimer !== null) {
+        clearTimeout(stopCanvasRepaintTimer);
+        stopCanvasRepaintTimer = null;
+    }
+    stopCanvasRedrawItems = [];
+    stopCanvasRedrawIndex = 0;
+}
 
-    const marker = L.circleMarker(
-        [stop.lat, stop.lon],
-        {
-            radius: radius,
-            weight: weight,
-            color: color,
-            fillColor: fillColor,
-            fillOpacity: 0.9,
-            bubblingMouseEvents: false,
-            pane: "stopPane"
-        }
+function paintStopCanvasFrame() {
+    stopCanvasRedrawFrame = null;
+    if (stopCanvasZooming) return;
+    const start = performance.now();
+    let count = 0;
+    while (stopCanvasRedrawIndex < stopCanvasRedrawItems.length &&
+           count < 100 && performance.now() - start < 3) {
+        const [stopIndex, tier] = stopCanvasRedrawItems[stopCanvasRedrawIndex++];
+        // A better route may have been discovered while the frame was pending.
+        paintStopDot(stopIndex, renderedStopTiers.get(stopIndex) ?? tier);
+        count++;
+    }
+    if (stopCanvasRedrawIndex < stopCanvasRedrawItems.length) {
+        stopCanvasRedrawFrame = requestAnimationFrame(paintStopCanvasFrame);
+    } else {
+        stopCanvasRedrawItems = [];
+        stopCanvasRedrawIndex = 0;
+    }
+}
+
+function redrawStopCanvas() {
+    cancelStopCanvasRedraw();
+    if (stopCanvasZooming) return;
+    positionStopCanvas();
+    clearStopPixels();
+    const bounds = map.getBounds().pad(0.02);
+    stopCanvasRedrawItems = Array.from(renderedStopTiers).filter(
+        ([index]) => bounds.contains([stops[index].lat, stops[index].lon])
     );
+    stopCanvasRedrawIndex = 0;
+    if (stopCanvasRedrawItems.length) {
+        stopCanvasRedrawFrame = requestAnimationFrame(paintStopCanvasFrame);
+    }
+}
 
-    const accessLabels = [
+function scheduleStopCanvasRepaint() {
+    if (stopCanvasRepaintTimer !== null || stopCanvasZooming) return;
+    stopCanvasRepaintTimer = setTimeout(() => {
+        stopCanvasRepaintTimer = null;
+        redrawStopCanvas();
+    }, 120);
+}
+
+function updateStopMarkerSizes() {
+    redrawStopCanvas();
+}
+
+function stopPopupContent(stopIndex, transferCount) {
+    const stop = stops[stopIndex];
+    const access = [
         TEXT.accessDirect,
         TEXT.accessTransfer,
         TEXT.accessTwoTransfers
-    ];
-    const access = accessLabels[transferCount];
-
-    marker.bindPopup(
-        "<b>" +
-        escapeHtml(stop.name || TEXT.stop) +
-        "</b><br>" +
-        access +
-        "<br><br>" +
+    ][transferCount];
+    return "<b>" + escapeHtml(stop.name || TEXT.stop) +
+        "</b><br>" + access + "<br><br>" +
         stopRouteDetails(stopIndex) +
-        "<br><span style=\"color:#666\">" +
-        TEXT.doubleClick +
-        "</span>"
-    );
+        "<br><span style=\"color:#666\">" + TEXT.doubleClick + "</span>";
+}
 
-    function stopMapSelection(event) {
-        suppressMapClickUntil = performance.now() + 600;
-
-        if (event.originalEvent) {
-            L.DomEvent.stop(event.originalEvent);
-        }
+function updateStopMarkerTier(stopIndex, transferCount) {
+    if (!renderedStopTiers.has(stopIndex)) {
+        drawStop(stopIndex, transferCount);
+        return;
     }
+    // Clearing a single dot may erase neighbors. Repaint in bounded frames.
+    scheduleStopCanvasRepaint();
+}
 
-    marker.on(
-        "click",
-        event => {
-            stopMapSelection(event);
-        }
-    );
-
-    marker.on(
-        "dblclick",
-        event => {
-            stopMapSelection(event);
-            marker.closePopup();
-            showTripToStop(stopIndex);
-        }
-    );
-
-    marker.addTo(stopLayer);
+function drawStop(stopIndex, transferCount) {
     displayedStopIndexes.add(stopIndex);
-    stopMarkers.set(stopIndex, marker);
+    renderedStopTiers.set(stopIndex, transferCount);
+    if (!stopCanvasZooming) paintStopDot(stopIndex, transferCount);
+}
+
+positionStopCanvas();
+
+// Marker creation must not wait for all route-search rounds to finish.
+// Queue a stop only once, and keep its best (fewest transfers) tier.
+const pendingStopTiers = new Map();
+const renderedStopTiers = new Map();
+const stopPaintQueue = [];
+let stopPaintCursor = 0;
+let stopPaintFrame = null;
+const progressiveStopCounts = [0, 0, 0];
+
+function clearProgressiveStops() {
+    cancelStopCanvasRedraw();
+    if (stopPaintFrame !== null) cancelAnimationFrame(stopPaintFrame);
+    stopPaintFrame = null;
+    stopPaintQueue.length = 0;
+    stopPaintCursor = 0;
+    pendingStopTiers.clear();
+    renderedStopTiers.clear();
+    progressiveStopCounts.fill(0);
+}
+
+function updateProgressiveStopCounts() {
+    for (let tier = 0; tier < 3; ++tier) {
+        const id = [
+            "direct-stop-count", "transfer-stop-count",
+            "two-transfer-stop-count"
+        ][tier];
+        document.getElementById(id).textContent = progressiveStopCounts[tier];
+    }
+}
+
+function paintProgressiveStops(token) {
+    stopPaintFrame = null;
+    if (token !== renderGeneration || !selectedPoint) return;
+    const started = performance.now();
+    let count = 0;
+    while (stopPaintCursor < stopPaintQueue.length && count < 48 &&
+           performance.now() - started < 3) {
+        const stopIndex = stopPaintQueue[stopPaintCursor++];
+        const tier = pendingStopTiers.get(stopIndex);
+        if (tier === undefined || renderedStopTiers.get(stopIndex) === tier) {
+            continue;
+        }
+        updateStopMarkerTier(stopIndex, tier);
+        renderedStopTiers.set(stopIndex, tier);
+        count++;
+    }
+    updateProgressiveStopCounts();
+    if (stopPaintCursor < stopPaintQueue.length) {
+        stopPaintFrame = requestAnimationFrame(() => paintProgressiveStops(token));
+    } else {
+        stopPaintQueue.length = 0;
+        stopPaintCursor = 0;
+    }
+}
+
+function queueProgressiveStop(stopIndex, tier, token) {
+    if (token !== renderGeneration || selectedRouteFocus) return;
+    if (tier < 0 || tier > 2 || !stops[stopIndex]) return;
+    const previous = pendingStopTiers.get(stopIndex);
+    if (previous !== undefined && previous <= tier) return;
+    if (previous !== undefined) progressiveStopCounts[previous]--;
+    progressiveStopCounts[tier]++;
+    pendingStopTiers.set(stopIndex, tier);
+    if (previous === undefined || renderedStopTiers.has(stopIndex)) {
+        stopPaintQueue.push(stopIndex);
+    }
+    if (stopPaintFrame === null) {
+        stopPaintFrame = requestAnimationFrame(() => paintProgressiveStops(token));
+    }
 }
 
 function nearestDisplayedStop(latlng, maxPixels) {
-    if (displayedStopIndexes.size === 0) {
-        return null;
-    }
-
+    if (!visibleStopIndexes.size) return null;
     const clickPoint = map.latLngToContainerPoint(latlng);
-    let bestStopIndex = null;
+    const gx = Math.floor(clickPoint.x / STOP_HIT_CELL);
+    const gy = Math.floor(clickPoint.y / STOP_HIT_CELL);
+    let bestIndex = null;
     let bestDistance2 = maxPixels * maxPixels;
-
-    for (const stopIndex of displayedStopIndexes) {
-        const stop = stops[stopIndex];
-        const point = map.latLngToContainerPoint(
-            [stop.lat, stop.lon]
-        );
-        const dx = point.x - clickPoint.x;
-        const dy = point.y - clickPoint.y;
-        const distance2 = dx * dx + dy * dy;
-
-        if (distance2 <= bestDistance2) {
-            bestDistance2 = distance2;
-            bestStopIndex = stopIndex;
+    const span = Math.ceil(maxPixels / STOP_HIT_CELL);
+    for (let dx = -span; dx <= span; ++dx) {
+        for (let dy = -span; dy <= span; ++dy) {
+            const cell = stopHitGrid.get((gx + dx) + ":" + (gy + dy));
+            if (!cell) continue;
+            for (const stopIndex of cell) {
+                const stop = stops[stopIndex];
+                const point = map.latLngToContainerPoint(
+                    [stop.lat, stop.lon]
+                );
+                const distance2 = (point.x - clickPoint.x) ** 2 +
+                    (point.y - clickPoint.y) ** 2;
+                if (distance2 <= bestDistance2) {
+                    bestDistance2 = distance2;
+                    bestIndex = stopIndex;
+                }
+            }
         }
     }
-
-    return bestStopIndex;
+    return bestIndex;
 }
 
 function openStopPopup(stopIndex) {
-    const marker = stopMarkers.get(stopIndex);
-
-    if (marker) {
-        marker.openPopup();
-    }
+    const stop = stops[stopIndex];
+    const tier = renderedStopTiers.get(stopIndex);
+    if (!stop || tier === undefined) return;
+    L.popup({maxWidth: 320})
+        .setLatLng([stop.lat, stop.lon])
+        .setContent(stopPopupContent(stopIndex, tier))
+        .openOn(map);
 }
 
 function stopDistanceMeters(aIndex, bIndex) {
@@ -7005,11 +7228,13 @@ function routeLegsFromBoard(routeKey, startDirection, startPos) {
     return result;
 }
 
-function collectReachableRouteData(evidence, legName) {
+function* collectReachableRouteDataSteps(evidence, legName) {
     const segmentsByRoute = new Map();
     const stopsByRoute = new Map();
 
+    let routeStopCounter = 0;
     for (const [stopIndex, paths] of evidence.entries()) {
+        if (++routeStopCounter % 32 === 0) yield null;
         for (const path of flattenEvidence(paths)) {
             const leg = path[legName];
 
@@ -7057,14 +7282,16 @@ function collectReachableRouteData(evidence, legName) {
     };
 }
 
-function collectBestArrivalMinutes(evidence) {
+function* collectBestArrivalMinutesSteps(evidence) {
     const result = new Map();
 
     if (!Number.isFinite(maxTravelMinutes)) {
         return result;
     }
 
+    let arrivalStopCounter = 0;
     for (const [stopIndex, paths] of evidence.entries()) {
+        if (++arrivalStopCounter % 32 === 0) yield null;
         let best = Infinity;
 
         for (const path of flattenEvidence(paths)) {
@@ -7615,11 +7842,13 @@ function addRaptorOnboardState(nodeLabels, queue, state) {
     return true;
 }
 
-function seedRaptorRound(boardSources, roundIndex) {
+function* seedRaptorRoundSteps(boardSources, roundIndex) {
     const nodeLabels = new Map();
     const queue = [];
 
+    let seededStops = 0;
     for (const [boardStopIndex, byLastRoute] of boardSources.entries()) {
+        if (++seededStops % 8 === 0) yield null;
         const sources = flattenRaptorSources(byLastRoute);
 
         for (const source of sources) {
@@ -7658,7 +7887,7 @@ function seedRaptorRound(boardSources, roundIndex) {
 }
 
 function* scanRaptorRoundSteps(boardSources, roundIndex, onEvidence=null) {
-    const seeded = seedRaptorRound(boardSources, roundIndex);
+    const seeded = yield* seedRaptorRoundSteps(boardSources, roundIndex);
     const nodeLabels = seeded.nodeLabels;
     const queue = seeded.queue;
     const evidence = new Map();
@@ -7820,7 +8049,7 @@ function* buildRaptorTransferSourcesSteps(evidence) {
 
     let scanned = 0;
     for (const [alightStopIndex, byPath] of evidence.entries()) {
-        if (++scanned % 4 === 0) yield null;
+        if (++scanned % 1 === 0) yield null;
         const candidates = bestRaptorTransferCandidates(byPath);
 
         for (const candidate of candidates) {
@@ -8044,7 +8273,7 @@ function filterEvidenceByTravelLimit(evidence) {
     return result;
 }
 
-function analyzeSelection() {
+function* analyzeSelectionSteps() {
     const key = selectionKey();
 
     if (key === analysisCacheKey && analysisCache) {
@@ -8065,7 +8294,9 @@ function analyzeSelection() {
     const directRoutes = new Set();
     const directDirectionIds = new Set();
 
+    let analyzed = 0;
     for (const paths of directEvidence.values()) {
+        if (++analyzed % 32 === 0) yield null;
         for (const path of flattenEvidence(paths)) {
             directRoutes.add(path.leg1.routeKey);
             directDirectionIds.add(relationKey(path.leg1.direction));
@@ -8083,6 +8314,7 @@ function analyzeSelection() {
     const transferOnlyStops = new Set();
 
     for (const [stopIndex, paths] of transferEvidence.entries()) {
+        if (++analyzed % 32 === 0) yield null;
         if (!directStops.has(stopIndex)) {
             transferOnlyStops.add(stopIndex);
         }
@@ -8105,6 +8337,7 @@ function analyzeSelection() {
     const twoTransferOnlyStops = new Set();
 
     for (const [stopIndex, paths] of twoTransferEvidence.entries()) {
+        if (++analyzed % 32 === 0) yield null;
         if (
             !directStops.has(stopIndex) &&
             !transferEvidence.has(stopIndex)
@@ -8123,25 +8356,25 @@ function analyzeSelection() {
         }
     }
 
-    const directRouteData = collectReachableRouteData(
+    const directRouteData = yield* collectReachableRouteDataSteps(
         directEvidence,
         "leg1"
     );
-    const transferRouteData = collectReachableRouteData(
+    const transferRouteData = yield* collectReachableRouteDataSteps(
         transferEvidence,
         "leg2"
     );
-    const twoTransferRouteData = collectReachableRouteData(
+    const twoTransferRouteData = yield* collectReachableRouteDataSteps(
         twoTransferEvidence,
         "leg3"
     );
-    const directArrivalMinutes = collectBestArrivalMinutes(
+    const directArrivalMinutes = yield* collectBestArrivalMinutesSteps(
         directEvidence
     );
-    const transferArrivalMinutes = collectBestArrivalMinutes(
+    const transferArrivalMinutes = yield* collectBestArrivalMinutesSteps(
         transferEvidence
     );
-    const twoTransferArrivalMinutes = collectBestArrivalMinutes(
+    const twoTransferArrivalMinutes = yield* collectBestArrivalMinutesSteps(
         twoTransferEvidence
     );
 
@@ -8179,7 +8412,33 @@ function analyzeSelection() {
     return analysisCache;
 }
 
-function appendRouteGroup(container, title, routeKeys, transferCount) {
+// Keep synchronous API for individual trip lookups; map refresh is async.
+function drainSteps(iterator) {
+    while (true) {
+        const next = iterator.next();
+        if (next.done) return next.value;
+    }
+}
+
+function analyzeSelection() {
+    return drainSteps(analyzeSelectionSteps());
+}
+
+async function analyzeSelectionAsync(token) {
+    const iterator = analyzeSelectionSteps();
+    let started = performance.now();
+    while (true) {
+        if (token !== renderGeneration) return null;
+        const next = iterator.next();
+        if (next.done) return next.value;
+        if (performance.now() - started >= 3) {
+            await eventLoopYield();
+            started = performance.now();
+        }
+    }
+}
+
+async function appendRouteGroup(container, title, routeKeys, transferCount, token) {
     if (routeKeys.size === 0) {
         return;
     }
@@ -8213,7 +8472,12 @@ function appendRouteGroup(container, title, routeKeys, transferCount) {
         }
     );
 
+    let processedChips = 0;
     for (const key of ordered) {
+        if (++processedChips % 32 === 0) {
+            await eventLoopYield();
+            if (token !== renderGeneration) return;
+        }
         const route = routes[key];
 
         if (!route) {
@@ -8348,42 +8612,46 @@ function drawFocusedRouteStops(analysis) {
     }
 }
 
-function updateRouteList(
+async function updateRouteList(
     directRoutes,
     transferRoutes,
-    twoTransferRoutes
+    twoTransferRoutes,
+    token
 ) {
     const container = document.getElementById("routes");
     container.innerHTML = "";
 
-    appendRouteGroup(
+    await appendRouteGroup(
         container,
         TEXT.groupDirect,
         directRoutes,
-        0
+        0,
+        token
     );
 
     if (maxTransfers >= 1) {
-        appendRouteGroup(
+        await appendRouteGroup(
             container,
             TEXT.groupTransfer,
             transferRoutes,
-            1
+            1,
+            token
         );
     }
 
     if (maxTransfers >= 2) {
-        appendRouteGroup(
+        await appendRouteGroup(
             container,
             TEXT.groupTwoTransfers,
             twoTransferRoutes,
-            2
+            2,
+            token
         );
     }
 }
 
-function renderSelection(progressive=false, token=renderGeneration,
-                         preserveWave=false) {
+async function renderSelection(progressive=false, token=renderGeneration,
+                               preserveWave=false) {
     if (!preserveWave) clearResult();
     updateControls();
 
@@ -8398,61 +8666,99 @@ function renderSelection(progressive=false, token=renderGeneration,
         drawOrigin(selectedPoint.lat, selectedPoint.lon, !progressive);
     }
 
-    const analysis = analyzeSelection();
+    const analysis = await analyzeSelectionAsync(token);
+    if (!analysis || token !== renderGeneration) return;
     const focusStops = focusedRouteStops(analysis);
     const hasFocus = !!selectedRouteFocus && !!focusStops;
 
     if (maxTransfers >= 2) {
+        let paintedtwoTransferRoutes = 0;
         for (const routeKey of analysis.twoTransferRoutes) {
-            if (hasFocus && !isFocusedRoute(routeKey, 2)) {
-                continue;
+            if (++paintedtwoTransferRoutes % 4 === 0) {
+                await eventLoopYield();
+                if (token !== renderGeneration) return;
+            }
+                if (hasFocus && !isFocusedRoute(routeKey, 2)) {
+                    continue;
+                }
+
+                drawRoute(
+                    routeKey,
+                    2,
+                    analysis.twoTransferRouteSegments.get(routeKey)
+                );
             }
 
-            drawRoute(
-                routeKey,
-                2,
-                analysis.twoTransferRouteSegments.get(routeKey)
-            );
-        }
-
         if (!hasFocus) {
-            for (const stopIndex of analysis.twoTransferOnlyStops) {
-                drawCoverage(
-                    stops[stopIndex],
-                    2,
-                    analysis.twoTransferArrivalMinutes.get(stopIndex)
-                );
-                drawStop(stopIndex, 2);
+            let placedtwoTransferOnlyStops = 0;
+        for (const stopIndex of analysis.twoTransferOnlyStops) {
+                if (++placedtwoTransferOnlyStops % 64 === 0) {
+                    await eventLoopYield();
+                    if (token !== renderGeneration) return;
+                }
+                if (!preserveWave) {
+                    drawCoverage(
+                        stops[stopIndex],
+                        2,
+                        analysis.twoTransferArrivalMinutes.get(stopIndex)
+                    );
+                }
+                if (progressive && preserveWave) {
+                    queueProgressiveStop(stopIndex, 2, token);
+                } else {
+                    drawStop(stopIndex, 2);
+                }
             }
         }
     }
 
     if (maxTransfers >= 1) {
+        let paintedtransferRoutes = 0;
         for (const routeKey of analysis.transferRoutes) {
-            if (hasFocus && !isFocusedRoute(routeKey, 1)) {
-                continue;
+            if (++paintedtransferRoutes % 4 === 0) {
+                await eventLoopYield();
+                if (token !== renderGeneration) return;
+            }
+                if (hasFocus && !isFocusedRoute(routeKey, 1)) {
+                    continue;
+                }
+
+                drawRoute(
+                    routeKey,
+                    1,
+                    analysis.transferRouteSegments.get(routeKey)
+                );
             }
 
-            drawRoute(
-                routeKey,
-                1,
-                analysis.transferRouteSegments.get(routeKey)
-            );
-        }
-
         if (!hasFocus) {
-            for (const stopIndex of analysis.transferOnlyStops) {
-                drawCoverage(
-                    stops[stopIndex],
-                    1,
-                    analysis.transferArrivalMinutes.get(stopIndex)
-                );
-                drawStop(stopIndex, 1);
+            let placedtransferOnlyStops = 0;
+        for (const stopIndex of analysis.transferOnlyStops) {
+                if (++placedtransferOnlyStops % 64 === 0) {
+                    await eventLoopYield();
+                    if (token !== renderGeneration) return;
+                }
+                if (!preserveWave) {
+                    drawCoverage(
+                        stops[stopIndex],
+                        1,
+                        analysis.transferArrivalMinutes.get(stopIndex)
+                    );
+                }
+                if (progressive && preserveWave) {
+                    queueProgressiveStop(stopIndex, 1, token);
+                } else {
+                    drawStop(stopIndex, 1);
+                }
             }
         }
     }
 
+    let painteddirectRoutes = 0;
     for (const routeKey of analysis.directRoutes) {
+        if (++painteddirectRoutes % 4 === 0) {
+            await eventLoopYield();
+            if (token !== renderGeneration) return;
+        }
         if (hasFocus && !isFocusedRoute(routeKey, 0)) {
             continue;
         }
@@ -8465,13 +8771,24 @@ function renderSelection(progressive=false, token=renderGeneration,
     }
 
     if (!hasFocus) {
+        let placeddirectStops = 0;
         for (const stopIndex of analysis.directStops) {
-            drawCoverage(
-                stops[stopIndex],
-                0,
-                analysis.directArrivalMinutes.get(stopIndex)
-            );
-            drawStop(stopIndex, 0);
+                if (++placeddirectStops % 64 === 0) {
+                    await eventLoopYield();
+                    if (token !== renderGeneration) return;
+                }
+            if (!preserveWave) {
+                drawCoverage(
+                    stops[stopIndex],
+                    0,
+                    analysis.directArrivalMinutes.get(stopIndex)
+                );
+            }
+            if (progressive && preserveWave) {
+                queueProgressiveStop(stopIndex, 0, token);
+            } else {
+                drawStop(stopIndex, 0);
+            }
         }
     }
 
@@ -8520,10 +8837,11 @@ function renderSelection(progressive=false, token=renderGeneration,
         drawFocusedRouteStops(analysis);
     }
 
-    updateRouteList(
+    await updateRouteList(
         analysis.directRoutes,
         analysis.transferRoutes,
-        analysis.twoTransferRoutes
+        analysis.twoTransferRoutes,
+        token
     );
 }
 
@@ -8533,6 +8851,14 @@ function scheduleRender() {
     if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     if (!selectedPoint) return;
     clearResult();
+    document.getElementById("routes").replaceChildren();
+    for (const id of [
+        "nearby-count", "direct-route-count", "direct-stop-count",
+        "transfer-route-count", "transfer-stop-count",
+        "two-transfer-route-count", "two-transfer-stop-count"
+    ]) {
+        document.getElementById(id).textContent = "0";
+    }
     renderFrame = requestAnimationFrame(async () => {
         renderFrame = null;
         if (token !== renderGeneration) return;
@@ -8542,15 +8868,26 @@ function scheduleRender() {
         }
         // Start walking immediately, then add every transit arrival as found.
         drawOrigin(selectedPoint.lat, selectedPoint.lon, false);
+        analysisSummary.hidden = false;
+        tripPanel.hidden = true;
+        const started = performance.now();
         const wave = startProgressiveCoverage(token, true);
         const onEvidence = (stopIndex, candidate, tier) => {
             if (candidate.totalMinutes <= maxTravelMinutes + 0.0001) {
                 wave.addSource(tier, stopIndex, candidate.totalMinutes);
+                queueProgressiveStop(stopIndex, tier, token);
             }
         };
         if (!await ensureReachabilitySearchAsync(token, onEvidence)) return;
         if (token !== renderGeneration) return;
-        renderSelection(true, token, true);
+        const searchMs = performance.now() - started;
+        await renderSelection(true, token, true);
+        if (token !== renderGeneration) return;
+        console.info("Reachability timings (ms):", {
+            search: Math.round(searchMs),
+            finalize: Math.round(performance.now() - started - searchMs),
+            stopCount: displayedStopIndexes.size
+        });
     });
 }
 
@@ -8583,7 +8920,21 @@ transferCountInput.addEventListener(
 
 travelTimeLimitInput.addEventListener("input", scheduleRender);
 
-map.on("zoomend", updateStopMarkerSizes);
+map.on("zoomstart", () => {
+    stopCanvasZooming = true;
+    cancelStopCanvasRedraw();
+    stopCanvas.style.visibility = "hidden";
+    clearStopPixels();
+});
+map.on("zoomend", () => {
+    stopCanvasZooming = false;
+    redrawStopCanvas();
+    stopCanvas.style.visibility = "visible";
+});
+map.on("moveend", () => {
+    if (!stopCanvasZooming) redrawStopCanvas();
+});
+map.on("resize", redrawStopCanvas);
 map.on("zoomstart", onCoverageZoomStart);
 map.on("zoomend", onCoverageZoomEnd);
 map.getContainer().addEventListener("wheel", onCoverageWheel, {passive: true});
@@ -8612,11 +8963,46 @@ tripBack.addEventListener(
     }
 );
 
+function resetSelection() {
+    ++renderGeneration;
+    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+    renderFrame = null;
+    cancelPendingMapClick();
+    map.closePopup();
+    selectedPoint = null;
+    targetPoint = null;
+    selectedRouteFocus = null;
+    tripAlternativeIndex = 0;
+    analysisCacheKey = null;
+    analysisCache = null;
+    reachabilitySearchCache.clear();
+    itineraryCache.clear();
+    setTargetPickMode(false);
+    clearResult();
+    analysisSummary.hidden = true;
+    tripPanel.hidden = true;
+    tripAlternatives.replaceChildren();
+    tripSteps.replaceChildren();
+    document.getElementById("routes").replaceChildren();
+    for (const id of [
+        "nearby-count", "direct-route-count", "direct-stop-count",
+        "transfer-route-count", "transfer-stop-count",
+        "two-transfer-route-count", "two-transfer-stop-count"
+    ]) {
+        document.getElementById(id).textContent = "0";
+    }
+    resetOrigin.disabled = true;
+    legendOriginText.textContent = "Choose a starting point";
+}
+
+resetOrigin.addEventListener("click", resetSelection);
+
 function selectStartPoint(latlng) {
     selectedPoint = {
         lat: latlng.lat,
         lon: latlng.lng
     };
+    resetOrigin.disabled = false;
     targetPoint = null;
     setTargetPickMode(false);
     tripAlternativeIndex = 0;
@@ -8702,6 +9088,12 @@ map.on(
             return;
         }
 
+        const stopIndex = nearestDisplayedStop(event.latlng, 14);
+        if (stopIndex !== null) {
+            showTripToStop(stopIndex);
+            return;
+        }
+
         tripAlternativeIndex = 0;
         showTripToPoint({
             lat: event.latlng.lat,
@@ -8711,6 +9103,7 @@ map.on(
 );
 
 updateControls();
+analysisSummary.hidden = true;
 })().catch(error => {
     console.error("Transport map initialization failed:", error);
     const container = document.getElementById("map");
