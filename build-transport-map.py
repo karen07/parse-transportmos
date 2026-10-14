@@ -3,6 +3,7 @@
 import argparse
 import base64
 import gzip
+import html as html_lib
 import json
 import math
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 import osmium
 
 EARTH_RADIUS_M = 6371000.0
-PROJECT_VERSION = "0.2.0"
+PROJECT_VERSION = "0.2.3"
 
 
 def parse_args():
@@ -154,7 +155,7 @@ def transport_mode(tags, route_type):
 
     if any(
         value in text for value in (MCC_SHORT, MCC_FULL, "moscow central circle")
-    ) or (ref == "14" and METROPOLITAN in network):
+    ) or (ref == "14" and route_type in RAIL_ROUTE_TYPES):
         return "mcc"
 
     if (
@@ -242,7 +243,9 @@ def build_transport_extract(source_path, transport_path):
             remove_tags=False,
             relation_depth=1,
         ) as writer:
-            selector = TransportSelectionHandler(writer)
+            discovery = TransportMasterDiscovery()
+            discovery.apply_file(str(source_path))
+            selector = TransportSelectionHandler(writer, discovery.child_modes)
             selector.apply_file(str(source_path))
 
         if selector.selected_masters == 0 and selector.selected_routes == 0:
@@ -261,7 +264,7 @@ def build_cache(cache_dir, update=False, rebuild=False):
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     source = cache_dir / "central-fed-district.osm.pbf"
-    transport_pbf = cache_dir / "moscow-transport-v2.osm.pbf"
+    transport_pbf = cache_dir / "moscow-transport-v3.osm.pbf"
 
     if update:
         print("Downloading fresh Central Federal District data...")
@@ -309,12 +312,50 @@ def is_night_route(route_type, ref):
     return 1 <= number <= 16
 
 
+def station_in_area(lon, lat):
+    return 36.3 <= lon <= 39.0 and 54.9 <= lat <= 56.4
+
+
+def is_station(tags):
+    return tags.get("railway") in ("station", "halt") and bool(tags.get("name"))
+
+
+class TransportMasterDiscovery(osmium.SimpleHandler):
+    def __init__(self):
+        super().__init__()
+        self.child_modes = {}
+
+    def relation(self, relation):
+        if relation.tags.get("type") != "route_master":
+            return
+        route_type = relation.tags.get("route_master")
+        mode = transport_mode(relation.tags, route_type)
+        if mode is None:
+            return
+        for member in relation.members:
+            if member.type == "r":
+                self.child_modes[member.ref] = mode
+
+
 class TransportSelectionHandler(osmium.SimpleHandler):
-    def __init__(self, writer):
+    def __init__(self, writer, child_modes):
         super().__init__()
         self.writer = writer
+        self.child_modes = child_modes
         self.selected_masters = 0
         self.selected_routes = 0
+
+    def node(self, node):
+        if (
+            is_station(node.tags)
+            and node.location.valid()
+            and station_in_area(node.location.lon, node.location.lat)
+        ):
+            self.writer.add_node(node)
+
+    def way(self, way):
+        if is_station(way.tags):
+            self.writer.add_way(way)
 
     def relation(self, relation):
         relation_type = relation.tags.get("type")
@@ -324,9 +365,10 @@ class TransportSelectionHandler(osmium.SimpleHandler):
         route_type = relation.tags.get(
             "route_master" if relation_type == "route_master" else "route"
         )
-        if transport_mode(relation.tags, route_type) is None or is_night_route(
-            route_type, relation.tags.get("ref")
-        ):
+        mode = transport_mode(relation.tags, route_type)
+        if relation_type == "route":
+            mode = mode or self.child_modes.get(relation.id)
+        if mode is None or is_night_route(route_type, relation.tags.get("ref")):
             return
 
         self.writer.add_relation(relation)
@@ -397,7 +439,10 @@ class RelationHandler(osmium.SimpleHandler):
             and (item[2] == "stop" or item[2].startswith("stop_"))
         ]
 
-        if platforms:
+        if route_type in RAIL_ROUTE_TYPES:
+            # OSM PTv2 may list fewer stop positions than platforms or vice versa.
+            selected = stops if len(stops) >= len(platforms) else platforms
+        elif platforms:
             selected = platforms
         elif stops:
             selected = stops
@@ -434,9 +479,23 @@ class ObjectHandler(osmium.SimpleHandler):
         self.route_way_ids = route_way_ids
         self.objects = {}
         self.route_ways = {}
+        self.stations = {}
 
     def node(self, node):
-        if node.id not in self.node_ids or not node.location.valid():
+        if not node.location.valid():
+            return
+        if is_station(node.tags) and station_in_area(
+            node.location.lon, node.location.lat
+        ):
+            key = f"n{node.id}"
+            self.stations[key] = {
+                "lon": node.location.lon,
+                "lat": node.location.lat,
+                "name": node.tags.get("name"),
+                "subway": node.tags.get("station") == "subway"
+                or node.tags.get("subway") == "yes",
+            }
+        if node.id not in self.node_ids:
             return
 
         self.objects[f"n{node.id}"] = {
@@ -447,7 +506,11 @@ class ObjectHandler(osmium.SimpleHandler):
         }
 
     def way(self, way):
-        if way.id not in self.stop_way_ids and way.id not in self.route_way_ids:
+        if (
+            way.id not in self.stop_way_ids
+            and way.id not in self.route_way_ids
+            and not is_station(way.tags)
+        ):
             return
 
         coords = [
@@ -464,7 +527,7 @@ class ObjectHandler(osmium.SimpleHandler):
                 [round(lon, 5), round(lat, 5)] for lon, lat in coords
             ]
 
-        if way.id not in self.stop_way_ids:
+        if way.id not in self.stop_way_ids and not is_station(way.tags):
             return
 
         min_lon = min(item[0] for item in coords)
@@ -472,12 +535,23 @@ class ObjectHandler(osmium.SimpleHandler):
         min_lat = min(item[1] for item in coords)
         max_lat = max(item[1] for item in coords)
 
-        self.objects[f"w{way.id}"] = {
-            "lon": (min_lon + max_lon) / 2.0,
-            "lat": (min_lat + max_lat) / 2.0,
-            "name": way.tags.get("name"),
-            "ref": way.tags.get("ref"),
-        }
+        lon = (min_lon + max_lon) / 2.0
+        lat = (min_lat + max_lat) / 2.0
+        if is_station(way.tags) and station_in_area(lon, lat):
+            self.stations[f"w{way.id}"] = {
+                "lon": lon,
+                "lat": lat,
+                "name": way.tags.get("name"),
+                "subway": way.tags.get("station") == "subway"
+                or way.tags.get("subway") == "yes",
+            }
+        if way.id in self.stop_way_ids:
+            self.objects[f"w{way.id}"] = {
+                "lon": lon,
+                "lat": lat,
+                "name": way.tags.get("name"),
+                "ref": way.tags.get("ref"),
+            }
 
 
 def coord_distance_m(a, b):
@@ -568,6 +642,134 @@ def route_geometry(route, route_ways):
     }
 
 
+def station_route_position(lon, lat, geometry):
+    """Return distance to route and position along its ordered geometry."""
+    if geometry is None:
+        return float("inf"), 0.0
+
+    lines = (
+        [geometry["coordinates"]]
+        if geometry["type"] == "LineString"
+        else geometry["coordinates"]
+    )
+    best_distance = float("inf")
+    best_position = 0.0
+    offset = 0.0
+
+    for line in lines:
+        for a, b in zip(line, line[1:]):
+            mid_lat = math.radians((a[1] + b[1] + lat) / 3.0)
+            scale_x = EARTH_RADIUS_M * math.pi / 180.0 * math.cos(mid_lat)
+            scale_y = EARTH_RADIUS_M * math.pi / 180.0
+            dx = (b[0] - a[0]) * scale_x
+            dy = (b[1] - a[1]) * scale_y
+            px = (lon - a[0]) * scale_x
+            py = (lat - a[1]) * scale_y
+            segment_length_sq = dx * dx + dy * dy
+            if segment_length_sq == 0.0:
+                continue
+            fraction = max(0.0, min(1.0, (px * dx + py * dy) / segment_length_sq))
+            distance = math.hypot(px - fraction * dx, py - fraction * dy)
+            length = math.sqrt(segment_length_sq)
+            if distance < best_distance:
+                best_distance = distance
+                best_position = offset + fraction * length
+            offset += length
+
+    return best_distance, best_position
+
+
+def enrich_rail_stops(route, mode, geometry, objects):
+    """Recover station nodes missing from incomplete OSM route members."""
+    if mode not in ("metro", "mcc", "mcd") or geometry is None:
+        return
+
+    resolved = [
+        (key, role)
+        for key, role in zip(route["stop_members"], route["stop_roles"])
+        if key in objects.objects
+    ]
+    original = [(key, role, objects.objects[key]) for key, role in resolved]
+    names = {
+        (obj.get("name") or "").casefold().strip()
+        for _key, _role, obj in original
+        if obj.get("name")
+    }
+    inserted = []
+    lines = (
+        [geometry["coordinates"]]
+        if geometry["type"] == "LineString"
+        else geometry["coordinates"]
+    )
+    lon_values = [point[0] for line in lines for point in line]
+    lat_values = [point[1] for line in lines for point in line]
+    if not lon_values or not lat_values:
+        return
+    lon_min, lon_max = min(lon_values) - 0.003, max(lon_values) + 0.003
+    lat_min, lat_max = min(lat_values) - 0.002, max(lat_values) + 0.002
+
+    for key, candidate in objects.stations.items():
+        if mode == "metro" and not candidate["subway"]:
+            continue
+        if key in route["stop_members"]:
+            continue
+        name = candidate["name"]
+        if name.casefold().strip() in names:
+            continue
+
+        lon, lat = candidate["lon"], candidate["lat"]
+        if not (lon_min <= lon <= lon_max and lat_min <= lat <= lat_max):
+            continue
+        if any(
+            coord_distance_m((lon, lat), (obj["lon"], obj["lat"])) < 100.0
+            for _key, _role, obj in original
+        ):
+            continue
+        if any(
+            coord_distance_m((lon, lat), (obj["lon"], obj["lat"])) < 100.0
+            for _key, _role, obj in inserted
+        ):
+            continue
+
+        distance, position = station_route_position(lon, lat, geometry)
+        if distance > 100.0:
+            continue
+        inserted.append((key, "stop", candidate))
+        objects.objects[key] = {
+            "lon": lon,
+            "lat": lat,
+            "name": name,
+            "ref": None,
+        }
+        names.add(name.casefold().strip())
+
+    if not inserted:
+        return
+
+    stops = original + inserted
+    stops.sort(
+        key=lambda item: station_route_position(
+            item[2]["lon"], item[2]["lat"], geometry
+        )[1]
+    )
+    route["stop_members"] = [item[0] for item in stops]
+    route["stop_roles"] = [item[1] for item in stops]
+
+
+def fallback_route_geometry(route, objects):
+    """Use an approximate station-to-station line when OSM ways are absent."""
+    coords = []
+    for key in route["stop_members"]:
+        obj = objects.objects.get(key)
+        if obj is not None:
+            point = [round(obj["lon"], 5), round(obj["lat"], 5)]
+            if not coords or coords[-1] != point:
+                coords.append(point)
+    if len(coords) < 2:
+        return None
+    return {"type": "LineString", "coordinates": coords}
+
+
 def build_transport_data(transport_pbf):
     print("Reading route relations...")
     relations = RelationHandler()
@@ -619,8 +821,12 @@ def build_transport_data(transport_pbf):
             continue
 
         geometry = route_geometry(route, objects.route_ways)
+        if geometry is None and mode in ("metro", "mcc", "mcd"):
+            geometry = fallback_route_geometry(route, objects)
         if geometry is None:
             continue
+
+        enrich_rail_stops(route, mode, geometry, objects)
 
         if master_key is not None:
             master = master_info[master_key]
@@ -699,6 +905,22 @@ def build_transport_data(transport_pbf):
     print(f"route masters: {len(relations.masters)}")
     print(f"stops: {len(stop_features)}")
     print(f"missing stop members: {missing_stop_members}")
+    mode_counts = defaultdict(int)
+    for feature in route_features:
+        mode_counts[feature["properties"]["mode"]] += 1
+    for mode in sorted(SURFACE_MODES | {"metro", "mcc", "mcd"}):
+        print(f"  {mode}: {mode_counts[mode]} route directions")
+    shabolovskaya = "\u0428\u0430\u0431\u043e\u043b\u043e\u0432"
+    matching = [
+        feature
+        for feature in stop_features
+        if shabolovskaya.casefold() in (feature["properties"]["name"] or "").casefold()
+    ]
+    print(f"Shabolovskaya stop objects: {len(matching)}")
+    if not matching:
+        print("WARNING: Shabolovskaya is still absent from the OSM extract")
+    if not mode_counts["mcc"]:
+        print("WARNING: MCC routes missing - inspect source OSM tags")
 
     return {
         "type": "FeatureCollection",
@@ -908,10 +1130,6 @@ def build_html(
         min(100.0, initial_circle_opacity),
     )
 
-    mcd_icon_outline = (
-        "M4 17V7a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v10" "a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"
-    )
-
     # Keep localized labels ASCII-encoded in the source and generated HTML.
     mode_names = {
         "heading": (
@@ -938,6 +1156,31 @@ def build_html(
         "&#1079;&#1080;&#1090;&#1077;&#1083;&#1100;&#1085;&#1099;&#1077;."
     )
 
+    # Keep generated HTML ASCII-safe even after tidy rewrites HTML entities.
+    def js_escaped_string(value, width=64):
+        escaped = json.dumps(value, ensure_ascii=True)[1:-1]
+        tokens = re.findall(r"\\u[0-9A-Fa-f]{4}|\\.|.", escaped)
+        chunks = []
+        current = ""
+
+        for token in tokens:
+            if len(current) + len(token) > width and current:
+                chunks.append(current)
+                current = ""
+
+            current += token
+
+        if current:
+            chunks.append(current)
+
+        return " +\n    ".join('"' + chunk + '"' for chunk in chunks)
+
+    js_mode_names = {
+        key: js_escaped_string(html_lib.unescape(value))
+        for key, value in mode_names.items()
+    }
+    js_mode_hint = js_escaped_string(html_lib.unescape(mode_hint))
+
     html = f"""<!doctype html>
 <html>
 <head>
@@ -949,6 +1192,10 @@ def build_html(
 <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+>
+<link
+    rel="stylesheet"
+    href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
 >
 
 <style>
@@ -2116,12 +2363,10 @@ def build_html(
             }}
 
             .leaflet-control-attribution {{
-                max-width: 55vw;
+                max-width: calc(100vw - 16px);
 
-                overflow: hidden;
-
-                white-space: nowrap;
-                text-overflow: ellipsis;
+                white-space: normal;
+                overflow: visible;
 
                 font-size: 8px;
             }}
@@ -2249,16 +2494,16 @@ def build_html(
 
         <div class="control" id="transport-modes">
             <div class="control-label">
-                <span>{mode_names['heading']}</span>
+                <span id="transport-modes-heading">Transport modes</span>
             </div>
             <div
                 class="mode-grid"
                 role="group"
-                aria-label="{mode_names['heading']}"
+                aria-label="Transport modes"
             >
                 <label
                     class="mode-option"
-                    title="{mode_names['bus']} &#183; ~19,2 &#1082;&#1084;/&#1095;"
+                    title="19.2 km/h"
                 >
                     <input class="mode-input" type="checkbox" value="bus" checked>
                     <span class="mode-pill">
@@ -2266,12 +2511,12 @@ def build_html(
                             <rect x="4" y="3" width="16" height="16" rx="3"/>
                             <path d="M4 11h16M8 19v2m8-2v2M8 15h.01M16 15h.01M8 7h8"/>
                         </svg>
-                        <span>{mode_names['bus']}</span>
+                        <span data-mode-name="bus">Bus</span>
                     </span>
                 </label>
                 <label
                     class="mode-option"
-                    title="{mode_names['tram']} &#183; ~18 &#1082;&#1084;/&#1095;"
+                    title="18 km/h"
                 >
                     <input class="mode-input" type="checkbox" value="tram" checked>
                     <span class="mode-pill">
@@ -2281,12 +2526,12 @@ def build_html(
                                 d="M5 12h14M9 5V2m6 3V2M8 22l3-3m5 3-3-3M8 15h.01M16 15h.01"
                             />
                         </svg>
-                        <span>{mode_names['tram']}</span>
+                        <span data-mode-name="tram">Tram</span>
                     </span>
                 </label>
                 <label
                     class="mode-option"
-                    title="{mode_names['trolleybus']} &#183; ~16,8 &#1082;&#1084;/&#1095;"
+                    title="16.8 km/h"
                 >
                     <input
                         class="mode-input"
@@ -2301,24 +2546,24 @@ def build_html(
                                 d="M4 13h16M8 6l-2-4m9 4 3-4M7 19v2m10-2v2M8 16h.01M16 16h.01"
                             />
                         </svg>
-                        <span>{mode_names['trolleybus']}</span>
+                        <span data-mode-name="trolleybus">Trolleybus</span>
                     </span>
                 </label>
                 <label
                     class="mode-option"
-                    title="{mode_names['metro']} &#183; ~37,8 &#1082;&#1084;/&#1095;"
+                    title="37.8 km/h"
                 >
                     <input class="mode-input" type="checkbox" value="metro">
                     <span class="mode-pill">
                         <svg viewBox="0 0 24 24" aria-hidden="true">
                             <path d="M4 20V5l8 10 8-10v15M2 21h20"/>
                         </svg>
-                        <span>{mode_names['metro']}</span>
+                        <span data-mode-name="metro">Metro</span>
                     </span>
                 </label>
                 <label
                     class="mode-option"
-                    title="{mode_names['mcc']} &#183; ~46,8 &#1082;&#1084;/&#1095;"
+                    title="46.8 km/h"
                 >
                     <input class="mode-input" type="checkbox" value="mcc">
                     <span class="mode-pill">
@@ -2329,26 +2574,31 @@ def build_html(
                             />
                             <circle cx="12" cy="12" r="8" stroke-dasharray="2 6"/>
                         </svg>
-                        <span>{mode_names['mcc']}</span>
+                        <span data-mode-name="mcc">MCC</span>
                     </span>
                 </label>
                 <label
                     class="mode-option"
-                    title="{mode_names['mcd']} &#183; ~54 &#1082;&#1084;/&#1095;"
+                    title="54 km/h"
                 >
                     <input class="mode-input" type="checkbox" value="mcd">
                     <span class="mode-pill">
                         <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="{mcd_icon_outline}"/>
+                            <path
+                                d="M4 17V7a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v10"
+                            />
+                            <path d="M20 17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2"/>
                             <path
                                 d="M4 12h16M8 19l-2 3m10-3 2 3M8 8h8M8 15h.01M16 15h.01"
                             />
                         </svg>
-                        <span>{mode_names['mcd']}</span>
+                        <span data-mode-name="mcd">MCD</span>
                     </span>
                 </label>
             </div>
-            <div class="mode-hint">{mode_hint}</div>
+            <div class="mode-hint" id="transport-modes-hint">
+                Surface transport is on by default. Speeds are estimates.
+            </div>
         </div>
 
         <div class="control">
@@ -2536,22 +2786,43 @@ const TRANSPORT_DATA_BASE64 = [
 {payload_lines}
 ].join("");
 
-function loadLeaflet() {{
+function loadExternalScript(url, isLoaded) {{
     return new Promise((resolve, reject) => {{
-        if (window.L) {{
+        if (isLoaded()) {{
             resolve();
             return;
         }}
 
         const script = document.createElement("script");
-        script.src =
-            "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-        script.onload = resolve;
+        script.src = url;
+        script.onload = () => {{
+            if (isLoaded()) {{
+                resolve();
+            }} else {{
+                reject(new Error("Map library did not initialize: " + url));
+            }}
+        }};
         script.onerror = () => {{
-            reject(new Error("Failed to load Leaflet."));
+            reject(new Error("Failed to load map library: " + url));
         }};
         document.head.appendChild(script);
     }});
+}}
+
+async function loadMapLibraries() {{
+    await loadExternalScript(
+        "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+        () => !!window.L
+    );
+    await loadExternalScript(
+        "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js",
+        () => !!window.maplibregl
+    );
+    await loadExternalScript(
+        "https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/" +
+            "leaflet-maplibre-gl.js",
+        () => !!window.L.maplibreGL
+    );
 }}
 
 async function loadTransportData() {{
@@ -2577,7 +2848,7 @@ async function loadTransportData() {{
 }}
 
 (async () => {{
-await loadLeaflet();
+await loadMapLibraries();
 const data = await loadTransportData();
 
 const WALK_SPEED_M_PER_MIN = {walk_speed:.6f};
@@ -2724,7 +2995,8 @@ let travelRenderTimer = null;
 const map = L.map(
     "map",
     {{
-        preferCanvas: true
+        preferCanvas: true,
+        minZoom: 1
     }}
 ).setView(
     [ORIGIN_LAT, ORIGIN_LON],
@@ -2747,13 +3019,35 @@ createMapPane("stopPane", 650, "auto");
 createMapPane("tripMarkerPane", 660, "auto");
 createMapPane("originPane", 700, "none");
 
-L.tileLayer(
-    "https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",
-    {{
-        maxZoom: 19,
-        attribution: "&copy; OpenStreetMap contributors"
-    }}
-).addTo(map);
+const MODE_NAMES = {{
+    heading: {js_mode_names['heading']},
+    bus: {js_mode_names['bus']},
+    tram: {js_mode_names['tram']},
+    trolleybus: {js_mode_names['trolleybus']},
+    metro: {js_mode_names['metro']},
+    mcc: {js_mode_names['mcc']},
+    mcd: {js_mode_names['mcd']}
+}};
+const MODE_HINT = {js_mode_hint};
+
+const modeHeading = document.getElementById("transport-modes-heading");
+modeHeading.textContent = MODE_NAMES.heading;
+document.querySelector("#transport-modes .mode-grid")
+    .setAttribute("aria-label", MODE_NAMES.heading);
+
+document.querySelectorAll("[data-mode-name]").forEach(element => {{
+    element.textContent = MODE_NAMES[element.dataset.modeName];
+}});
+document.getElementById("transport-modes-hint").textContent = MODE_HINT;
+
+const vectorMapLayer = L.maplibreGL({{
+    style: "https://tiles.openfreemap.org/styles/bright",
+    attribution:
+        '<a href="https://openfreemap.org/">OpenFreeMap</a> | ' +
+        '&copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> | ' +
+        '<a href="https://www.openstreetmap.org/copyright">' +
+        'OpenStreetMap contributors</a>'
+}}).addTo(map);
 
 const COVERAGE_SVG_NS = "http://www.w3.org/2000/svg";
 const coverageSvg = document.createElementNS(COVERAGE_SVG_NS, "svg");
@@ -7271,7 +7565,7 @@ map.on(
 updateControls();
 }})().catch(error => {{
     console.error(error);
-    alert("Failed to load embedded transport data: " + error.message);
+    alert("Failed to initialize transport map: " + error.message);
 }});
 </script>
 </body>
