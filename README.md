@@ -1,257 +1,176 @@
-# Moscow Transport Reachability Map
+# Moscow Transport Reachability Map v0.3.0
 
-Moscow Transport Reachability Map is an interactive browser map for exploring public-transport
-accessibility in Moscow using OpenStreetMap data.
+Интерактивная карта транспортной доступности Москвы на базе OpenStreetMap.
 
-`build-transport-map.py` downloads and preprocesses OSM data, extracts Moscow bus, tram,
-trolleybus, metro, MCC and MCD routes and stops, and generates `routes.html` with the
-transport data embedded in the page. Leaflet, MapLibre GL and the OpenFreeMap vector
-background are loaded from the network.
-OpenFreeMap needs no API key. The only map background is Bright, with no style selector.
-The updated OSM extraction preserves child routes of route_master relations and attempts to
-recover railway stations omitted from route stops by snapping mapped stations to rail routes.
-If the MCC toggle is enabled, its entire available line is shown as a thin brown
-reference line, independently of the colored reachable route sections. If an OSM
-route segment cannot be matched to railway geometry, the browser renders an
-approximate station-to-station segment rather than hiding it.
-When MCC route relations are incomplete, the generator can build an approximate ring from
-at least 24 named MCC station objects found in the local OSM extract. This station-to-station
-fallback is not the actual railway track geometry.
+## Что изменилось в v0.3.0
 
-The page can calculate approximate reachable areas with zero, one, or two transfers and can
-build route variants to a selected destination. It is designed for exploratory accessibility
-analysis rather than exact trip planning: walking distance is approximated geometrically and
-vehicle travel time is estimated from the transport graph rather than a live timetable.
+- Исходники разделены на модули: загрузка OSM, индексация, аудит графа,
+  упаковка HTML, CSS и JavaScript. Итоговый `routes.html` остается одним файлом.
+- Удален `recover_mcc_ring()` и список станций для создания искусственного
+  маршрута МЦК. Станции сами по себе больше не создают транспортные ребра.
+- Проезд разрешается только по последовательным остановкам настоящих
+  OSM `route`-отношений. Тип МЦК наследуется от `route_master`.
+- Вес ребра считается по расстоянию между последовательными остановками,
+  с поправкой на кривизну пути. Он не зависит от геометрии отрисовки.
+- Если у настоящего маршрута отсутствуют OSM-пути, линия для отображения
+  приблизительно соединяет его остановки. Это не новый маршрут.
+- Автоматическая привязка посторонних станций к железнодорожным маршрутам
+  по близости по умолчанию выключена: она может создавать ложные остановки.
+  Старую эвристику можно явно включить через `--infer-rail-stops`.
+- Добавлены режим сборки по подготовленному GeoJSON, экспорт GeoJSON,
+  аудит происхождения геометрии и тесты без реального PBF.
 
-## Описание
+## Интерфейс
 
-Moscow Transport Reachability Map - интерактивная браузерная карта для исследования
-транспортной доступности в Москве на основе данных OpenStreetMap.
+В браузере по-прежнему доступны шесть видов транспорта с SVG-иконками:
+автобус, трамвай, троллейбус, метро, МЦК и МЦД. По умолчанию включен
+только наземный транспорт. Подложка - OpenFreeMap Bright, без селектора.
 
-`build-transport-map.py` загружает и предварительно обрабатывает данные OSM, извлекает
-московские маршруты и остановки автобусов, трамваев, троллейбусов, метро, МЦК и МЦД и
-генерирует `routes.html` со встроенными транспортными данными. Библиотеки Leaflet,
-MapLibre GL и векторная подложка Bright от OpenFreeMap загружаются из сети.
-Переключателя стилей нет. Пропущенные станции метро и железнодорожных линий дополнительно
-ищутся среди самостоятельных объектов OSM и привязываются к геометрии маршрутов.
-При включённом МЦК показывается тонкая коричневая линия всей найденной сети,
-независимо от цветных достижимых участков. Если геометрия OSM не подходит для
-отрисовки, участок соединяется по координатам последовательных станций.
-Если отношения МЦК неполные, из станций OSM может строиться приблизительное кольцо.
-Это соединение станций прямыми сегментами, а не точная геометрия железной дороги.
+Одно нажатие на карту выбирает начальную точку; двойное - конечную.
+Доступны 0-2 пересадки, ограничение времени, допустимый радиус пешком,
+цветные зоны доступности и несколько вариантов поездки.
 
-Страница может рассчитывать приблизительные зоны доступности без пересадок, с одной или двумя
-пересадками, а также строить варианты маршрута до выбранной точки. Проект предназначен для
-исследовательского анализа доступности, а не для точного планирования поездок: расстояние
-пешком оценивается геометрически, а время движения транспорта рассчитывается по транспортному
-графу, а не по актуальному расписанию.
+**Важно:** линии на карте показывают только маршруты, достижимые по модели
+от выбранной точки. Включение МЦК не рисует кольцо независимо от расчета.
 
-## Готовая версия
+## Установка
 
-Уже собранная версия карты доступна по адресу:
-
-https://bus-routing.e7s.site/
-
-Версия на сайте может немного отставать от текущей версии в репозитории.
-
-## Возможности
-
-- автобус, трамвай, троллейбус, метро, МЦК и МЦД;
-- отдельные кнопки-переключатели с SVG-иконками для каждого вида транспорта;
-- по умолчанию включены только автобус, трамвай и троллейбус;
-- фильтры одновременно влияют на отображение, доступность, пересадки и поиск поездок;
-- отображение маршрутов и остановок;
-- расчет доступности от произвольной точки;
-- 0, 1 или 2 пересадки;
-- ограничение общего времени поездки;
-- настройка допустимого времени пешком;
-- построение маршрута до произвольной точки;
-- несколько вариантов маршрута;
-- подложка OpenFreeMap Bright без переключателя стилей;
-- отдельная тонкая линия МЦК при включенном режиме МЦК;
-- восстановление недоступных для отрисовки участков по станциям;
-- восстановление части отсутствующих станций по отдельным объектам OSM;
-- резервное построение МЦК по 24-31 станциям OSM при неполных маршрутах;
-- отчет о найденных станциях МЦК и предупреждение об упрощенной геометрии;
-- адаптивный интерфейс для desktop/mobile.
-
-Расстояние пешком рассчитывается по прямой, а время движения транспорта является оценочным,
-поэтому карта предназначена прежде всего для анализа транспортной доступности, а не для
-точного планирования поездок.
-
-## Требования
-
-- Python 3
-- Python-модуль `osmium`
+Требуется Python 3 и `osmium` (pyosmium) для обработки исходного PBF.
 
 ```bash
-pip install osmium
-```
-
-## Запуск
-
-```bash
+python3 -m pip install osmium
 python3 build-transport-map.py
 ```
 
-При первом запуске скрипт скачает PBF Центрального федерального округа с Geofabrik, создаст
-транспортный кеш и сгенерирует:
+Генератор загрузит при необходимости `central-fed-district.osm.pbf`
+из Geofabrik. Для совместимости используется тот же транспортный кеш
+`cache/moscow-transport-v4.osm.pbf`, что и в v0.2.6. Этот кеш содержит
+исходные OSM-объекты; искусственное кольцо в нем не сохранялось.
 
-```text
-routes.html
-cache/
-  central-fed-district.osm.pbf
-  moscow-transport-v4.osm.pbf
-```
-
-После этого достаточно открыть `routes.html` в браузере. Для отображения подложки требуется
-доступ к OpenFreeMap и библиотекам на unpkg.com. Данные транспорта встроены в HTML.
-
-Если подложка не отображается при `file://`, можно открыть файл через локальный сервер:
-
-```bash
-python3 -m http.server 8000
-```
-
-Затем открыть `http://localhost:8000/routes.html`.
-
-Подложка карты теперь использует OpenFreeMap (векторные тайлы), а не публичные растровые тайлы
-`tile.openstreetmap.org`. Это устраняет зависимость от сервера, показывающего `Access blocked`.
-OSM по-прежнему используется как источник транспортных и картографических данных.
-Подложка является отдельным слоем и не влияет на расчёты транспортной доступности.
-
-## Использование карты
-
-Один клик по карте выбирает начальную точку и показывает доступную транспортную сеть.
-
-Подложка Bright используется постоянно, переключать стиль на сайте не нужно.
-
-В панели можно изменить:
-
-- виды транспорта: автобус, трамвай, троллейбус, метро, МЦК, МЦД (любая комбинация);
-- максимальное время пешком;
-- количество пересадок: 0-2;
-- максимальное время поездки;
-- прозрачность зон доступности.
-
-Двойной клик по карте строит маршрут от выбранной начальной точки до указанного места.
-
-## Обновление данных
-
-Скачать свежий OSM PBF и полностью обновить кеш:
-
-```bash
-python3 build-transport-map.py --update
-```
-
-Пересобрать транспортные данные из уже скачанного PBF:
+Полностью пересобрать извлечение из существующего PBF:
 
 ```bash
 python3 build-transport-map.py --rebuild
 ```
 
-Обычный запуск повторно использует существующий кеш. В версии 0.2.3 имя транспортного кеша
-изменено на `moscow-transport-v4.osm.pbf` для принудительной пересборки транспорта по
-обновлённым правилам OSM. Исходный `central-fed-district.osm.pbf` скачивать повторно не нужно,
-если он уже есть. Для действительно свежего источника используйте `--update`.
+Скачать обновленные исходные данные и пересобрать извлечение:
 
-## Модель скорости и ограничения
-
-Средние скорости заданы как **приблизительные скорости движения** по геометрии маршрута. К ним
-дополнительно прибавляются 0,35 мин на остановку и оценка ожидания при каждой посадке:
-
-| Вид транспорта | Скорость движения | Ожидание посадки |
-| --- | ---: | ---: |
-| Автобус | 19,2 км/ч | 4 мин |
-| Трамвай | 18 км/ч | 4 мин |
-| Троллейбус | 16,8 км/ч | 4 мин |
-| Метро | 37,8 км/ч | 2,5 мин |
-| МЦК | 46,8 км/ч | 4 мин |
-| МЦД | 54 км/ч | 5 мин |
-
-Эти значения - эвристики для карты, не статистика по фактическим рейсам. Время пересадок
-зависит от геометрического расстояния между остановками, а не от реальных переходов по
-станциям. У входов в метро, на платформах и при пересадках сквозь крупные станции это может
-давать заметную ошибку. Нет расписаний, расчёта по дорожному графу для пешеходов, интервалов
-движения или учёта платных зон.
-
-Данные метро выбираются по OSM `route=subway` (и московскому `light_rail`), МЦК и МЦД - по
-признакам линий на железнодорожных `route=train` / `route_master=train`, включая `ref`, `name`
-и `network`. Дочерние `route` наследуют классификацию от выбранного `route_master`.
-Дополнительно извлекаются объекты `railway=station/halt` в московском регионе, отсутствующие
-в списках остановок отношений. Для железнодорожных маршрутов станция добавляется к маршруту,
-если она близка к его геометрии и не дублирует имеющуюся остановку (расстояние до 100 м).
-Такая привязка является эвристикой и может требовать проверки в местах пересечения линий.
-Если маршрут OSM не содержит путей, линия приблизительно соединяет последовательные остановки.
-
-Генератор выводит число направлений каждого вида транспорта, а также количество найденных
-объектов станции `Шаболовская`. Если станция всё ещё не найдена, выведется предупреждение.
-Включённые режимы используют только маршруты, найденные в OSM.
-
-## Основные параметры
-
-```text
--o, --output FILE       имя выходного HTML (routes.html)
---cache-dir DIR         каталог кеша (cache)
---update                скачать свежие данные OSM
---rebuild               пересобрать транспортный PBF из кеша
---walk-minutes N        начальное время пешком (5 мин)
---walk-speed N          скорость ходьбы (80 м/мин)
---grid-size N           размер ячейки пространственного индекса (400 м)
---circle-opacity N      прозрачность зон доступности (40%)
+```bash
+python3 build-transport-map.py --update
 ```
 
-Пример:
+После запуска открыть `routes.html`. Транспортные данные и код встроены
+в него, но Leaflet, MapLibre и подложка OpenFreeMap Bright требуют сети.
+При проблемах с открытием через `file://` запустить:
+
+```bash
+python3 -m http.server 8000
+```
+
+## Проверка данных и диагностика
+
+Создать отчет и сохраняемую копию нормализованных данных:
 
 ```bash
 python3 build-transport-map.py \
-    --walk-minutes 10 \
-    --walk-speed 75 \
+    --report-json report.json \
+    --dump-geojson transport.geojson
+```
+
+Отчет содержит количество маршрутов по видам транспорта, источник
+геометрии (`osm_ways`, `stop_chain`), неподтвержденные идентификаторы
+маршрутов, подозрительно длинные промежутки между станциями и наличие
+станции Шаболовская среди подтвержденных остановок маршрутов.
+
+Пересобрать карту из этого GeoJSON без PBF и без установленного osmium:
+
+```bash
+python3 build-transport-map.py \
+    --input-geojson transport.geojson \
     -o routes.html
 ```
 
-## Данные
+**Если МЦК не извлекается как OSM-маршрут, v0.3.0 покажет предупреждение
+и не будет подменять отсутствующую сеть искусственным кольцом.** Это
+сознательное изменение по сравнению с v0.2.x. Восстановление реальных
+отношений МЦК из проблемных OSM-файлов остается отдельной задачей.
 
-Источник транспортных данных - OpenStreetMap / Geofabrik.
+## Приблизительная модель времени
 
-Транспортные данные упаковываются непосредственно в сгенерированный HTML. Leaflet,
-MapLibre GL и векторные тайлы OpenFreeMap загружаются из сети, поэтому для отображения фона
-карты необходим доступ в интернет. Векторная карта работает через адаптер MapLibre GL Leaflet;
-поддержка WebGL необходима в браузере.
+| Вид транспорта | Скорость, км/ч | Ожидание, мин | Коэффициент длины |
+| --- | ---: | ---: | ---: |
+| Автобус | 19,2 | 4 | 1,25 |
+| Трамвай | 18 | 4 | 1,18 |
+| Троллейбус | 16,8 | 4 | 1,25 |
+| Метро | 37,8 | 2,5 | 1,10 |
+| МЦК | 46,8 | 4 | 1,08 |
+| МЦД | 54 | 5 | 1,08 |
 
-Подложка всегда использует OpenFreeMap Bright. Для новой обработки станций необходимо
-пересоздать транспортный кеш: генератор автоматически создаст версию `v4`.
+Расстояние ребра определяется по прямой между подтвержденными соседними
+остановками маршрута, затем умножается на коэффициент длины. Дополнительно
+учитывается приблизительно 0,35 минуты на остановку. Ходьба считается
+по прямой, стандартная скорость - 80 м/мин. Это модель доступности,
+не транспортный навигатор и не расчет по реальным расписаниям.
 
-OpenFreeMap: https://openfreemap.org/ и https://openfreemap.org/quick_start/
-OSM Tile Usage Policy: https://operations.osmfoundation.org/policies/tiles/
-
-## MCC line rendering (v0.2.5)
-
-An enabled MCC mode now shows the full *available* MCC network as a thin brown
-reference line. It is intentionally independent of the reachability-colored
-segments, so an inaccessible section is not mistaken for a reachable one.
-The legend identifies the two kinds of line. If OSM route ways are incomplete
-or cannot be matched to most stations, the line is approximated by connecting
-ordered station coordinates. This approximation does not claim to follow tracks.
-
-The in-browser console logs the number of MCC route directions, stops and
-rendered line geometries. If no route geometry is available, inspect the
-building diagnostics below: this drawing fix cannot create missing OSM data.
-
-This is an HTML/JavaScript rendering change. It reuses the existing
-`moscow-transport-v4.osm.pbf` cache without re-extraction.
-
-## MCC data diagnostics (v0.2.4)
-
-When MCC does not appear, check the console after building:
+## Код
 
 ```text
-MCC station fallback: found N/31 stations in OSM; existing route stops: M
-  mcc: K route directions
+build-transport-map.py              CLI для сборки
+transportmap/
+  __init__.py                       версия
+  osm_data.py                       выбор OSM и подготовка маршрутов
+  index.py                          индекс остановок и направлений
+  audit.py                          диагностика качества графа
+  renderer.py                       упаковка данных и исходников
+  assets/
+    page.html                       HTML-шаблон
+    map.css                         стили
+    map.js                          карта, геометрия, варианты маршрутов
+    routing.js                      раунды поиска, расчет доступности
+tests/
+  fixture-transport.geojson         искусственная сеть для тестов
+  test_transport.py                 тесты Python и JS
+  test_metrics.js                   тест независимости весов от отрисовки
 ```
 
-If the full route relation is missing, the fallback uses local OSM station coordinates
-and connects them in station order (straight segments, not actual tracks). If fewer than
-24 stations are found, the fallback is not constructed and a warning is printed.
-This does not modify the source PBF. The versioned v4 transport cache is rebuilt
-on the first run; later runs reuse it. Enable the MCC toggle in the map to show it.
+Исходники можно менять по отдельности, но публикуется единый `routes.html`.
+
+## Тесты
+
+```bash
+python3 -B -m unittest discover -s tests -v
+node tests/test_metrics.js
+python3 build-transport-map.py \
+    --input-geojson tests/fixture-transport.geojson \
+    --report-json test-report.json \
+    -o routes.html
+```
+
+Тесты проверяют синтаксис JS, формат HTML (ASCII, не более 100 символов
+на строку), параметры интерфейса, отсутствие искусственного кольца,
+наследование МЦК от родительского отношения и независимость стоимости
+маршрута от отображаемой геометрии.
+
+Включенная в архив тестовая сеть не заменяет проверку на реальном PBF.
+Полную обработку московского PBF в этом выпуске не проводили.
+
+## Командная строка
+
+```text
+-o, --output FILE      выходной HTML (routes.html)
+--cache-dir DIR        папка кеша (cache)
+--update                обновить исходный PBF и кеш
+--rebuild               пересобрать транспортный кеш
+--input-geojson FILE    исходные подготовленные GeoJSON-данные
+--dump-geojson FILE     сохранить промежуточный GeoJSON
+--report-json FILE      сохранить отчет об индексированном графе
+--infer-rail-stops      включить неточную эвристику железнодорожных станций
+--walk-minutes N        радиус пешком в минутах (5)
+--walk-speed N          скорость ходьбы в м/мин (80)
+--grid-size N           ячейка пространственного индекса в метрах (400)
+--circle-opacity N      начальная прозрачность зон в процентах (40)
+--version               версия
+```
+
+Данные: OpenStreetMap / Geofabrik.
+Карта: Leaflet, MapLibre GL, OpenFreeMap Bright.
