@@ -18,7 +18,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections import Counter, defaultdict
+from array import array
+from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
 
 try:
@@ -27,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.5.6"
+PROJECT_VERSION = "0.7.3"
 
 
 # OSM extraction and normalization
@@ -63,7 +64,8 @@ MCD_FULL = (
     "\u0435 \u0434\u0438\u0430\u043c\u0435\u0442\u0440\u044b"
 )
 METROPOLITAN = (
-    "\u043c\u0435\u0442\u0440\u043e\u043f\u043e\u043b\u0438\u0442" "\u0435\u043d"
+    "\u043c\u0435\u0442\u0440\u043e\u043f\u043e\u043b\u0438\u0442"
+    "\u0435\u043d"
 )
 MOSCOW_METROPOLITAN = (
     "\u043c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0439 "
@@ -80,17 +82,9 @@ def transport_mode(tags, route_type):
     text = " ".join(
         (tags.get(key) or "").casefold()
         for key in (
-            "network",
-            "network:short",
-            "name",
-            "name:ru",
-            "alt_name",
-            "official_name",
-            "short_name",
-            "description",
-            "ref",
-            "line",
-            "brand",
+            "network", "network:short", "name", "name:ru", "alt_name",
+            "official_name", "short_name", "description", "ref",
+            "line", "brand",
         )
     )
 
@@ -101,16 +95,15 @@ def transport_mode(tags, route_type):
         return None
 
     if any(
-        value in text for value in (MCC_SHORT, MCC_FULL, "moscow central circle", "mcc")
+        value in text
+        for value in (MCC_SHORT, MCC_FULL, "moscow central circle", "mcc")
     ) or (ref == "14" and route_type in RAIL_ROUTE_TYPES):
         return "mcc"
 
-    if (
-        MCD_REF_PATTERN.search(text)
-        or MCD_SHORT in text
-        or MCD_FULL in text
-        or "moscow central diameters" in text
-    ):
+    if (MCD_REF_PATTERN.search(text)
+            or MCD_SHORT in text
+            or MCD_FULL in text
+            or "moscow central diameters" in text):
         return "mcd"
 
     if route_type == "subway":
@@ -270,7 +263,10 @@ def is_station(tags):
         return True
     if tags.get("public_transport") == "station":
         return True
-    return tags.get("railway") == "platform" and tags.get("train") == "yes"
+    return (
+        tags.get("railway") == "platform"
+        and tags.get("train") == "yes"
+    )
 
 
 class TransportMasterDiscovery(OsmiumSimpleHandler):
@@ -299,11 +295,8 @@ class TransportSelectionHandler(OsmiumSimpleHandler):
         self.selected_routes = 0
 
     def node(self, node):
-        if (
-            is_station(node.tags)
-            and node.location.valid()
-            and station_in_area(node.location.lon, node.location.lat)
-        ):
+        if (is_station(node.tags) and node.location.valid()
+                and station_in_area(node.location.lon, node.location.lat)):
             self.writer.add_node(node)
 
     def way(self, way):
@@ -460,11 +453,8 @@ class ObjectHandler(OsmiumSimpleHandler):
         }
 
     def way(self, way):
-        if (
-            way.id not in self.stop_way_ids
-            and way.id not in self.route_way_ids
-            and not is_station(way.tags)
-        ):
+        if (way.id not in self.stop_way_ids and way.id not in self.route_way_ids
+                and not is_station(way.tags)):
             return
 
         coords = [
@@ -772,7 +762,9 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         # The route_master carries the line identity. A child route=subway
         # without MCC tags is otherwise incorrectly classified as metro.
         mode = (
-            master_info[master_key]["mode"] if master_key is not None else route["mode"]
+            master_info[master_key]["mode"]
+            if master_key is not None
+            else route["mode"]
         )
         if mode is None:
             continue
@@ -796,7 +788,11 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
             ref = master.get("ref") or route.get("ref")
         else:
             ref = route.get("ref")
-            route_key = f"{mode}:{ref}" if ref else f"{mode}:relation:{relation_id}"
+            route_key = (
+                f"{mode}:{ref}"
+                if ref
+                else f"{mode}:relation:{relation_id}"
+            )
 
         resolved_stops = []
         resolved_stop_roles = []
@@ -834,6 +830,7 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
                 "geometry": geometry,
             }
         )
+
 
     stop_features = []
 
@@ -877,9 +874,9 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         print(f"  {mode}: {mode_counts[mode]} route directions")
     shabolovskaya = "\u0428\u0430\u0431\u043e\u043b\u043e\u0432"
     matching = [
-        feature
-        for feature in stop_features
-        if shabolovskaya.casefold() in (feature["properties"]["name"] or "").casefold()
+        feature for feature in stop_features
+        if shabolovskaya.casefold()
+        in (feature["properties"]["name"] or "").casefold()
     ]
     print(f"Shabolovskaya stop objects: {len(matching)}")
     if not matching:
@@ -893,38 +890,17 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         "features": route_features + stop_features,
     }
 
-
 # Pedestrian network: OSM node topology, never coordinate-line intersections.
 # Walking segments cross a river only if OSM actually connects them via a way.
 
 WALK_HIGHWAYS = {
-    "footway",
-    "path",
-    "pedestrian",
-    "steps",
-    "living_street",
-    "residential",
-    "service",
-    "unclassified",
-    "tertiary",
-    "secondary",
-    "primary",
-    "trunk",
-    "track",
-    "bridleway",
-    "road",
-    "tertiary_link",
-    "secondary_link",
-    "primary_link",
-    "trunk_link",
+    "footway", "path", "pedestrian", "steps", "living_street",
+    "residential", "service", "unclassified", "tertiary", "secondary",
+    "primary", "trunk", "track", "bridleway", "road",
+    "tertiary_link", "secondary_link", "primary_link", "trunk_link",
 }
 WALK_DENIED = {
-    "no",
-    "private",
-    "agricultural",
-    "forestry",
-    "delivery",
-    "use_sidepath",
+    "no", "private", "agricultural", "forestry", "delivery", "use_sidepath",
 }
 WALK_GRID_M = 100.0
 WALK_CACHE_VERSION = 2
@@ -945,16 +921,11 @@ def is_walkable_way(tags):
     if access in WALK_DENIED and foot not in {"yes", "designated", "permissive"}:
         return False
     if highway in {"trunk", "trunk_link"} and foot not in {
-        "yes",
-        "designated",
-        "permissive",
+        "yes", "designated", "permissive",
     }:
         return False
     if tags.get("sidewalk") == "separate" and highway not in {
-        "footway",
-        "path",
-        "pedestrian",
-        "steps",
+        "footway", "path", "pedestrian", "steps",
     }:
         # A sidewalk mapped separately must be used instead of the car road.
         return False
@@ -999,13 +970,13 @@ class StopZoneIndex:
                         continue
                     min_x, max_x = gx * cell_size, (gx + 1) * cell_size
                     min_y, max_y = gy * cell_size, (gy + 1) * cell_size
-                    dx = max(min_x - x, 0.0, x - max_x)
-                    dy = max(min_y - y, 0.0, y - max_y)
-                    if dx * dx + dy * dy > self.radius_squared:
+                    dx = max(min_x-x, 0.0, x-max_x)
+                    dy = max(min_y-y, 0.0, y-max_y)
+                    if dx*dx + dy*dy > self.radius_squared:
                         continue
-                    fx = max(abs(min_x - x), abs(max_x - x))
-                    fy = max(abs(min_y - y), abs(max_y - y))
-                    if fx * fx + fy * fy <= self.radius_squared:
+                    fx = max(abs(min_x-x), abs(max_x-x))
+                    fy = max(abs(min_y-y), abs(max_y-y))
+                    if fx*fx + fy*fy <= self.radius_squared:
                         self.whole_cells.add(key)
                         self.boundary.pop(key, None)
                     else:
@@ -1020,8 +991,8 @@ class StopZoneIndex:
         if key in self.whole_cells:
             return True
         for sx, sy in self.boundary.get(key, ()):
-            dx, dy = sx - x, sy - y
-            if dx * dx + dy * dy <= self.radius_squared:
+            dx, dy = sx-x, sy-y
+            if dx*dx + dy*dy <= self.radius_squared:
                 return True
         return False
 
@@ -1031,8 +1002,7 @@ class WalkNodeCollector(OsmiumSimpleHandler):
         super().__init__()
         self.origin = origin
         self.zones = StopZoneIndex(
-            stops,
-            limit_m + WALK_ZONE_MARGIN_M,
+            stops, limit_m + WALK_ZONE_MARGIN_M,
         )
         self.nodes = {}
         self.blocked = set()
@@ -1099,14 +1069,10 @@ class WalkWayCollector(OsmiumSimpleHandler):
             length = math.hypot(a[0] - b[0], a[1] - b[1])
             if length < 0.1:
                 continue
-            self.edges.append(
-                [
-                    self.index_for(a_id),
-                    self.index_for(b_id),
-                    round(length, 1),
-                    direction,
-                ]
-            )
+            self.edges.append([
+                self.index_for(a_id), self.index_for(b_id),
+                round(length, 1), direction,
+            ])
             used = True
         if used:
             self.ways_count += 1
@@ -1117,8 +1083,8 @@ def walk_segment_distance(x, y, a, b):
     length_squared = dx * dx + dy * dy
     if length_squared <= 0:
         return 0.0, math.hypot(x - a[0], y - a[1])
-    t = min(1.0, max(0.0, ((x - a[0]) * dx + (y - a[1]) * dy) / length_squared))
-    dist = math.hypot(x - a[0] - t * dx, y - a[1] - t * dy)
+    t = min(1.0, max(0.0, ((x-a[0])*dx + (y-a[1])*dy) / length_squared))
+    dist = math.hypot(x-a[0]-t*dx, y-a[1]-t*dy)
     return t, dist
 
 
@@ -1131,10 +1097,10 @@ def build_walk_segment_grid(nodes, edges, cell_size=WALK_GRID_M):
         y0 = math.floor(min(a[1], b[1]) / cell_size)
         y1 = math.floor(max(a[1], b[1]) / cell_size)
         # Avoid multiplying very long edges across thousands of cells.
-        if (x1 - x0 + 1) * (y1 - y0 + 1) > 10000:
+        if (x1-x0+1)*(y1-y0+1) > 10000:
             continue
-        for gx in range(x0, x1 + 1):
-            for gy in range(y0, y1 + 1):
+        for gx in range(x0, x1+1):
+            for gy in range(y0, y1+1):
                 grid[(gx, gy)].append(index)
     return grid
 
@@ -1144,8 +1110,8 @@ def nearest_walk_segment(x, y, nodes, edges, grid, max_snap):
     radius = math.ceil(max_snap / WALK_GRID_M) + 1
     best = None
     checked = set()
-    for gx in range(cx - radius, cx + radius + 1):
-        for gy in range(cy - radius, cy + radius + 1):
+    for gx in range(cx-radius, cx+radius+1):
+        for gy in range(cy-radius, cy+radius+1):
             for idx in grid.get((gx, gy), ()):
                 if idx in checked:
                     continue
@@ -1166,16 +1132,11 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
     for idx, stop in enumerate(stops):
         # Rail station-centre points may be some distance from mapped entrances.
         modes = stop.get("modes", ())
-        snap_limit = (
-            100.0 if any(mode in ("metro", "mcc", "mcd") for mode in modes) else 45.0
-        )
+        snap_limit = 100.0 if any(
+            mode in ("metro", "mcc", "mcd") for mode in modes
+        ) else 45.0
         nearest = nearest_walk_segment(
-            stop["x"],
-            stop["y"],
-            nodes,
-            edges,
-            grid,
-            snap_limit,
+            stop["x"], stop["y"], nodes, edges, grid, snap_limit,
         )
         if nearest is None:
             missed["no_pedestrian_path_near_stop"] += 1
@@ -1199,27 +1160,25 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
                 walk_node = sequence[-1][1]
             else:
                 first, second = nodes[a], nodes[b]
-                nodes.append(
-                    [
-                        round(first[0] + (second[0] - first[0]) * t, 1),
-                        round(first[1] + (second[1] - first[1]) * t, 1),
-                    ]
-                )
-                walk_node = len(nodes) - 1
+                nodes.append([
+                    round(first[0] + (second[0]-first[0])*t, 1),
+                    round(first[1] + (second[1]-first[1])*t, 1),
+                ])
+                walk_node = len(nodes)-1
                 sequence.append((t, walk_node))
             stop = stops[stop_index]
             if lateral < 0.15:
                 stop_nodes[stop_index] = walk_node
             else:
                 nodes.append([stop["x"], stop["y"]])
-                stop_node = len(nodes) - 1
+                stop_node = len(nodes)-1
                 stop_nodes[stop_index] = stop_node
                 # Local stop-to-sidewalk connector, not a stop-to-stop shortcut.
                 result_edges.append([walk_node, stop_node, round(lateral, 1), 5])
         sequence.append((1.0, b))
         for (t0, n0), (t1, n1) in zip(sequence, sequence[1:]):
-            if n0 != n1 and t1 - t0 > 0.0000001:
-                result_edges.append([n0, n1, round(length * (t1 - t0), 1), direction])
+            if n0 != n1 and t1-t0 > 0.0000001:
+                result_edges.append([n0, n1, round(length*(t1-t0), 1), direction])
     for index, node in enumerate(stop_nodes):
         stops[index]["walk_node"] = node
     return {"nodes": nodes, "edges": result_edges}, dict(missed)
@@ -1245,9 +1204,7 @@ def build_pedestrian_graph(source_path, stops, origin, limit_m):
     print(f"pedestrian walkable ways: {ways.ways_count}")
     print(f"pedestrian walking segments: {len(ways.edges)}")
     graph, missed = attach_stops_to_walk_graph(
-        ways.graph_nodes,
-        ways.edges,
-        stops,
+        ways.graph_nodes, ways.edges, stops,
     )
     if not graph["edges"]:
         raise RuntimeError("No walking edges extracted from the source PBF")
@@ -1275,10 +1232,8 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
     if path.is_file() and not rebuild:
         with gzip.open(path, "rt", encoding="ascii") as stream:
             cached = json.load(stream)
-        if (
-            cached.get("stop_fingerprint") == fingerprint
-            and cached.get("walk_limit_m") == limit_m
-        ):
+        if (cached.get("stop_fingerprint") == fingerprint
+                and cached.get("walk_limit_m") == limit_m):
             print(f"Using cached: {path}")
             graph = cached["walking"]
             for stop, node in zip(index["stops"], cached["stop_nodes"]):
@@ -1286,14 +1241,10 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
             return graph
         print("Pedestrian cache differs from transport stops; rebuilding...")
     graph = build_pedestrian_graph(
-        source,
-        index["stops"],
-        index["origin"],
-        limit_m,
+        source, index["stops"], index["origin"], limit_m,
     )
     content = {
-        "version": WALK_CACHE_VERSION,
-        "stop_fingerprint": fingerprint,
+        "version": WALK_CACHE_VERSION, "stop_fingerprint": fingerprint,
         "walk_limit_m": limit_m,
         "stop_nodes": [stop["walk_node"] for stop in index["stops"]],
         "walking": graph,
@@ -1303,6 +1254,143 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
         json.dump(content, stream, ensure_ascii=True, separators=(",", ":"))
     tmp.replace(path)
     print(f"Saved pedestrian cache: {path}")
+    return graph
+
+
+# Offline walking transfer graph: directed CSR with network shortest paths.
+# This is distinct from the full OSM graph needed for on-map coverage.
+WALK_TRANSFER_CACHE_VERSION = 1
+
+
+def build_walk_transfers(walking, stops, radius_m):
+    started = time.monotonic()
+    count = len(walking["nodes"])
+    stop_nodes = defaultdict(list)
+    for index, stop in enumerate(stops):
+        node = stop.get("walk_node", -1)
+        if isinstance(node, int) and 0 <= node < count:
+            stop_nodes[node].append(index)
+
+    # Directed adjacency exactly matches the browser's walking CSR.
+    degree = array("I", [0]) * count
+    for a, b, length, direction in walking["edges"]:
+        if direction != 3:
+            degree[a] += 1
+        if direction != 2:
+            degree[b] += 1
+    offsets = array("I", [0]) * (count + 1)
+    for node in range(count):
+        offsets[node + 1] = offsets[node] + degree[node]
+    to = array("I", [0]) * offsets[-1]
+    weight = array("f", [0.0]) * offsets[-1]
+    cursor = array("I", offsets[:-1])
+    for a, b, length, direction in walking["edges"]:
+        if direction != 3:
+            slot = cursor[a]
+            to[slot] = b
+            weight[slot] = length
+            cursor[a] += 1
+        if direction != 2:
+            slot = cursor[b]
+            to[slot] = a
+            weight[slot] = length
+            cursor[b] += 1
+    del degree, cursor
+
+    result_offsets = [0]
+    result_to = []
+    result_meters = []
+    # A search is shared by all stops attached to the same graph vertex.
+    # Bounded reuse for stations sharing an identical attachment node.
+    reached_by_node = OrderedDict()
+    for stop_index, stop in enumerate(stops):
+        source = stop.get("walk_node", -1)
+        if not isinstance(source, int) or source < 0 or source >= count:
+            result_offsets.append(len(result_to))
+            continue
+        if source in reached_by_node:
+            reached = reached_by_node[source]
+            reached_by_node.move_to_end(source)
+        else:
+            best = {source: 0.0}
+            heap = [(0.0, source)]
+            reached = []
+            while heap:
+                distance, node = heapq.heappop(heap)
+                if distance > radius_m + 0.00001:
+                    break
+                if distance > best[node] + 0.00001:
+                    continue
+                for other_stop in stop_nodes.get(node, ()):
+                    reached.append((other_stop, round(distance, 2)))
+                for edge in range(offsets[node], offsets[node + 1]):
+                    next_node = to[edge]
+                    next_distance = distance + weight[edge]
+                    if next_distance > radius_m + 0.00001:
+                        continue
+                    if next_distance + 0.00001 >= best.get(next_node, math.inf):
+                        continue
+                    best[next_node] = next_distance
+                    heapq.heappush(heap, (next_distance, next_node))
+            reached.sort()
+            reached_by_node[source] = reached
+            if len(reached_by_node) > 256:
+                reached_by_node.popitem(last=False)
+        for target, distance in reached:
+            result_to.append(target)
+            result_meters.append(distance)
+        result_offsets.append(len(result_to))
+        if (stop_index + 1) % 1000 == 0:
+            elapsed = time.monotonic() - started
+            print("  transfer graph:", stop_index + 1, "/", len(stops),
+                  "stops;", len(result_to), "arcs;", f"{elapsed:.1f}s")
+
+    print("walking transfer graph:", len(result_to), "arcs in",
+          f"{time.monotonic()-started:.1f}s")
+    return {"offsets": result_offsets, "to": result_to,
+            "meters": result_meters}
+
+
+def load_or_build_walk_transfers(cache_dir, walking_source, walking, stops,
+                                 radius_m, rebuild=False):
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / "moscow-walk-transfers-v1.json.gz"
+    source = Path(walking_source)
+    stamp = source.stat() if source.is_file() else None
+    source_key = [str(source.resolve()), stamp.st_size, stamp.st_mtime_ns] \
+        if stamp else None
+    fingerprint = hashlib.sha256()
+    for stop in stops:
+        fingerprint.update(
+            (str(stop["id"]) + ":" + str(stop.get("walk_node", -1)) + ";")
+            .encode("utf-8")
+        )
+    metadata = {
+        "version": WALK_TRANSFER_CACHE_VERSION,
+        "stop_fingerprint": fingerprint.hexdigest(),
+        "source": source_key,
+        "radius_m": radius_m,
+        "nodes": len(walking["nodes"]),
+        "edges": len(walking["edges"]),
+    }
+    if path.is_file() and not rebuild:
+        with gzip.open(path, "rt", encoding="ascii") as stream:
+            cached = json.load(stream)
+        if all(cached.get(key) == value for key, value in metadata.items()):
+            graph = cached["transfers"]
+            if (len(graph.get("offsets", ())) == len(stops) + 1
+                    and graph["offsets"][-1] == len(graph.get("to", ()))
+                    and len(graph["to"]) == len(graph.get("meters", ()))):
+                print(f"Using cached walking transfers: {path}")
+                return graph
+        print("Walking transfer cache differs; rebuilding...")
+    graph = build_walk_transfers(walking, stops, radius_m)
+    content = {**metadata, "transfers": graph}
+    temp = path.with_suffix(".tmp.gz")
+    with gzip.open(temp, "wt", encoding="ascii", compresslevel=6) as stream:
+        json.dump(content, stream, ensure_ascii=True, separators=(",", ":"))
+    temp.replace(path)
+    print(f"Saved walking transfer cache: {path}")
     return graph
 
 
@@ -1317,7 +1405,6 @@ def project(lon, lat, origin_lon, origin_lat):
     y = EARTH_RADIUS_M * math.radians(lat - origin_lat)
 
     return x, y
-
 
 def build_index(data_json, grid_size):
     features = data_json.get("features", [])
@@ -1451,7 +1538,9 @@ def build_index(data_json, grid_size):
             }
         )
 
-    routes = {key: route for key, route in routes.items() if route["directions"]}
+    routes = {
+        key: route for key, route in routes.items() if route["directions"]
+    }
 
     for route in routes.values():
         route_stops = set()
@@ -1478,7 +1567,6 @@ def build_index(data_json, grid_size):
         "stops": stops,
         "routes": routes,
     }
-
 
 # Index diagnostics
 
@@ -1512,19 +1600,16 @@ def audit_index(data):
             for a, b in zip(positions, positions[1:]):
                 distance = stop_distance_m(stops[a], stops[b])
                 if distance > 15000:
-                    suspicious.append(
-                        {
-                            "route": key,
-                            "from": stops[a]["name"],
-                            "to": stops[b]["name"],
-                            "distance_m": round(distance),
-                        }
-                    )
+                    suspicious.append({
+                        "route": key,
+                        "from": stops[a]["name"],
+                        "to": stops[b]["name"],
+                        "distance_m": round(distance),
+                    })
 
     shabolovskaya = "\u0428\u0430\u0431\u043e\u043b\u043e\u0432\u0441\u043a\u0430\u044f"
     station_matches = [
-        stop["name"]
-        for stop in stops
+        stop["name"] for stop in stops
         if stop.get("name") and shabolovskaya.casefold() in stop["name"].casefold()
     ]
     return {
@@ -1536,7 +1621,6 @@ def audit_index(data):
         "suspicious_stop_gaps_over_15km": suspicious[:50],
         "shabolovskaya_matches": station_matches,
     }
-
 
 # Standalone HTML/CSS/JavaScript source
 
@@ -1623,6 +1707,8 @@ PAGE_HTML = r"""<!doctype html>
                 route to any point while keeping reachability mode.
             </div>
             <div class="project-version">v@@VERSION@@</div>
+            <div id="timing-status" role="status"
+                 style="font-size:12px;color:#64748b;margin-top:5px">Ready</div>
         </div>
 
         <div class="control" id="transport-modes">
@@ -1920,6 +2006,8 @@ PAGE_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
 
 MAP_CSS = r"""
         html,
@@ -3282,8 +3370,13 @@ async function loadTransportData() {
 }
 
 (async () => {
+const bootStarted = performance.now();
+console.info("[map] BOOT START");
 await loadMapLibraries();
+console.info("[map] BOOT libraries", Math.round(performance.now() - bootStarted), "ms");
 const data = await loadTransportData();
+console.info("[map] BOOT data decoded", Math.round(performance.now() - bootStarted),
+    "ms");
 
 const WALK_SPEED_M_PER_MIN = @@WALK_SPEED@@;
 const BUS_SPEED_M_PER_MIN = 320.0;
@@ -3397,6 +3490,7 @@ const tripAlternatives = document.getElementById("trip-alternatives");
 const tripSteps = document.getElementById("trip-steps");
 const tripBack = document.getElementById("trip-back");
 const resetOrigin = document.getElementById("reset-origin");
+const timingStatus = document.getElementById("timing-status");
 
 const TRAVEL_TIME_INFINITY_SLIDER_VALUE = 185;
 let walkMinutes = Number(walkTimeInput.value);
@@ -3408,7 +3502,187 @@ let selectedPoint = null;
 let selectedRouteFocus = null;
 let renderFrame = null;
 let renderGeneration = 0;
-let nearbyStopCache = new Map();
+// Profiling reports wall time to FULLY IDLE, not just the end of RAPTOR.
+// Measurement overhead is deliberately small: aggregate once per frame/batch.
+let runProfile = null;
+let runSerial = 0;
+const PROFILE_HEARTBEAT_MS = 5000;
+
+function profileElapsed(p) {
+    return Math.round(performance.now() - p.started);
+}
+
+function profileSnapshot(p) {
+    const wave = p.wave;
+    const walk = wave ? wave.stats() : null;
+    const stopPending = Math.max(0, stopPaintQueue.length - stopPaintCursor);
+    return {
+        elapsedMs: profileElapsed(p),
+        phase: p.searchDone && wave && !wave.idle()
+            ? "Walking coverage wave" : p.currentPhase,
+        transportDone: p.searchDone,
+        wave: walk,
+        walkingLines: [0, 1, 2, 3].map(tier =>
+            coverageLinesForTier(tier).length),
+        walkingPaintPending: coverageCursor.map((position, tier) =>
+            coverageLinesForTier(tier).length - position),
+        dirtyCoverageTiles: coverageMasksDirty ? 1 : 0,
+        coverageComposites: coverageCompositeCount,
+        routeEdges: routeEdgeRecords.map(items => items.length),
+        routePaintPending: routeEdgeRecords.map((items, tier) =>
+            items.length - routeCanvasCursors[tier]),
+        stopCount: displayedStopIndexes.size,
+        stopPaintPending: stopPending,
+        stopRedrawPending: stopCanvasRedrawItems.length - stopCanvasRedrawIndex,
+        cpuMs: {...p.cpu},
+        frames: {...p.frames},
+        evidenceEvents: p.evidenceEvents,
+        longTasks: {...p.longTasks}
+    };
+}
+
+function profilePending(p) {
+    if (!p.searchDone || !p.wave || !p.wave.idle()) return true;
+    if (hasUnpaintedCoverage() || coveragePaintFrame !== null) return true;
+    if (routePaintFrame !== null || routeCanvasZooming) return true;
+    if (routeEdgeRecords.some((items, tier) =>
+        items.length !== routeCanvasCursors[tier])) return true;
+    if (stopPaintFrame !== null || stopCanvasRedrawFrame !== null) return true;
+    if (stopPaintCursor < stopPaintQueue.length) return true;
+    if (stopCanvasRedrawIndex < stopCanvasRedrawItems.length) return true;
+    return false;
+}
+
+function profileUpdateStatus(p) {
+    if (!p || p !== runProfile) return;
+    const seconds = (profileElapsed(p) / 1000).toFixed(1);
+    if (p.searchDone) {
+        timingStatus.textContent = "Rendering... " + seconds + " s";
+    } else {
+        timingStatus.textContent = p.currentPhase + "... " + seconds + " s";
+    }
+}
+
+function profileFinish(p) {
+    if (p !== runProfile || p.finished || profilePending(p)) return;
+    if (p.finalFrame) return;
+    // Wait for the browser to present the final completed Canvas frame.
+    p.finalFrame = requestAnimationFrame(() => {
+        p.finalFrame = null;
+        if (p !== runProfile || p.finished || profilePending(p)) return;
+        p.finished = true;
+        clearInterval(p.timer);
+        if (p.longTaskObserver) p.longTaskObserver.disconnect();
+        const report = {
+            version: "0.7.3", run: p.serial, settings: p.settings,
+            totalWallMs: profileElapsed(p),
+            phases: p.phases, cpuMs: p.cpu, frames: p.frames,
+            firstVisibleMs: p.firstVisible,
+            final: profileSnapshot(p), longTasks: p.longTasks
+        };
+        window.transportLastProfile = report;
+        timingStatus.textContent = "Complete in " +
+            (report.totalWallMs / 1000).toFixed(1) + " s";
+        console.info("[map] FULLY IDLE", report.totalWallMs + " ms");
+        console.table(p.phases);
+        console.info("[map] FINAL REPORT (copy window.transportLastProfile)", report);
+    });
+}
+
+function profileMarkPaint(name, elapsed, count=0) {
+    const p = runProfile;
+    if (!p || p.finished) return;
+    p.cpu[name] = (p.cpu[name] || 0) + elapsed;
+    p.frames[name] = (p.frames[name] || 0) + 1;
+    p.frames[name + "Items"] = (p.frames[name + "Items"] || 0) + count;
+    if (!p.firstVisible[name] && count > 0) {
+        p.firstVisible[name] = profileElapsed(p);
+        console.info("[map] FIRST", name, p.firstVisible[name] + " ms");
+    }
+    if (p.searchDone) profileFinish(p);
+}
+
+function profilePhaseStart(name) {
+    const p = runProfile;
+    if (!p || p.finished) return;
+    p.currentPhase = name;
+    p.active[name] = performance.now();
+    console.info("[map] START", name, "+" + profileElapsed(p) + " ms");
+    profileUpdateStatus(p);
+}
+
+function profilePhaseEnd(name, details=null) {
+    const p = runProfile;
+    if (!p || p.finished || p.active[name] === undefined) return;
+    const started = p.active[name];
+    delete p.active[name];
+    const elapsed = Math.round(performance.now() - started);
+    p.phases.push({phase: name, wallMs: elapsed, details: details || ""});
+    console.info("[map] DONE", name, elapsed + " ms", details || "");
+    profileUpdateStatus(p);
+}
+
+function profileAbort(reason) {
+    const p = runProfile;
+    if (!p || p.finished) return;
+    clearInterval(p.timer);
+    if (p.longTaskObserver) p.longTaskObserver.disconnect();
+    if (p.finalFrame !== null) cancelAnimationFrame(p.finalFrame);
+    p.finished = true;
+    console.info("[map] ABORT", reason, "+" + profileElapsed(p) + " ms",
+        profileSnapshot(p));
+    timingStatus.textContent = "Stopped (" + reason + ")";
+    runProfile = null;
+}
+
+function profileBegin(token) {
+    const p = {
+        token, serial: ++runSerial, started: performance.now(),
+        finished: false, searchDone: false, wave: null,
+        finalFrame: null, currentPhase: "Preparing",
+        active: {}, phases: [], cpu: {}, frames: {},
+        evidenceEvents: 0, firstVisible: {},
+        settings: {
+            walkMinutes, maxTransfers, maxTravelMinutes,
+            enabledModes: Array.from(enabledModes),
+            start: [selectedPoint.lat, selectedPoint.lon]
+        },
+        timer: null, longTasks: {count: 0, totalMs: 0, maxMs: 0},
+        longTaskObserver: null
+    };
+    runProfile = p;
+    window.transportCurrentProfile = () => {
+        if (!runProfile || runProfile.finished) return null;
+        return profileSnapshot(runProfile);
+    };
+    if (typeof PerformanceObserver === "function") {
+        try {
+            p.longTaskObserver = new PerformanceObserver(list => {
+                for (const entry of list.getEntries()) {
+                    if (entry.startTime < p.started || p.finished) continue;
+                    p.longTasks.count++;
+                    p.longTasks.totalMs += entry.duration;
+                    p.longTasks.maxMs = Math.max(p.longTasks.maxMs, entry.duration);
+                }
+            });
+            p.longTaskObserver.observe({entryTypes: ["longtask"]});
+        } catch (_) {
+            p.longTaskObserver = null;
+        }
+    }
+    window.transportLastProfile = null;
+    console.info("[map] RUN", p.serial, "START", p.settings);
+    timingStatus.textContent = "Preparing...";
+    p.timer = setInterval(() => {
+        if (p !== runProfile || p.finished) return;
+        const snap = profileSnapshot(p);
+        console.info("[map] STILL WORKING", snap);
+        profileUpdateStatus(p);
+        profileFinish(p);
+    }, PROFILE_HEARTBEAT_MS);
+    return p;
+}
+
 let analysisCacheKey = null;
 let analysisCache = null;
 let targetPoint = null;
@@ -3504,6 +3778,20 @@ const twoTransferRouteLayer = L.layerGroup().addTo(map);
 const transferRouteLayer = L.layerGroup().addTo(map);
 const directRouteLayer = L.layerGroup().addTo(map);
 const stopLayer = L.layerGroup().addTo(map);
+// One low-overhead route canvas per transfer tier. Edges arrive directly
+// from the RAPTOR scan, rather than waiting for the final route summary.
+const routeCanvases = Array.from({length: 3}, (_, tier) => {
+    const canvas = document.createElement("canvas");
+    canvas.style.position = "absolute";
+    canvas.style.pointerEvents = "none";
+    canvas.style.zIndex = String(3 - tier);
+    canvas.style.opacity = String([0.85, 0.48, 0.34][tier]);
+    map.getPane("routePane").appendChild(canvas);
+    return canvas;
+});
+const routeContexts = routeCanvases.map(canvas =>
+    canvas.getContext("2d", {alpha: true})
+);
 const stopCanvas = document.createElement("canvas");
 stopCanvas.style.position = "absolute";
 stopCanvas.style.pointerEvents = "none";
@@ -3586,7 +3874,6 @@ function updateControls() {
             : rawTravelTimeLimit;
 
     if (newWalkRadius !== walkRadius) {
-        nearbyStopCache.clear();
         reachabilitySearchCache.clear();
         itineraryCache.clear();
     }
@@ -3645,6 +3932,10 @@ if (!walking || !walking.nodes || !walking.edges) {
 }
 const walkNodes = walking.nodes;
 const walkEdges = walking.edges;
+const walkTransfers = data.walk_transfers;
+if (!walkTransfers || walkTransfers.offsets.length !== stops.length + 1) {
+    throw new Error("Missing precomputed walking transfer graph");
+}
 const walkStopAtNode = new Map();
 const walkNodeAtStopXY = new Map();
 for (let i = 0; i < stops.length; ++i) {
@@ -3660,6 +3951,7 @@ for (let i = 0; i < stops.length; ++i) {
 }
 
 // CSR adjacency avoids millions of per-node JavaScript arrays.
+const csrStarted = performance.now();
 const walkDegree = new Uint32Array(walkNodes.length);
 for (const edge of walkEdges) {
     if (edge[3] !== 3) walkDegree[edge[0]]++;
@@ -3685,11 +3977,64 @@ for (const [a, b, length, direction] of walkEdges) {
     }
 }
 
+console.info("[map] BOOT pedestrian CSR", Math.round(performance.now() - csrStarted),
+    "ms; nodes:", walkNodes.length, "arcs:", walkTo.length);
+
+// All walking searches use the existing CSR arrays in this thread.
+// Bounded generator steps let the browser render between expensive searches.
+const walkingStats = {queries: 0, cpuMs: 0, yields: 0, yieldMs: 0};
+const WALK_SLICE_MS = 6;
+
+async function drainWalkingSteps(iterator, token, countStats=false) {
+    let started = performance.now();
+    if (countStats) walkingStats.queries++;
+    while (token === renderGeneration) {
+        const next = iterator.next();
+        if (next.done) {
+            if (countStats) walkingStats.cpuMs += performance.now() - started;
+            return next.value;
+        }
+        if (performance.now() - started < WALK_SLICE_MS) continue;
+        if (countStats) {
+            walkingStats.cpuMs += performance.now() - started;
+            walkingStats.yields++;
+        }
+        const waiting = performance.now();
+        await eventLoopYield();
+        if (countStats) walkingStats.yieldMs += performance.now() - waiting;
+        started = performance.now();
+    }
+    return null;
+}
+
+async function warmWalkingPoint(point, token) {
+    const xy = project(point.lon, point.lat);
+    const key = xy[0].toFixed(1) + ":" + xy[1].toFixed(1) + ":" + walkRadius;
+    if (walkPointCache.has(key)) return true;
+    if (!await warmWalkSegmentGrid(token)) return false;
+    const anchor = snapWalkXY(xy[0], xy[1]);
+    if (!anchor) {
+        walkPointCache.set(key, {
+            anchor: null, distance: new Map(), stopsReached: new Map()
+        });
+        return true;
+    }
+    const result = await drainWalkingSteps(
+        walkDijkstraSteps(walkSeeds(anchor), walkRadius), token, true
+    );
+    if (!result || token !== renderGeneration) return false;
+    walkPointCache.set(key, {anchor, ...result});
+    if (walkPointCache.size > 12) {
+        walkPointCache.delete(walkPointCache.keys().next().value);
+    }
+    return true;
+}
+
 const WALK_GRID_METERS = 100;
 const WALK_MAX_SNAP_METERS = 35;
 let walkSegmentGrid = null;
+let walkSegmentGridIterator = null;
 let walkPointCache = new Map();
-let walkStopCache = new Map();
 
 function makeMinHeap() {
     const array = [];
@@ -3728,9 +4073,8 @@ function makeMinHeap() {
     };
 }
 
-function buildWalkSegmentGrid() {
-    if (walkSegmentGrid) return;
-    walkSegmentGrid = new Map();
+function* buildWalkSegmentGridSteps() {
+    const grid = new Map();
     for (let i = 0; i < walkEdges.length; ++i) {
         const edge = walkEdges[i];
         if (edge[3] === 5) continue; // Never snap to station connector.
@@ -3744,17 +4088,39 @@ function buildWalkSegmentGrid() {
         for (let x = x0; x <= x1; ++x) {
             for (let y = y0; y <= y1; ++y) {
                 const key = x + ":" + y;
-                let entries = walkSegmentGrid.get(key);
+                let entries = grid.get(key);
                 if (!entries) {
                     entries = [];
-                    walkSegmentGrid.set(key, entries);
+                    grid.set(key, entries);
                 }
                 entries.push(i);
             }
         }
+        if ((i & 1023) === 0) yield;
     }
+    walkSegmentGrid = grid;
+    walkSegmentGridIterator = null;
+    return true;
 }
 
+
+function buildWalkSegmentGrid() {
+    if (walkSegmentGrid) return;
+    if (!walkSegmentGridIterator) {
+        walkSegmentGridIterator = buildWalkSegmentGridSteps();
+    }
+    // Synchronous access is still supported for explicit trip inspection.
+    while (!walkSegmentGridIterator.next().done) {}
+}
+
+async function warmWalkSegmentGrid(token) {
+    if (walkSegmentGrid) return true;
+    if (!walkSegmentGridIterator) {
+        walkSegmentGridIterator = buildWalkSegmentGridSteps();
+    }
+    // Preserve work on cancellation; the next selection resumes the same index.
+    return Boolean(await drainWalkingSteps(walkSegmentGridIterator, token));
+}
 function snapWalkXY(x, y) {
     const stopNode = walkNodeAtStopXY.get(x.toFixed(1) + ":" + y.toFixed(1));
     if (stopNode !== undefined) return {node: stopNode, x, y};
@@ -3804,7 +4170,7 @@ function walkSeeds(anchor) {
     return seeds;
 }
 
-function walkDijkstra(seeds, limit, savePrevious=false) {
+function* walkDijkstraSteps(seeds, limit, savePrevious=false) {
     const distance = new Map();
     const stopsReached = new Map();
     const previous = savePrevious ? new Map() : null;
@@ -3815,6 +4181,7 @@ function walkDijkstra(seeds, limit, savePrevious=false) {
         heap.push(cost, node);
         if (previous) previous.set(node, -1);
     }
+    let settled = 0;
     while (heap.size) {
         const entry = heap.pop();
         const d = entry[0], node = entry[1];
@@ -3837,8 +4204,18 @@ function walkDijkstra(seeds, limit, savePrevious=false) {
             if (previous) previous.set(next, node);
             heap.push(nextDistance, next);
         }
+        if ((++settled & 127) === 0) yield;
     }
     return { distance, stopsReached, previous };
+}
+
+
+function walkDijkstra(seeds, limit, savePrevious=false) {
+    const iterator = walkDijkstraSteps(seeds, limit, savePrevious);
+    while (true) {
+        const next = iterator.next();
+        if (next.done) return next.value;
+    }
 }
 
 function walkContextForXY(x, y) {
@@ -3861,21 +4238,6 @@ function walkContextForPoint(point) {
     return walkContextForXY(xy[0], xy[1]);
 }
 
-function walkContextForStop(stopIndex) {
-    const key = stopIndex + ":" + walkRadius;
-    const cached = walkStopCache.get(key);
-    if (cached) return cached;
-    const node = stops[stopIndex].walk_node;
-    const context = node >= 0
-        ? walkDijkstra([[node, 0]], walkRadius)
-        : { distance: new Map(), stopsReached: new Map() };
-    walkStopCache.set(key, context);
-    if (walkStopCache.size > 800) {
-        walkStopCache.delete(walkStopCache.keys().next().value);
-    }
-    return context;
-}
-
 function findNearbyStopsXY(x, y) {
     return Array.from(walkContextForXY(x, y).stopsReached.keys()).filter(
         index => stops[index].routes.some(isRouteEnabled)
@@ -3885,20 +4247,6 @@ function findNearbyStopsXY(x, y) {
 function findNearbyStops(lat, lon) {
     const point = project(lon, lat);
     return findNearbyStopsXY(point[0], point[1]);
-}
-
-function findNearbyStopsFromStop(stopIndex) {
-    const cached = nearbyStopCache.get(stopIndex);
-    if (cached) return cached;
-    const result = Array.from(
-        walkContextForStop(stopIndex).stopsReached.keys()
-    ).filter(index => stops[index].routes.some(isRouteEnabled));
-    nearbyStopCache.set(stopIndex, result);
-    return result;
-}
-
-function walkDistanceBetweenStops(a, b) {
-    return walkContextForStop(a).stopsReached.get(b) ?? Infinity;
 }
 
 function walkDistanceToAnchor(context, anchor) {
@@ -4042,11 +4390,13 @@ function walkXYToLatLng(point) {
 }
 
 function clearResult() {
+    clearProgressiveRoutes();
     clearProgressiveStops();
     pendingCoverageDisks = [[], [], []];
     activeCoverageDisks = [[], [], []];
     for (let i = 0; i < 3; ++i) activeCoverageLines[i] = [];
     originWalkingLines = [];
+    coverageState = null;
     clearCoverageOverlay();
     twoTransferRouteLayer.clearLayers();
     transferRouteLayer.clearLayers();
@@ -4183,6 +4533,206 @@ function drawRoute(routeKey, transferCount, reachableSegments) {
     }
 }
 
+// Route drawing is incremental and independent of the walking wave.
+// Each confirmed traversed edge is retained once per transfer tier, so
+// a zoom/pan redraw does not require repeating the transport search.
+const routeEdgeRecords = [[], [], []];
+const routeEdgeKeys = [new Set(), new Set(), new Set()];
+const routeCanvasCursors = [0, 0, 0];
+let routePaintFrame = null;
+let routeViewFrame = null;
+let routeCanvasOrigin = L.point(0, 0);
+let routeCanvasBounds = null;
+let routeCanvasScale = 1;
+let routeCanvasZooming = false;
+let routePaintTier = 0;
+let routeFirstPaintMs = null;
+
+function positionRouteCanvases() {
+    const size = map.getSize();
+    const scale = Math.min(window.devicePixelRatio || 1, 1.5);
+    const width = Math.max(1, Math.round(size.x * scale));
+    const height = Math.max(1, Math.round(size.y * scale));
+    routeCanvasOrigin = map.containerPointToLayerPoint([0, 0]);
+    routeCanvasBounds = map.getBounds().pad(0.05);
+    routeCanvasScale = scale;
+    for (let tier = 0; tier < 3; ++tier) {
+        const canvas = routeCanvases[tier];
+        canvas.style.width = size.x + "px";
+        canvas.style.height = size.y + "px";
+        L.DomUtil.setPosition(canvas, routeCanvasOrigin);
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+        routeContexts[tier].setTransform(scale, 0, 0, scale, 0, 0);
+        routeContexts[tier].lineWidth = [4, 2.8, 2.2][tier];
+        routeContexts[tier].lineCap = "round";
+        routeContexts[tier].lineJoin = "round";
+    }
+}
+
+function clearRouteCanvasPixels() {
+    for (let tier = 0; tier < 3; ++tier) {
+        const canvas = routeCanvases[tier];
+        const ctx = routeContexts[tier];
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
+    }
+}
+
+function cancelRoutePaint() {
+    if (routePaintFrame !== null) cancelAnimationFrame(routePaintFrame);
+    if (routeViewFrame !== null) cancelAnimationFrame(routeViewFrame);
+    routePaintFrame = null;
+    routeViewFrame = null;
+}
+
+function clearProgressiveRoutes() {
+    cancelRoutePaint();
+    for (let tier = 0; tier < 3; ++tier) {
+        routeEdgeRecords[tier].length = 0;
+        routeEdgeKeys[tier].clear();
+        routeCanvasCursors[tier] = 0;
+    }
+    routeFirstPaintMs = null;
+    clearRouteCanvasPixels();
+}
+
+function queueProgressiveRouteEdge(routeKey, direction, pos, tier, token) {
+    if (token !== renderGeneration || selectedRouteFocus) return;
+    if (tier < 0 || tier > 2 || pos <= 0 || !direction) return;
+    if (!direction.stops || pos >= direction.stops.length) return;
+    const key = routeKey + ":" + relationKey(direction) + ":" + pos;
+    if (routeEdgeKeys[tier].has(key)) return;
+    routeEdgeKeys[tier].add(key);
+    routeEdgeRecords[tier].push({routeKey, direction, pos});
+    scheduleRoutePaint();
+}
+
+function queueProgressiveCandidateLeg(candidate, tier, token) {
+    const legs = candidateLegs(candidate);
+    const leg = legs[legs.length - 1];
+    if (!leg) return;
+    for (const part of legParts(leg)) {
+        for (let pos = part.startPos + 1; pos <= part.endPos; ++pos) {
+            queueProgressiveRouteEdge(
+                part.routeKey || leg.routeKey, part.direction, pos, tier, token
+            );
+        }
+    }
+}
+
+function paintOneRouteEdge(item, tier) {
+    const part = {
+        direction: item.direction,
+        startPos: item.pos - 1,
+        endPos: item.pos
+    };
+    const geometry = routeSinglePartGeometry(part) || stopChainGeometry(
+        item.direction, part.startPos, part.endPos
+    );
+    if (!geometry) return;
+    const ctx = routeContexts[tier];
+    ctx.strokeStyle = routeColor(item.routeKey);
+    ctx.beginPath();
+    let visible = false;
+    for (const line of geometryLines(geometry)) {
+        if (line.length < 2) continue;
+        // Bounding boxes retain lines crossing the viewport even if both
+        // endpoints are offscreen; all coordinates remain OSM-derived.
+        const box = routeCanvasBounds;
+        const west = box.getWest(), east = box.getEast();
+        const south = box.getSouth(), north = box.getNorth();
+        let minLon = Infinity, maxLon = -Infinity;
+        let minLat = Infinity, maxLat = -Infinity;
+        for (const coord of line) {
+            minLon = Math.min(minLon, coord[0]);
+            maxLon = Math.max(maxLon, coord[0]);
+            minLat = Math.min(minLat, coord[1]);
+            maxLat = Math.max(maxLat, coord[1]);
+        }
+        if (maxLon < west || minLon > east ||
+            maxLat < south || minLat > north) continue;
+        let first = true;
+        for (const coord of line) {
+            const pt = map.latLngToLayerPoint([coord[1], coord[0]]);
+            const x = pt.x - routeCanvasOrigin.x;
+            const y = pt.y - routeCanvasOrigin.y;
+            if (first) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+            first = false;
+        }
+        visible = true;
+    }
+    if (visible) ctx.stroke();
+}
+
+function paintProgressiveRouteFrame() {
+    const frameStart = performance.now();
+    routePaintFrame = null;
+    if (routeCanvasZooming) return;
+    const deadline = performance.now() + 3;
+    let painted = 0;
+    let attempted = 0;
+    // Rotate the tiers so outer routes cannot starve direct routes.
+    while (attempted < 64 && performance.now() < deadline) {
+        const tier = routePaintTier;
+        routePaintTier = (routePaintTier + 1) % 3;
+        if (routeCanvasCursors[tier] >= routeEdgeRecords[tier].length) {
+            if (++attempted >= 3) break;
+            continue;
+        }
+        attempted = 0;
+        const item = routeEdgeRecords[tier][routeCanvasCursors[tier]++];
+        paintOneRouteEdge(item, tier);
+        painted++;
+    }
+    if (painted && routeFirstPaintMs === null) {
+        routeFirstPaintMs = performance.now();
+    }
+    scheduleRoutePaint();
+    profileMarkPaint("routePaint", performance.now() - frameStart, painted);
+}
+
+function scheduleRoutePaint() {
+    if (routeCanvasZooming || routePaintFrame !== null) return;
+    if (!routeEdgeRecords.some(
+        (items, tier) => routeCanvasCursors[tier] < items.length
+    )) return;
+    routePaintFrame = requestAnimationFrame(paintProgressiveRouteFrame);
+}
+
+function redrawProgressiveRoutes() {
+    if (routeCanvasZooming) return;
+    cancelRoutePaint();
+    positionRouteCanvases();
+    clearRouteCanvasPixels();
+    routeCanvasCursors.fill(0);
+    scheduleRoutePaint();
+}
+
+function scheduleRouteViewportRedraw() {
+    if (routeCanvasZooming || routeViewFrame !== null) return;
+    routeViewFrame = requestAnimationFrame(() => {
+        routeViewFrame = null;
+        redrawProgressiveRoutes();
+    });
+}
+
+function suspendRoutesForZoom() {
+    routeCanvasZooming = true;
+    cancelRoutePaint();
+    for (const canvas of routeCanvases) canvas.style.visibility = "hidden";
+    clearRouteCanvasPixels();
+}
+
+function resumeRoutesAfterZoom() {
+    routeCanvasZooming = false;
+    redrawProgressiveRoutes();
+    for (const canvas of routeCanvases) canvas.style.visibility = "visible";
+}
+
 function coverageRadiusForArrival(arrivalMinutes) {
     if (!Number.isFinite(maxTravelMinutes)) {
         return walkRadius;
@@ -4227,11 +4777,31 @@ let originWalkingLines = [];
 const coverageColors = ["#3388ff", "#ff9800", "#7c3aed", "#dc2626"];
 const coverageWidths = [10, 10, 10, 7];
 const coverageCursor = [0, 0, 0, 0];
+// The wave stores per-vertex best budgets. Canvas queues only visible edge IDs.
+let coverageState = null;
+const coverageViewEdges = [[], [], [], []];
+let coverageViewIterator = null;
+let coverageBounds = null;
+let coverageWorldSize = 1;
+let coverageWorldOffsetX = 0;
+let coverageWorldOffsetY = 0;
+const coveragePixelX = new Float32Array(walkNodes.length);
+const coveragePixelY = new Float32Array(walkNodes.length);
+const coveragePixelStamp = new Uint32Array(walkNodes.length);
+let coveragePixelGeneration = 0;
+let coverageLastComposite = 0;
 // 2 transfers -> 1 transfer -> direct -> walk from origin (highest).
 const coverageOrder = [2, 1, 0, 3];
-const COVERAGE_TILE_SIZE = 128;
-const dirtyCoverageTiles = new Set();
-let coverageTileColumns = 1;
+// Composite opaque tier masks at most a few times per second.
+// A final composite happens as soon as all masks have been painted.
+let coverageMasksDirty = false;
+let coverageCompositeCount = 0;
+// At small zoom levels many OSM edges project onto the same screen pixel.
+// Each tier draws a tiny screen cell only once, without changing routing.
+let coverageTinyStep = 0;
+let coverageTinyColumns = 0;
+let coverageTinyRows = 0;
+let coverageTinySeen = [null, null, null, null];
 let coverageSize = L.point(0, 0);
 let coverageScale = 1;
 let coveragePaintFrame = null;
@@ -4243,7 +4813,120 @@ let coverageViewFrame = null;
 let coverageWheelTimer = null;
 
 function coverageLinesForTier(tier) {
+    if (coverageState) return coverageViewEdges[tier];
     return tier === 3 ? originWalkingLines : activeCoverageLines[tier];
+}
+
+function coverageEdgeInView(edge) {
+    const a = walkNodes[edge[0]];
+    const b = walkNodes[edge[1]];
+    const bounds = coverageBounds;
+    return !(Math.max(a[0], b[0]) < bounds[0] ||
+        Math.min(a[0], b[0]) > bounds[2] ||
+        Math.max(a[1], b[1]) < bounds[1] ||
+        Math.min(a[1], b[1]) > bounds[3]);
+}
+
+function coveragePixel(node) {
+    if (coveragePixelStamp[node] !== coveragePixelGeneration) {
+        const point = walkNodes[node];
+        const lon = ORIGIN_LON + point[0] * 180 /
+            (Math.PI * EARTH_RADIUS_M * Math.cos(ORIGIN_LAT_RAD));
+        const lat = ORIGIN_LAT + point[1] * 180 / (Math.PI * EARTH_RADIUS_M);
+        const phi = lat * Math.PI / 180;
+        coveragePixelX[node] = coverageWorldSize * (lon + 180) / 360 -
+            coverageWorldOffsetX;
+        coveragePixelY[node] = coverageWorldSize *
+            (1 - Math.log(Math.tan(phi) + 1 / Math.cos(phi)) / Math.PI) / 2 -
+            coverageWorldOffsetY;
+        coveragePixelStamp[node] = coveragePixelGeneration;
+    }
+}
+
+// Typed heap for the large multi-source pedestrian wave. No per-push objects.
+function makeCoverageHeap() {
+    let capacity = 4096;
+    let keys = new Float64Array(capacity);
+    let nodes = new Uint32Array(capacity);
+    const result = [0, 0];
+    let length = 0;
+    return {
+        get size() { return length; },
+        push(key, node) {
+            if (length === capacity) {
+                capacity *= 2;
+                const nextKeys = new Float64Array(capacity);
+                const nextNodes = new Uint32Array(capacity);
+                nextKeys.set(keys);
+                nextNodes.set(nodes);
+                keys = nextKeys;
+                nodes = nextNodes;
+            }
+            let i = length++;
+            while (i > 0) {
+                const parent = (i - 1) >>> 1;
+                if (keys[parent] <= key) break;
+                keys[i] = keys[parent];
+                nodes[i] = nodes[parent];
+                i = parent;
+            }
+            keys[i] = key;
+            nodes[i] = node;
+        },
+        pop() {
+            result[0] = keys[0];
+            result[1] = nodes[0];
+            const key = keys[--length];
+            const node = nodes[length];
+            if (length > 0) {
+                let i = 0;
+                while (i * 2 + 1 < length) {
+                    let child = i * 2 + 1;
+                    if (child + 1 < length && keys[child + 1] < keys[child]) {
+                        child++;
+                    }
+                    if (key <= keys[child]) break;
+                    keys[i] = keys[child];
+                    nodes[i] = nodes[child];
+                    i = child;
+                }
+                keys[i] = key;
+                nodes[i] = node;
+            }
+            return result;
+        }
+    };
+}
+
+// Reconstruct a viewport from settled wave state, never from all-city strokes.
+function* rebuildCoverageViewSteps() {
+    if (!coverageState || !walkSegmentGrid) return;
+    const seen = new Uint8Array(walkEdges.length);
+    const x0 = Math.floor(coverageBounds[0] / WALK_GRID_METERS);
+    const x1 = Math.floor(coverageBounds[2] / WALK_GRID_METERS);
+    const y0 = Math.floor(coverageBounds[1] / WALK_GRID_METERS);
+    const y1 = Math.floor(coverageBounds[3] / WALK_GRID_METERS);
+    let checked = 0;
+    for (let y = y0; y <= y1; ++y) {
+        for (let x = x0; x <= x1; ++x) {
+            const ids = walkSegmentGrid.get(x + ":" + y);
+            if (!ids) continue;
+            for (const id of ids) {
+                if (seen[id]) continue;
+                seen[id] = 1;
+                const edge = walkEdges[id];
+                if (edge[3] === 5 || !coverageEdgeInView(edge)) continue;
+                for (let tier = 0; tier < 4; ++tier) {
+                    const reached = coverageState.settled[tier];
+                    if (reached[edge[0]] || reached[edge[1]]) {
+                        coverageViewEdges[tier].push(id);
+                    }
+                }
+                if ((++checked & 2047) === 0) yield;
+            }
+        }
+        if ((y & 7) === 0) yield;
+    }
 }
 
 function positionCoverageOverlay() {
@@ -4255,7 +4938,19 @@ function positionCoverageOverlay() {
     coverageTopLeft = topLeft;
     coverageSize = size;
     coverageScale = scale;
-    coverageTileColumns = Math.max(1, Math.ceil(size.x / COVERAGE_TILE_SIZE));
+    const bounds = map.getBounds().pad(0.04);
+    const sw = project(bounds.getWest(), bounds.getSouth());
+    const ne = project(bounds.getEast(), bounds.getNorth());
+    coverageBounds = [sw[0], sw[1], ne[0], ne[1]];
+    coverageWorldSize = 256 * Math.pow(2, map.getZoom());
+    const origin = map.getPixelOrigin();
+    coverageWorldOffsetX = origin.x + topLeft.x;
+    coverageWorldOffsetY = origin.y + topLeft.y;
+    coveragePixelGeneration++;
+    if (coveragePixelGeneration === 0xffffffff) {
+        coveragePixelStamp.fill(0);
+        coveragePixelGeneration = 1;
+    }
     L.DomUtil.setPosition(coverageCanvas, topLeft);
     coverageCanvas.style.width = size.x + "px";
     coverageCanvas.style.height = size.y + "px";
@@ -4288,7 +4983,17 @@ function cancelCoveragePaint() {
 }
 
 function clearCoveragePixels() {
-    dirtyCoverageTiles.clear();
+    coverageMasksDirty = false;
+    coverageTinyStep = map.getZoom() <= 12 ? 2 : 0;
+    if (coverageTinyStep) {
+        coverageTinyColumns = Math.ceil(coverageSize.x / coverageTinyStep);
+        coverageTinyRows = Math.ceil(coverageSize.y / coverageTinyStep);
+        const count = coverageTinyColumns * coverageTinyRows;
+        coverageTinySeen = Array.from({length: 4}, () =>
+            new Uint8Array(count));
+    } else {
+        coverageTinySeen = [null, null, null, null];
+    }
     for (const [canvas, ctx] of [
         [coverageCanvas, coverageContext],
         ...coverageCanvases.map((canvas, tier) => [canvas, coverageContexts[tier]])
@@ -4302,63 +5007,104 @@ function clearCoveragePixels() {
 
 function clearCoverageOverlay() {
     cancelCoveragePaint();
+    coverageViewIterator = null;
     coverageCursor.fill(0);
+    for (const entries of coverageViewEdges) entries.length = 0;
     clearCoveragePixels();
 }
 
 function hasUnpaintedCoverage() {
-    return dirtyCoverageTiles.size > 0 || coverageCursor.some((position, tier) =>
+    return Boolean(coverageViewIterator) || coverageMasksDirty ||
+        coverageCursor.some((position, tier) =>
         position < coverageLinesForTier(tier).length
     );
 }
 
-// Track small dirty tiles: compositing the entire viewport each frame is slow.
-function markCoverageDirty(x0, y0, x1, y1, lineWidth) {
-    const pad = lineWidth / 2 + 2;
-    const left = Math.max(0, Math.floor((Math.min(x0, x1) - pad) / COVERAGE_TILE_SIZE));
-    const right = Math.min(coverageTileColumns - 1,
-        Math.floor((Math.max(x0, x1) + pad) / COVERAGE_TILE_SIZE));
-    const rows = Math.max(1, Math.ceil(coverageSize.y / COVERAGE_TILE_SIZE));
-    const top = Math.max(0, Math.floor((Math.min(y0, y1) - pad) / COVERAGE_TILE_SIZE));
-    const bottom = Math.min(rows - 1,
-        Math.floor((Math.max(y0, y1) + pad) / COVERAGE_TILE_SIZE));
-    for (let y = top; y <= bottom; ++y) {
-        for (let x = left; x <= right; ++x) {
-            dirtyCoverageTiles.add(y * coverageTileColumns + x);
-        }
+// Opaque masks guarantee that pixels never mix transfer-tier colors.
+// Compositing the full viewport once per ~150 ms is cheaper than marking
+// millions of dirty tiles for every overlapping street segment.
+function compositeCoverageMasks() {
+    if (!coverageMasksDirty) return 0;
+    const ctx = coverageContext;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, coverageCanvas.width, coverageCanvas.height);
+    for (const tier of coverageOrder) {
+        ctx.drawImage(coverageCanvases[tier], 0, 0);
     }
-}
-
-// Source masks contain opaque strokes. Only the final visible canvas has
-// CSS opacity; later, better tiers overwrite earlier pixels exactly once.
-function compositeCoverageTiles(deadline) {
-    let done = 0;
-    for (const index of dirtyCoverageTiles) {
-        if (done >= 8 || (done && performance.now() >= deadline)) break;
-        dirtyCoverageTiles.delete(index);
-        const x = (index % coverageTileColumns) * COVERAGE_TILE_SIZE;
-        const y = Math.floor(index / coverageTileColumns) * COVERAGE_TILE_SIZE;
-        const width = Math.min(COVERAGE_TILE_SIZE, coverageSize.x - x);
-        const height = Math.min(COVERAGE_TILE_SIZE, coverageSize.y - y);
-        if (width <= 0 || height <= 0) continue;
-        const sx = Math.round(x * coverageScale);
-        const sy = Math.round(y * coverageScale);
-        const sw = Math.min(coverageCanvas.width - sx,
-            Math.round((x + width) * coverageScale) - sx);
-        const sh = Math.min(coverageCanvas.height - sy,
-            Math.round((y + height) * coverageScale) - sy);
-        coverageContext.clearRect(x, y, width, height);
-        for (const tier of coverageOrder) {
-            coverageContext.drawImage(
-                coverageCanvases[tier], sx, sy, sw, sh, x, y, width, height
-            );
-        }
-        done++;
-    }
+    ctx.restore();
+    coverageMasksDirty = false;
+    coverageCompositeCount++;
+    return 1;
 }
 
 // One stroke for a bounded batch: no one-path-per-edge DOM allocations.
 function drawCoverageBatch(tier, deadline) {
+    if (!coverageState) return drawLegacyCoverageBatch(tier, deadline);
+    const ids = coverageViewEdges[tier];
+    const ctx = coverageContexts[tier];
+    const budgets = coverageState.remaining[tier];
+    const settled = coverageState.settled[tier];
+    let position = coverageCursor[tier];
+    let scanned = 0;
+    let tinySkipped = 0;
+    ctx.beginPath();
+    while (position < ids.length && scanned < 65536) {
+        if ((scanned & 255) === 0 && performance.now() >= deadline) break;
+        const edge = walkEdges[ids[position++]];
+        scanned++;
+        if (!coverageEdgeInView(edge) || edge[2] <= 0 || edge[3] === 5) continue;
+        const a = edge[0], b = edge[1];
+        const left = edge[3] === 3 || !settled[a] ? 0 :
+            Math.min(1, Math.max(0, budgets[a] / edge[2]));
+        const right = edge[3] === 2 || !settled[b] ? 0 :
+            Math.min(1, Math.max(0, budgets[b] / edge[2]));
+        if (left <= 0 && right <= 0) continue;
+        coveragePixel(a);
+        coveragePixel(b);
+        const px = coveragePixelX[a], py = coveragePixelY[a];
+        const dx = coveragePixelX[b] - px;
+        const dy = coveragePixelY[b] - py;
+        const full = left + right >= 1;
+        for (let part = 0; part < (full ? 1 : 2); ++part) {
+            const from = full ? 0 : (part ? 1 - right : 0);
+            const to = full ? 1 : (part ? 1 : left);
+            if (to <= from) continue;
+            const x0 = px + dx * from, y0 = py + dy * from;
+            const x1 = px + dx * to, y1 = py + dy * to;
+            if (coverageTinyStep &&
+                Math.abs(x1 - x0) <= coverageTinyStep &&
+                Math.abs(y1 - y0) <= coverageTinyStep) {
+                const cx = Math.floor(((x0 + x1) / 2) / coverageTinyStep);
+                const cy = Math.floor(((y0 + y1) / 2) / coverageTinyStep);
+                if (cx >= 0 && cy >= 0 &&
+                    cx < coverageTinyColumns && cy < coverageTinyRows) {
+                    const key = cy * coverageTinyColumns + cx;
+                    if (coverageTinySeen[tier][key]) {
+                        tinySkipped++;
+                        continue;
+                    }
+                    coverageTinySeen[tier][key] = 1;
+                }
+            }
+            ctx.moveTo(x0, y0);
+            ctx.lineTo(x1, y1);
+        }
+    }
+    if (scanned) {
+        ctx.stroke();
+        coverageMasksDirty = true;
+    }
+    coverageCursor[tier] = position;
+    if (runProfile && !runProfile.finished) {
+        runProfile.frames.coverageTinySkipped =
+            (runProfile.frames.coverageTinySkipped || 0) + tinySkipped;
+    }
+    return scanned;
+}
+
+// Used only by explicit non-streaming coverage outside the reachability wave.
+function drawLegacyCoverageBatch(tier, deadline) {
     const lines = coverageLinesForTier(tier);
     const ctx = coverageContexts[tier];
     const bounds = map.getBounds();
@@ -4397,26 +5143,73 @@ function drawCoverageBatch(tier, deadline) {
         const y1 = p.y + dy*t1 - topLeft.y;
         ctx.moveTo(x0, y0);
         ctx.lineTo(x1, y1);
-        markCoverageDirty(x0, y0, x1, y1, coverageWidths[tier]);
     }
-    if (scanned) ctx.stroke();
+    if (scanned) {
+        ctx.stroke();
+        coverageMasksDirty = true;
+    }
     coverageCursor[tier] = position;
+    return scanned;
 }
 
 function paintCoverageFrame() {
+    const frameStart = performance.now();
     coveragePaintFrame = null;
-    const deadline = performance.now() + 3;
-    let checked = 0;
-    while (checked < 4 && performance.now() < deadline) {
-        const tier = coverageOrder[coveragePaintRotation];
-        coveragePaintRotation = (coveragePaintRotation + 1) % 4;
-        checked++;
-        if (coverageCursor[tier] < coverageLinesForTier(tier).length) {
-            drawCoverageBatch(tier, deadline);
+    // One long batch per animation frame instead of 1024 edges per tier.
+    // The deadline, not an arbitrary low item count, limits main-thread work.
+    const deadline = frameStart + 11;
+    if (coverageViewIterator) {
+        while (performance.now() < deadline) {
+            if (coverageViewIterator.next().done) {
+                coverageViewIterator = null;
+                profilePhaseEnd("Coverage viewport index", "tier counts: " +
+                    coverageViewEdges.map(items => items.length).join(","));
+                break;
+            }
         }
     }
-    compositeCoverageTiles(deadline);
-    if (hasUnpaintedCoverage()) scheduleCoveragePaint();
+    let lines = 0;
+    if (!coverageViewIterator) {
+        while (performance.now() < deadline) {
+            let nextTier = -1;
+            for (let i = 0; i < 4; ++i) {
+                const tier = coverageOrder[coveragePaintRotation];
+                coveragePaintRotation = (coveragePaintRotation + 1) % 4;
+                if (coverageCursor[tier] < coverageLinesForTier(tier).length) {
+                    nextTier = tier;
+                    break;
+                }
+            }
+            if (nextTier < 0) break;
+            if (runProfile && !runProfile.finished &&
+                runProfile.active["Coverage Canvas painting"] === undefined) {
+                profilePhaseStart("Coverage Canvas painting");
+            }
+            lines += drawCoverageBatch(nextTier, deadline);
+        }
+    }
+    const unfinished = Boolean(coverageViewIterator) ||
+        coverageCursor.some((position, tier) =>
+            position < coverageLinesForTier(tier).length);
+    const compositeStart = performance.now();
+    // Intermediate preview is throttled; the last composite is immediate.
+    const shouldComposite = coverageMasksDirty &&
+        (!unfinished || performance.now() - coverageLastComposite >= 150);
+    const composites = shouldComposite ? compositeCoverageMasks() : 0;
+    if (composites) coverageLastComposite = performance.now();
+    if (runProfile && !runProfile.finished) {
+        runProfile.cpu.coverageComposite =
+            (runProfile.cpu.coverageComposite || 0) +
+            performance.now() - compositeStart;
+        runProfile.frames.coverageTiles =
+            (runProfile.frames.coverageTiles || 0) + composites;
+    }
+    if (!hasUnpaintedCoverage()) {
+        profilePhaseEnd("Coverage Canvas painting", "fully composited");
+    } else {
+        scheduleCoveragePaint();
+    }
+    profileMarkPaint("coveragePaint", performance.now() - frameStart, lines);
 }
 
 function scheduleCoveragePaint() {
@@ -4430,6 +5223,11 @@ function redrawCoverageOverlay() {
     cancelCoveragePaint();
     positionCoverageOverlay();
     coverageCursor.fill(0);
+    for (const entries of coverageViewEdges) entries.length = 0;
+    coverageViewIterator = coverageState ? rebuildCoverageViewSteps() : null;
+    if (coverageViewIterator && runProfile && !runProfile.finished) {
+        profilePhaseStart("Coverage viewport index");
+    }
     clearCoveragePixels();
     scheduleCoveragePaint();
 }
@@ -4442,7 +5240,9 @@ function suspendCoverageForZoom() {
         coverageViewFrame = null;
     }
     cancelCoveragePaint();
+    coverageViewIterator = null;
     coverageCursor.fill(0);
+    for (const entries of coverageViewEdges) entries.length = 0;
     coverageCanvas.style.visibility = "hidden";
     clearCoveragePixels();
 }
@@ -4502,123 +5302,108 @@ function flushCoverage() {
     redrawCoverageOverlay();
 }
 
-// One multi-source wave: all reachable stops have their own walk budget.
-// The graph search never blocks on rendering; the painter catches up by frames.
-let walkEdgeOffsets = null;
-let walkEdgeRefs = null;
-
-function buildWalkDrawingIndex() {
-    if (walkEdgeOffsets) return;
-    const counts = new Uint32Array(walkNodes.length + 1);
-    for (const edge of walkEdges) {
-        counts[edge[0] + 1]++;
-        counts[edge[1] + 1]++;
-    }
-    for (let i = 1; i < counts.length; ++i) counts[i] += counts[i-1];
-    const cursor = counts.slice();
-    const refs = new Uint32Array(walkEdges.length * 2);
-    walkEdges.forEach((edge, id) => {
-        refs[cursor[edge[0]]++] = id;
-        refs[cursor[edge[1]]++] = id;
-    });
-    walkEdgeOffsets = counts;
-    walkEdgeRefs = refs;
-}
-
+// The OSM edge-to-vertex reverse index is no longer needed here.
+// The wave settles vertices; the viewport index enumerates edges once later.
 function startProgressiveCoverage(token, streaming=false) {
     const count = walkNodes.length;
-    const heap = makeMinHeap();
-    const remaining = Array.from({length: 4}, () => new Map());
-    const painted = Array.from({length: 4}, () => new Map());
-    buildWalkDrawingIndex();
+    const heap = makeCoverageHeap();
+    const remaining = Array.from({length: 4}, () => {
+        const array = new Float32Array(count);
+        array.fill(-1);
+        return array;
+    });
+    const settled = Array.from({length: 4}, () => new Uint8Array(count));
+    const sources = Array.from({length: 3}, () => new Map());
+    const waveStats = {
+        sources: 0, popped: 0, settled: 0,
+        cpuMs: 0, yields: 0, peakHeap: 0
+    };
+    const state = {remaining, settled};
+    coverageState = state;
+    let started = false;
+    let running = false;
+    let scheduled = false;
 
     function seed(tier, node, budget) {
         if (!Number.isInteger(node) || node < 0 || budget <= 0) return;
-        if (budget <= (remaining[tier].get(node) ?? -1) + 0.001) return;
-        remaining[tier].set(node, budget);
+        if (budget <= remaining[tier][node] + 0.0001) return;
+        remaining[tier][node] = budget;
         heap.push(-budget, tier * count + node);
     }
 
-    const originWalkRadius = Number.isFinite(maxTravelMinutes)
-        ? Math.min(walkRadius, maxTravelMinutes * WALK_SPEED_M_PER_MIN)
-        : walkRadius;
-    if (originWalkRadius > 0) {
-        const origin = walkContextForPoint(selectedPoint);
-        if (origin.anchor) {
-            for (const [node, distance] of walkSeeds(origin.anchor)) {
-                seed(3, node, originWalkRadius - distance);
+    function begin() {
+        if (started || token !== renderGeneration) return;
+        started = true;
+        profilePhaseStart("Walking coverage wave");
+        const originRadius = Number.isFinite(maxTravelMinutes)
+            ? Math.min(walkRadius, maxTravelMinutes * WALK_SPEED_M_PER_MIN)
+            : walkRadius;
+        if (originRadius > 0) {
+            const xy = project(selectedPoint.lon, selectedPoint.lat);
+            const anchor = snapWalkXY(xy[0], xy[1]);
+            if (anchor) {
+                for (const [node, distance] of walkSeeds(anchor)) {
+                    seed(3, node, originRadius - distance);
+                }
             }
         }
-    }
-    if (!streaming) {
         for (let tier = 0; tier < 3; ++tier) {
-            for (const source of pendingCoverageDisks[tier]) {
-                seed(tier, source.stop.walk_node, source.radius);
+            for (const [node, radius] of sources[tier]) {
+                seed(tier, node, radius);
             }
+            sources[tier].clear();
         }
+        start();
+        if (!heap.size) profilePhaseEnd("Walking coverage wave", "no sources");
     }
 
-    function appendSegment(tier, edgeId, node, budget) {
-        const edge = walkEdges[edgeId];
-        if (edge[3] === 5 || edge[2] <= 0) return;
-        let side = -1;
-        if (node === edge[0] && edge[3] !== 3) side = 0;
-        if (node === edge[1] && edge[3] !== 2) side = 1;
-        if (side < 0) return;
-        const fraction = Math.min(1, budget / edge[2]);
-        if (fraction <= 0.00001) return;
-        let extent = painted[tier].get(edgeId);
-        if (!extent) {
-            extent = [0, 0];
-            painted[tier].set(edgeId, extent);
-        }
-        if (fraction <= extent[side] + 0.00001) return;
-        const before = extent[side];
-        extent[side] = fraction;
-        const from = side === 0 ? before : 1 - fraction;
-        const to = side === 0 ? fraction : 1 - before;
-        const addition = [edge[0], edge[1], from, to];
-        if (tier === 3) originWalkingLines.push(addition);
-        else activeCoverageLines[tier].push(addition);
-    }
-
-    let running = false;
-    let scheduled = false;
     async function expand() {
         running = true;
         while (heap.size && token === renderGeneration) {
-            const start = performance.now();
+            const startTime = performance.now();
             let processed = 0;
-            while (heap.size && processed < 2000 &&
-                   performance.now() - start < 5) {
-                processed++;
+            while (heap.size && performance.now() - startTime < 8) {
                 const [negative, packed] = heap.pop();
                 const tier = Math.floor(packed / count);
                 const node = packed % count;
                 const budget = -negative;
-                if (budget + 0.001 < (remaining[tier].get(node) ?? -1)) {
-                    continue;
-                }
-                for (let i = walkEdgeOffsets[node];
-                     i < walkEdgeOffsets[node + 1]; ++i) {
-                    appendSegment(tier, walkEdgeRefs[i], node, budget);
-                }
+                waveStats.popped++;
+                processed++;
+                if (settled[tier][node] ||
+                    budget + 0.001 < remaining[tier][node]) continue;
+                settled[tier][node] = 1;
+                waveStats.settled++;
+                // Search settles only vertices. After completion, enumerate
+                // each visible OSM edge ONCE and paint its final reachability.
                 for (let i = walkOffsets[node];
                      i < walkOffsets[node + 1]; ++i) {
-                    const next = walkTo[i];
-                    seed(tier, next, budget - walkWeight[i]);
+                    seed(tier, walkTo[i], budget - walkWeight[i]);
                 }
             }
+            waveStats.cpuMs += performance.now() - startTime;
+            waveStats.peakHeap = Math.max(waveStats.peakHeap, heap.size);
             scheduleCoveragePaint();
-            if (heap.size) await eventLoopYield();
+            if (heap.size) {
+                waveStats.yields++;
+                await eventLoopYield();
+            }
         }
         running = false;
-        if (heap.size && token === renderGeneration) void expand();
-    }
-    function start() {
-        if (running || scheduled || token !== renderGeneration || !heap.size) {
-            return;
+        if (token === renderGeneration) {
+            const profiled = runProfile && runProfile.token === token;
+            if (profiled) {
+                profilePhaseEnd("Walking coverage wave", "settled: " +
+                    waveStats.settled);
+            }
+            // Also support the non-profiled/non-streaming rendering path.
+            redrawCoverageOverlay();
+            if (profiled) profileFinish(runProfile);
         }
+    }
+
+    function start() {
+        if (!started || running || scheduled ||
+            token !== renderGeneration || !heap.size) return;
         scheduled = true;
         setTimeout(() => {
             scheduled = false;
@@ -4627,19 +5412,44 @@ function startProgressiveCoverage(token, streaming=false) {
             }
         }, 0);
     }
-    start();
+    if (!streaming) {
+        for (let tier = 0; tier < 3; ++tier) {
+            for (const source of pendingCoverageDisks[tier]) {
+                const node = source.stop.walk_node;
+                if (node < 0 || source.radius <= 0) continue;
+                sources[tier].set(node, Math.max(
+                    sources[tier].get(node) || -1, source.radius
+                ));
+            }
+        }
+        begin();
+    }
     return {
+        idle() { return started && !running && !scheduled && heap.size === 0; },
+        stats() {
+            return {...waveStats, heapSize: heap.size, running, started};
+        },
+        begin,
         addSource(tier, stopIndex, arrivalMinutes) {
-            if (token !== renderGeneration) return;
-            if (tier < 0 || tier > 2) return;
+            if (token !== renderGeneration || tier < 0 || tier > 2) return;
             const stop = stops[stopIndex];
-            if (!stop) return;
-            seed(tier, stop.walk_node, coverageRadiusForArrival(arrivalMinutes));
-            start();
+            if (!stop || stop.walk_node < 0) return;
+            const radius = coverageRadiusForArrival(arrivalMinutes);
+            if (radius <= 0) return;
+            waveStats.sources++;
+            const node = stop.walk_node;
+            if (started) {
+                // A recalculation must start with all sources together.
+                // Normally this branch is unreachable for current RAPTOR runs.
+                console.warn("Late walking source; recompute reachability");
+                return;
+            }
+            if (radius > (sources[tier].get(node) || -1)) {
+                sources[tier].set(node, radius);
+            }
         }
     };
 }
-
 
 function stopRouteDetails(stopIndex) {
     const stop = stops[stopIndex];
@@ -4693,7 +5503,13 @@ const stopOutlineColors = ["#1565c0", "#ef6c00", "#6d28d9"];
 const stopFillColors = ["#42a5f5", "#ffb74d", "#a78bfa"];
 
 function stopMarkerRadiusForZoom() {
-    return 2.5;
+    const zoom = map.getZoom();
+    if (zoom <= 10) return 1.4;
+    if (zoom <= 11) return 1.7;
+    if (zoom <= 12) return 2.0;
+    if (zoom <= 13) return 2.4;
+    if (zoom <= 15) return 2.8;
+    return 3.5;
 }
 
 function positionStopCanvas() {
@@ -4733,7 +5549,7 @@ function paintStopDot(stopIndex, tier) {
     stopContext.arc(x, y, stopMarkerRadiusForZoom(), 0, Math.PI * 2);
     stopContext.fillStyle = stopFillColors[tier];
     stopContext.strokeStyle = stopOutlineColors[tier];
-    stopContext.lineWidth = 1;
+    stopContext.lineWidth = 0.7;
     stopContext.fill();
     stopContext.stroke();
     if (!visibleStopIndexes.has(stopIndex)) {
@@ -4760,6 +5576,7 @@ function cancelStopCanvasRedraw() {
 }
 
 function paintStopCanvasFrame() {
+    const frameStart = performance.now();
     stopCanvasRedrawFrame = null;
     if (stopCanvasZooming) return;
     const start = performance.now();
@@ -4777,6 +5594,7 @@ function paintStopCanvasFrame() {
         stopCanvasRedrawItems = [];
         stopCanvasRedrawIndex = 0;
     }
+    profileMarkPaint("stopRedraw", performance.now() - frameStart, count);
 }
 
 function redrawStopCanvas() {
@@ -4867,6 +5685,7 @@ function updateProgressiveStopCounts() {
 }
 
 function paintProgressiveStops(token) {
+    const frameStart = performance.now();
     stopPaintFrame = null;
     if (token !== renderGeneration || !selectedPoint) return;
     const started = performance.now();
@@ -4889,6 +5708,7 @@ function paintProgressiveStops(token) {
         stopPaintQueue.length = 0;
         stopPaintCursor = 0;
     }
+    profileMarkPaint("stopPaint", performance.now() - frameStart, count);
 }
 
 function queueProgressiveStop(stopIndex, tier, token) {
@@ -4957,7 +5777,14 @@ function pointToStopDistanceMeters(point, stopIndex) {
 }
 
 function pointToPointDistanceMeters(a, b) {
-    const context = walkContextForPoint(a);
+    let context = walkContextForPoint(a);
+    if (context.anchor && !context.distance.size) {
+        const xy = project(a.lon, a.lat);
+        const key = xy[0].toFixed(1) + ":" + xy[1].toFixed(1) + ":" + walkRadius;
+        context = {anchor: context.anchor,
+            ...walkDijkstra(walkSeeds(context.anchor), walkRadius)};
+        walkPointCache.set(key, context);
+    }
     const coords = project(b.lon, b.lat);
     const anchor = snapWalkXY(coords[0], coords[1]);
     return walkDistanceToAnchor(context, anchor);
@@ -6956,6 +7783,7 @@ function selectionKey() {
         selectedPoint.lat.toFixed(6),
         selectedPoint.lon.toFixed(6),
         walkRadius.toFixed(1),
+        Number.isFinite(maxTravelMinutes) ? maxTravelMinutes : "unlimited",
         Array.from(enabledModes).sort().join(","),
         String(maxTransfers),
         Number.isFinite(maxTravelMinutes)
@@ -7442,6 +8270,8 @@ function reachabilitySearchKey() {
         selectedPoint.lat.toFixed(6),
         selectedPoint.lon.toFixed(6),
         walkRadius.toFixed(1),
+        Number.isFinite(maxTravelMinutes)
+            ? maxTravelMinutes.toFixed(1) : "inf",
         Array.from(enabledModes).sort().join(",")
     ].join(":");
 }
@@ -7860,13 +8690,15 @@ function* seedRaptorRoundSteps(boardSources, roundIndex) {
                     continue;
                 }
 
+                const boardingTime = source.elapsedMinutes +
+                    boardingWaitForRoute(option.routeKey);
+                if (boardingTime > maxTravelMinutes + 0.00001) continue;
                 addRaptorOnboardState(nodeLabels, queue, {
                     routeKey: option.routeKey,
                     direction: option.direction,
                     pos: option.boardPos,
                     transfersUsed: roundIndex,
-                    elapsedMinutes:
-                        source.elapsedMinutes + boardingWaitForRoute(option.routeKey),
+                    elapsedMinutes: boardingTime,
                     walkMeters: source.walkMeters,
                     initialWalk: source.initialWalk,
                     rideStops: source.rideStops,
@@ -7886,7 +8718,9 @@ function* seedRaptorRoundSteps(boardSources, roundIndex) {
     return { nodeLabels: nodeLabels, queue: queue };
 }
 
-function* scanRaptorRoundSteps(boardSources, roundIndex, onEvidence=null) {
+function* scanRaptorRoundSteps(
+    boardSources, roundIndex, onEvidence=null, onRideEdge=null
+) {
     const seeded = yield* seedRaptorRoundSteps(boardSources, roundIndex);
     const nodeLabels = seeded.nodeLabels;
     const queue = seeded.queue;
@@ -7902,8 +8736,14 @@ function* scanRaptorRoundSteps(boardSources, roundIndex, onEvidence=null) {
         if (!currentBucket || !currentBucket.includes(state)) {
             continue;
         }
+        if (state.elapsedMinutes > maxTravelMinutes + 0.00001) continue;
 
         const currentStopIndex = state.direction.stops[state.pos];
+
+        if (onRideEdge && state.pos > 0 && state.currentLeg.rideStops > 0 &&
+            state.elapsedMinutes <= maxTravelMinutes + 1e-7) {
+            onRideEdge(state.routeKey, state.direction, state.pos, roundIndex);
+        }
 
         if (
             state.currentLeg.rideStops > 0 &&
@@ -7926,6 +8766,8 @@ function* scanRaptorRoundSteps(boardSources, roundIndex, onEvidence=null) {
             }
 
             const nextPos = state.pos + 1;
+            if (state.elapsedMinutes + metrics.minutes >
+                maxTravelMinutes + 0.00001) continue;
             addRaptorOnboardState(nodeLabels, queue, {
                 ...state,
                 pos: nextPos,
@@ -7986,14 +8828,21 @@ function eventLoopYield() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-async function scanRaptorRoundAsync(boardSources, roundIndex, token, onEvidence) {
+async function scanRaptorRoundAsync(
+    boardSources, roundIndex, token, onEvidence, onRideEdge
+) {
     const iterator = scanRaptorRoundSteps(
-        boardSources, roundIndex, onEvidence
+        boardSources, roundIndex, onEvidence, onRideEdge
     );
     let start = performance.now();
     while (true) {
         if (token !== renderGeneration) return null;
+        const cpuStart = performance.now();
         const next = iterator.next();
+        if (runProfile) {
+            runProfile.cpu.raptor = (runProfile.cpu.raptor || 0) +
+                performance.now() - cpuStart;
+        }
         if (next.done) return next.value;
         if (performance.now() - start >= 7) {
             await eventLoopYield();
@@ -8044,53 +8893,55 @@ function bestRaptorTransferCandidates(byPath) {
     return result.slice(0, MAX_RAPTOR_TRANSFER_LABELS_PER_STOP);
 }
 
+const transferStats = {arcsScanned: 0, cpuMs: 0, steps: 0};
+
 function* buildRaptorTransferSourcesSteps(evidence) {
     const result = new Map();
+    // Check enabled routes once per round, not for every transfer edge.
+    const canBoard = new Uint8Array(stops.length);
+    for (let index = 0; index < stops.length; ++index) {
+        canBoard[index] = stops[index].routes.some(isRouteEnabled) ? 1 : 0;
+    }
 
     let scanned = 0;
     for (const [alightStopIndex, byPath] of evidence.entries()) {
-        if (++scanned % 1 === 0) yield null;
+        if (++scanned % 16 === 0) yield null;
         const candidates = bestRaptorTransferCandidates(byPath);
 
         for (const candidate of candidates) {
             prepareItineraryMetrics(candidate);
+            if (candidate.totalMinutes > maxTravelMinutes + 0.00001) continue;
             const legs = candidateLegs(candidate);
             const lastLeg = legs[legs.length - 1];
-
-            if (!lastLeg) {
-                continue;
-            }
-
-            for (const boardStopIndex of
-                findNearbyStopsFromStop(alightStopIndex)) {
-                const transferWalk = walkDistanceBetweenStops(
-                    alightStopIndex,
-                    boardStopIndex
-                );
-                const transferMinutes =
+            if (!lastLeg) continue;
+            const transfers = candidateTransfers(candidate);
+            const offsets = walkTransfers.offsets;
+            for (let edge = offsets[alightStopIndex];
+                 edge < offsets[alightStopIndex + 1]; ++edge) {
+                transferStats.arcsScanned++;
+                const boardStopIndex = walkTransfers.to[edge];
+                const transferWalk = walkTransfers.meters[edge];
+                if (transferWalk > walkRadius + 0.00001) continue;
+                if (!canBoard[boardStopIndex]) continue;
+                if ((edge & 255) === 0) yield null;
+                const arrival = candidate.totalMinutes +
                     transferWalk / WALK_SPEED_M_PER_MIN;
+                if (arrival > maxTravelMinutes + 0.00001) continue;
                 const source = {
-                    elapsedMinutes:
-                        candidate.totalMinutes + transferMinutes,
-                    walkMeters:
-                        candidate.walkMeters + transferWalk,
+                    elapsedMinutes: arrival,
+                    walkMeters: candidate.walkMeters + transferWalk,
                     initialWalk: candidate.initialWalk,
                     rideStops: candidate.rideStops,
                     transitMeters: candidate.transitMeters,
                     legs: legs,
-                    transfers: candidateTransfers(candidate).concat([{
+                    transfers: transfers.concat([{
                         alightStopIndex: alightStopIndex,
                         boardStopIndex: boardStopIndex,
                         walkMeters: transferWalk
                     }]),
                     lastRouteKey: lastLeg.routeKey
                 };
-
-                addRaptorTransferSource(
-                    result,
-                    boardStopIndex,
-                    source
-                );
+                addRaptorTransferSource(result, boardStopIndex, source);
             }
         }
     }
@@ -8111,7 +8962,10 @@ async function buildRaptorTransferSourcesAsync(evidence, token) {
     let started = performance.now();
     while (true) {
         if (token !== renderGeneration) return null;
+        const stepStart = performance.now();
         const next = iterator.next();
+        transferStats.cpuMs += performance.now() - stepStart;
+        transferStats.steps++;
         if (next.done) return next.value;
         if (performance.now() - started >= 7) {
             await eventLoopYield();
@@ -8130,8 +8984,10 @@ function createInitialRaptorSources(nearbyStops) {
             boardStopIndex
         );
 
+        const arrival = initialWalk / WALK_SPEED_M_PER_MIN;
+        if (arrival > maxTravelMinutes + 0.00001) continue;
         addRaptorTransferSource(result, boardStopIndex, {
-            elapsedMinutes: initialWalk / WALK_SPEED_M_PER_MIN,
+            elapsedMinutes: arrival,
             walkMeters: initialWalk,
             initialWalk: initialWalk,
             rideStops: 0,
@@ -8202,20 +9058,32 @@ function ensureReachabilitySearch() {
     return context;
 }
 
-async function ensureReachabilitySearchAsync(token, onEvidence) {
+async function ensureReachabilitySearchAsync(token, onEvidence, onRideEdge) {
     const cacheKey = reachabilitySearchKey();
     let context = reachabilitySearchCache.get(cacheKey);
     if (!context) {
+        profilePhaseStart("Walking from start point");
+        if (!await warmWalkingPoint(selectedPoint, token)) return false;
+        profilePhaseEnd("Walking from start point");
         context = createReachabilitySearch();
         reachabilitySearchCache.set(cacheKey, context);
+        console.info("[map] Reachability cache MISS");
+    } else {
+        console.info("[map] Reachability cache HIT; rounds:", context.builtRounds);
     }
     const requiredRounds = Math.min(RAPTOR_ROUNDS, maxTransfers + 1);
     if (onEvidence) {
+        let replayStarted = performance.now();
         for (let round = 0;
              round < Math.min(context.builtRounds, requiredRounds); ++round) {
             for (const [stopIndex, byPath] of context.evidence[round]) {
                 for (const candidate of flattenEvidence(byPath)) {
-                    onEvidence(stopIndex, candidate, round);
+                    if (token !== renderGeneration) return false;
+                    onEvidence(stopIndex, candidate, round, true);
+                }
+                if (performance.now() - replayStarted >= 4) {
+                    await eventLoopYield();
+                    replayStarted = performance.now();
                 }
             }
         }
@@ -8227,16 +9095,24 @@ async function ensureReachabilitySearchAsync(token, onEvidence) {
             context.builtRounds = RAPTOR_ROUNDS;
             break;
         }
+        const roundName = "RAPTOR round " + round;
+        profilePhaseStart(roundName);
         const evidence = await scanRaptorRoundAsync(
-            context.boardSources, round, token, onEvidence
+            context.boardSources, round, token, onEvidence, onRideEdge
         );
+        profilePhaseEnd(roundName, "evidence stops: " +
+            (evidence ? evidence.size : 0));
         if (token !== renderGeneration || evidence === null) return false;
         context.evidence[round] = evidence;
         ++context.builtRounds;
         if (context.builtRounds < RAPTOR_ROUNDS) {
+            const transferName = "Walking transfers after round " + round;
+            profilePhaseStart(transferName);
             context.boardSources = await buildRaptorTransferSourcesAsync(
                 evidence, token
             );
+            profilePhaseEnd(transferName, "boarding stops: " +
+                (context.boardSources ? context.boardSources.size : 0));
             if (!context.boardSources) return false;
         }
     }
@@ -8273,10 +9149,11 @@ function filterEvidenceByTravelLimit(evidence) {
     return result;
 }
 
-function* analyzeSelectionSteps() {
+function* analyzeSelectionSteps(skipGeometry=false) {
     const key = selectionKey();
 
-    if (key === analysisCacheKey && analysisCache) {
+    if (key === analysisCacheKey && analysisCache &&
+        (skipGeometry || analysisCache.includesGeometry)) {
         return analysisCache;
     }
 
@@ -8356,30 +9233,27 @@ function* analyzeSelectionSteps() {
         }
     }
 
-    const directRouteData = yield* collectReachableRouteDataSteps(
-        directEvidence,
-        "leg1"
-    );
-    const transferRouteData = yield* collectReachableRouteDataSteps(
-        transferEvidence,
-        "leg2"
-    );
-    const twoTransferRouteData = yield* collectReachableRouteDataSteps(
-        twoTransferEvidence,
-        "leg3"
-    );
-    const directArrivalMinutes = yield* collectBestArrivalMinutesSteps(
-        directEvidence
-    );
-    const transferArrivalMinutes = yield* collectBestArrivalMinutesSteps(
-        transferEvidence
-    );
-    const twoTransferArrivalMinutes = yield* collectBestArrivalMinutesSteps(
-        twoTransferEvidence
-    );
+    // The progressive route and walking canvases already contain the
+    // geometry. Do not rebuild expensive route segments during finalization.
+    const emptyData = () => ({
+        segmentsByRoute: new Map(), stopsByRoute: new Map()
+    });
+    const directRouteData = skipGeometry
+        ? emptyData() : yield* collectReachableRouteDataSteps(directEvidence, "leg1");
+    const transferRouteData = skipGeometry
+        ? emptyData() : yield* collectReachableRouteDataSteps(transferEvidence, "leg2");
+    const twoTransferRouteData = skipGeometry
+        ? emptyData() : yield* collectReachableRouteDataSteps(twoTransferEvidence, "leg3");
+    const directArrivalMinutes = skipGeometry
+        ? new Map() : yield* collectBestArrivalMinutesSteps(directEvidence);
+    const transferArrivalMinutes = skipGeometry
+        ? new Map() : yield* collectBestArrivalMinutesSteps(transferEvidence);
+    const twoTransferArrivalMinutes = skipGeometry
+        ? new Map() : yield* collectBestArrivalMinutesSteps(twoTransferEvidence);
 
     analysisCacheKey = key;
     analysisCache = {
+        includesGeometry: !skipGeometry,
         nearbyStops: nearbyStops,
         directRoutes: directRoutes,
         directDirectionIds: directDirectionIds,
@@ -8424,8 +9298,8 @@ function analyzeSelection() {
     return drainSteps(analyzeSelectionSteps());
 }
 
-async function analyzeSelectionAsync(token) {
-    const iterator = analyzeSelectionSteps();
+async function analyzeSelectionAsync(token, skipGeometry=false) {
+    const iterator = analyzeSelectionSteps(skipGeometry);
     let started = performance.now();
     while (true) {
         if (token !== renderGeneration) return null;
@@ -8666,14 +9540,18 @@ async function renderSelection(progressive=false, token=renderGeneration,
         drawOrigin(selectedPoint.lat, selectedPoint.lon, !progressive);
     }
 
-    const analysis = await analyzeSelectionAsync(token);
+    const skipGeometry = progressive && preserveWave && !selectedRouteFocus;
+    const analysis = await analyzeSelectionAsync(token, skipGeometry);
     if (!analysis || token !== renderGeneration) return;
     const focusStops = focusedRouteStops(analysis);
     const hasFocus = !!selectedRouteFocus && !!focusStops;
+    if (hasFocus) clearProgressiveRoutes();
 
     if (maxTransfers >= 2) {
         let paintedtwoTransferRoutes = 0;
-        for (const routeKey of analysis.twoTransferRoutes) {
+        for (const routeKey of
+            (progressive && preserveWave && !hasFocus
+                ? [] : analysis.twoTransferRoutes)) {
             if (++paintedtwoTransferRoutes % 4 === 0) {
                 await eventLoopYield();
                 if (token !== renderGeneration) return;
@@ -8714,7 +9592,9 @@ async function renderSelection(progressive=false, token=renderGeneration,
 
     if (maxTransfers >= 1) {
         let paintedtransferRoutes = 0;
-        for (const routeKey of analysis.transferRoutes) {
+        for (const routeKey of
+            (progressive && preserveWave && !hasFocus
+                ? [] : analysis.transferRoutes)) {
             if (++paintedtransferRoutes % 4 === 0) {
                 await eventLoopYield();
                 if (token !== renderGeneration) return;
@@ -8754,7 +9634,9 @@ async function renderSelection(progressive=false, token=renderGeneration,
     }
 
     let painteddirectRoutes = 0;
-    for (const routeKey of analysis.directRoutes) {
+    for (const routeKey of
+        (progressive && preserveWave && !hasFocus
+            ? [] : analysis.directRoutes)) {
         if (++painteddirectRoutes % 4 === 0) {
             await eventLoopYield();
             if (token !== renderGeneration) return;
@@ -8846,10 +9728,13 @@ async function renderSelection(progressive=false, token=renderGeneration,
 }
 
 function scheduleRender() {
+    profileAbort("new settings or point");
     updateControls();
     const token = ++renderGeneration;
     if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     if (!selectedPoint) return;
+    profileBegin(token);
+    profilePhaseStart("Clear previous results");
     clearResult();
     document.getElementById("routes").replaceChildren();
     for (const id of [
@@ -8859,35 +9744,95 @@ function scheduleRender() {
     ]) {
         document.getElementById(id).textContent = "0";
     }
+    profilePhaseEnd("Clear previous results");
     renderFrame = requestAnimationFrame(async () => {
         renderFrame = null;
+        try {
         if (token !== renderGeneration) return;
         if (targetPoint) {
             renderTrip(targetPoint);
             return;
         }
-        // Start walking immediately, then add every transit arrival as found.
+        // Show the origin first; build the wave indexes without blocking the UI.
         drawOrigin(selectedPoint.lat, selectedPoint.lon, false);
         analysisSummary.hidden = false;
         tripPanel.hidden = true;
         const started = performance.now();
+        const walkBefore = {...walkingStats};
+        const transferBefore = {...transferStats};
+        // Only the spatial index is needed. Do not construct an unused
+        // 2 * edges reverse-lookup index (tens of MB on the Moscow graph).
+        profilePhaseStart("Walking snap index");
+        if (!await warmWalkSegmentGrid(token)) return;
+        profilePhaseEnd("Walking snap index");
+        if (token !== renderGeneration) return;
+        profilePhaseStart("Start coverage wave");
         const wave = startProgressiveCoverage(token, true);
-        const onEvidence = (stopIndex, candidate, tier) => {
+        if (runProfile) runProfile.wave = wave;
+        positionRouteCanvases();
+        profilePhaseEnd("Start coverage wave");
+        const onEvidence = (stopIndex, candidate, tier, cached=false) => {
+            if (token !== renderGeneration) return;
+            if (runProfile) runProfile.evidenceEvents++;
             if (candidate.totalMinutes <= maxTravelMinutes + 0.0001) {
                 wave.addSource(tier, stopIndex, candidate.totalMinutes);
                 queueProgressiveStop(stopIndex, tier, token);
+                if (cached) queueProgressiveCandidateLeg(candidate, tier, token);
             }
         };
-        if (!await ensureReachabilitySearchAsync(token, onEvidence)) return;
+        const onRideEdge = (routeKey, direction, pos, tier) => {
+            queueProgressiveRouteEdge(routeKey, direction, pos, tier, token);
+        };
+        profilePhaseStart("Total transport routing");
+        if (!await ensureReachabilitySearchAsync(
+            token, onEvidence, onRideEdge
+        )) return;
+        profilePhaseEnd("Total transport routing");
         if (token !== renderGeneration) return;
+        // RAPTOR takes less than a second. Seed one complete multi-source
+        // walk search to avoid revisiting millions of vertices for late stops.
+        profilePhaseStart("Seed final walking wave");
+        wave.begin();
+        profilePhaseEnd("Seed final walking wave");
         const searchMs = performance.now() - started;
+        profilePhaseStart("Final result analysis and DOM");
         await renderSelection(true, token, true);
+        profilePhaseEnd("Final result analysis and DOM");
         if (token !== renderGeneration) return;
-        console.info("Reachability timings (ms):", {
+        console.info("Reachability search complete (painting may continue):", {
             search: Math.round(searchMs),
             finalize: Math.round(performance.now() - started - searchMs),
-            stopCount: displayedStopIndexes.size
+            stopCount: displayedStopIndexes.size,
+            transitEdges: routeEdgeRecords.map(items => items.length),
+            firstTransitPaint: routeFirstPaintMs === null
+                ? null : Math.round(routeFirstPaintMs - started),
+            transferArcs: transferStats.arcsScanned - transferBefore.arcsScanned,
+            transferCpuMs: Math.round(transferStats.cpuMs - transferBefore.cpuMs),
+            walkingQueries: walkingStats.queries - walkBefore.queries,
+            walkingCpuMs: Math.round(walkingStats.cpuMs - walkBefore.cpuMs),
+            walkingYields: walkingStats.yields - walkBefore.yields,
+            walkingYieldMs: Math.round(walkingStats.yieldMs - walkBefore.yieldMs)
         });
+        const p = runProfile;
+        if (p && p.token === token) {
+            p.searchDone = true;
+            p.currentPhase = "Finishing Canvas";
+            p.cpu.walkingDijkstra = walkingStats.cpuMs - walkBefore.cpuMs;
+            p.cpu.walkingYieldsMs = walkingStats.yieldMs - walkBefore.yieldMs;
+            p.cpu.transferCompute = transferStats.cpuMs - transferBefore.cpuMs;
+            p.frames.transferArcs = transferStats.arcsScanned -
+                transferBefore.arcsScanned;
+            console.info("[map] ROUTING COMPLETE; waiting for Canvas",
+                profileSnapshot(p));
+            profileUpdateStatus(p);
+            profileFinish(p);
+        }
+        } catch (error) {
+            console.error("[map] RUN FAILED", error);
+            if (runProfile && runProfile.token === token) {
+                profileAbort("error: " + error.message);
+            }
+        }
     });
 }
 
@@ -8896,7 +9841,6 @@ for (const input of modeInputs) {
         enabledModes = new Set(
             modeInputs.filter(item => item.checked).map(item => item.value)
         );
-        nearbyStopCache.clear();
         boardingOptionsCache.clear();
         reachabilitySearchCache.clear();
         itineraryCache.clear();
@@ -8921,20 +9865,26 @@ transferCountInput.addEventListener(
 travelTimeLimitInput.addEventListener("input", scheduleRender);
 
 map.on("zoomstart", () => {
+    suspendRoutesForZoom();
     stopCanvasZooming = true;
     cancelStopCanvasRedraw();
     stopCanvas.style.visibility = "hidden";
     clearStopPixels();
 });
 map.on("zoomend", () => {
+    resumeRoutesAfterZoom();
     stopCanvasZooming = false;
     redrawStopCanvas();
     stopCanvas.style.visibility = "visible";
 });
 map.on("moveend", () => {
     if (!stopCanvasZooming) redrawStopCanvas();
+    scheduleRouteViewportRedraw();
 });
-map.on("resize", redrawStopCanvas);
+map.on("resize", () => {
+    redrawStopCanvas();
+    scheduleRouteViewportRedraw();
+});
 map.on("zoomstart", onCoverageZoomStart);
 map.on("zoomend", onCoverageZoomEnd);
 map.getContainer().addEventListener("wheel", onCoverageWheel, {passive: true});
@@ -8964,6 +9914,8 @@ tripBack.addEventListener(
 );
 
 function resetSelection() {
+    profileAbort("Reset");
+    timingStatus.textContent = "Ready";
     ++renderGeneration;
     if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     renderFrame = null;
@@ -9104,6 +10056,8 @@ map.on(
 
 updateControls();
 analysisSummary.hidden = true;
+console.info("[map] BOOT COMPLETE", Math.round(performance.now() - bootStarted),
+    "ms; ready to select origin");
 })().catch(error => {
     console.error("Transport map initialization failed:", error);
     const container = document.getElementById("map");
@@ -9126,24 +10080,36 @@ def build_html(
     walk_speed,
     initial_circle_opacity,
 ):
+    html_started = time.monotonic()
+    print("[build] START JSON serialization", flush=True)
     raw_payload = json.dumps(
         data,
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("utf-8")
 
+    print("[build] DONE JSON serialization:",
+          f"{time.monotonic()-html_started:.3f}s", flush=True)
+    html_started = time.monotonic()
+    print("[build] START gzip compression", flush=True)
     compressed_payload = gzip.compress(
         raw_payload,
         compresslevel=9,
         mtime=0,
     )
 
+    print("[build] DONE gzip compression:",
+          f"{time.monotonic()-html_started:.3f}s", flush=True)
+    html_started = time.monotonic()
+    print("[build] START base64 embedding", flush=True)
     payload = base64.b64encode(compressed_payload).decode("ascii")
     payload_lines = ",\n".join(
         f'    "{payload[offset : offset + 72]}"'
         for offset in range(0, len(payload), 72)
     )
 
+    print("[build] DONE base64 embedding:",
+          f"{time.monotonic()-html_started:.3f}s", flush=True)
     print(
         "embedded data:",
         f"{len(raw_payload) / (1024 * 1024):.1f} MiB raw ->",
@@ -9173,7 +10139,8 @@ def build_html(
         "bus": "&#1040;&#1074;&#1090;&#1086;&#1073;&#1091;&#1089;",
         "tram": "&#1058;&#1088;&#1072;&#1084;&#1074;&#1072;&#1081;",
         "trolleybus": (
-            "&#1058;&#1088;&#1086;&#1083;&#1083;&#1077;&#1081;&#1073;&#1091;" "&#1089;"
+            "&#1058;&#1088;&#1086;&#1083;&#1083;&#1077;&#1081;&#1073;&#1091;"
+            "&#1089;"
         ),
         "metro": "&#1052;&#1077;&#1090;&#1088;&#1086;",
         "mcc": "&#1052;&#1062;&#1050;",
@@ -9265,7 +10232,6 @@ def build_html(
         raise ValueError(f"Generated HTML lines exceed 100: {long_lines[:10]}")
     return result
 
-
 # CLI
 
 #!/usr/bin/env python3
@@ -9284,8 +10250,11 @@ def parse_args():
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--rebuild-walking", action="store_true")
     parser.add_argument(
-        "--walking-json",
-        type=Path,
+        "--rebuild-transfers", action="store_true",
+        help="Recompute the offline pedestrian stop-to-stop transfer graph",
+    )
+    parser.add_argument(
+        "--walking-json", type=Path,
         help="Use a prebuilt walking graph for normalized GeoJSON fixtures",
     )
     parser.add_argument("--walk-minutes", type=float, default=5.0)
@@ -9293,23 +10262,19 @@ def parse_args():
     parser.add_argument("--grid-size", type=float, default=400.0)
     parser.add_argument("--circle-opacity", type=float, default=40.0)
     parser.add_argument(
-        "--input-geojson",
-        type=Path,
+        "--input-geojson", type=Path,
         help="Use a normalized route/stop fixture instead of reading OSM PBF",
     )
     parser.add_argument(
-        "--dump-geojson",
-        type=Path,
+        "--dump-geojson", type=Path,
         help="Save normalized route/stop features for debugging and tests",
     )
     parser.add_argument(
-        "--report-json",
-        type=Path,
+        "--report-json", type=Path,
         help="Save model diagnostics (mode counts, provenance and gaps)",
     )
     parser.add_argument(
-        "--infer-rail-stops",
-        action="store_true",
+        "--infer-rail-stops", action="store_true",
         help="Opt into heuristic railway station recovery (unverified)",
     )
     parser.add_argument(
@@ -9332,13 +10297,22 @@ def parse_args():
 
 def main():
     args = parse_args()
+    build_started = time.monotonic()
+    build_phases = []
+
+    def step_done(name, started):
+        duration = time.monotonic() - started
+        build_phases.append((name, duration))
+        print(f"[build] DONE {name}: {duration:.3f}s", flush=True)
+
+    print(f"[build] START v{PROJECT_VERSION}", flush=True)
+    phase_started = time.monotonic()
+    print("[build] START transport input", flush=True)
     if args.input_geojson:
         feature_collection = json.loads(args.input_geojson.read_text(encoding="utf-8"))
     else:
         if osmium is None:
-            raise RuntimeError(
-                "Install osmium for OSM PBF extraction: pip install osmium"
-            )
+            raise RuntimeError("Install osmium for OSM PBF extraction: pip install osmium")
 
         transport_pbf = build_cache(
             Path(args.cache_dir), update=args.update, rebuild=args.rebuild
@@ -9346,15 +10320,24 @@ def main():
         feature_collection = build_transport_data(
             transport_pbf, infer_rail_stops=args.infer_rail_stops
         )
+    step_done("transport input", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START optional GeoJSON export", flush=True)
     if args.dump_geojson:
         args.dump_geojson.write_text(
             json.dumps(feature_collection, ensure_ascii=True) + "\n",
             encoding="ascii",
         )
+    step_done("optional GeoJSON export", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START transport index", flush=True)
     index = build_index(feature_collection, args.grid_size)
     print(f"indexed stops: {len(index['stops'])}")
     print(f"indexed routes: {len(index['routes'])}")
     print(f"grid cells: {len(index['grid'])}")
+    step_done("transport index", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START pedestrian graph or cache", flush=True)
     if args.walking_json:
         walking = json.loads(args.walking_json.read_text(encoding="ascii"))
         stop_nodes = walking.pop("stop_nodes", None)
@@ -9365,19 +10348,34 @@ def main():
     else:
         cache_dir = Path(args.cache_dir)
         walking = load_or_build_pedestrian(
-            cache_dir,
-            cache_dir / "central-fed-district.osm.pbf",
-            index,
-            MAX_WALK_UI_MINUTES * args.walk_speed,
+            cache_dir, cache_dir / "central-fed-district.osm.pbf",
+            index, MAX_WALK_UI_MINUTES * args.walk_speed,
             rebuild=(args.update or args.rebuild_walking),
         )
     if not walking.get("nodes") or not walking.get("edges"):
         raise RuntimeError("Pedestrian graph is empty")
+    step_done("pedestrian graph or cache", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START graph validation", flush=True)
     node_count = len(walking["nodes"])
     for edge in walking["edges"]:
         if edge[0] >= node_count or edge[1] >= node_count:
             raise ValueError("Pedestrian graph contains an invalid edge")
     index["walking"] = walking
+    step_done("graph validation", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START walking transfers or cache", flush=True)
+    walk_source = args.walking_json or (Path(args.cache_dir) /
+                                         "moscow-pedestrian-v2.json.gz")
+    index["walk_transfers"] = load_or_build_walk_transfers(
+        Path(args.cache_dir), walk_source, walking, index["stops"],
+        MAX_WALK_UI_MINUTES * args.walk_speed,
+        rebuild=(args.rebuild_transfers or args.rebuild_walking
+                 or args.update or args.rebuild),
+    )
+    step_done("walking transfers or cache", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START statistics and audit", flush=True)
     for stop in index["stops"]:
         if stop.get("walk_node", -1) >= node_count:
             raise ValueError("Pedestrian graph contains an invalid stop node")
@@ -9387,20 +10385,18 @@ def main():
     print(f"walking stops connected: {walk_connected}/{len(index['stops'])}")
     report = audit_index(index)
     report["pedestrian"] = {
+        "transfer_arcs": len(index["walk_transfers"]["to"]),
         "nodes": len(walking["nodes"]),
         "edges": len(walking["edges"]),
         "connected_stops": walk_connected,
         "disconnected_stops": len(index["stops"]) - walk_connected,
         "sample_unconnected_stops": [
             {"id": s["id"], "name": s.get("name")}
-            for s in index["stops"]
-            if s.get("walk_node", -1) < 0
+            for s in index["stops"] if s.get("walk_node", -1) < 0
         ][:30],
     }
-    print(
-        f"pedestrian graph: {len(walking['nodes'])} nodes, "
-        f"{len(walking['edges'])} edges"
-    )
+    print(f"pedestrian graph: {len(walking['nodes'])} nodes, "
+          f"{len(walking['edges'])} edges")
     print(f"mode directions: {report['mode_directions']}")
     print(f"geometry sources: {report['geometry_sources']}")
     if report["synthetic_route_relations"]:
@@ -9413,9 +10409,22 @@ def main():
         args.report_json.write_text(
             json.dumps(report, ensure_ascii=True, indent=4) + "\n", encoding="ascii"
         )
-    html = build_html(index, args.walk_minutes, args.walk_speed, args.circle_opacity)
+    step_done("statistics and audit", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START HTML encode + gzip", flush=True)
+    html = build_html(
+        index, args.walk_minutes, args.walk_speed, args.circle_opacity
+    )
+    step_done("HTML encode + gzip", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START HTML file write", flush=True)
     Path(args.output).write_text(html, encoding="ascii")
+    step_done("HTML file write", phase_started)
     print(f"wrote: {Path(args.output).resolve()}")
+    print("[build] FINAL TIMINGS (seconds)", flush=True)
+    for name, duration in build_phases:
+        print(f"[build] {name}: {duration:.3f}s", flush=True)
+    print(f"[build] TOTAL: {time.monotonic()-build_started:.3f}s", flush=True)
 
 
 if __name__ == "__main__":
