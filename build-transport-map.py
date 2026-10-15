@@ -13,6 +13,7 @@ import heapq
 import html as html_lib
 import json
 import math
+import struct
 import re
 import sys
 import time
@@ -28,7 +29,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.7.7"
+PROJECT_VERSION = "0.8.0"
 
 
 # OSM extraction and normalization
@@ -36,7 +37,19 @@ PROJECT_VERSION = "0.7.7"
 EARTH_RADIUS_M = 6371000.0
 
 
-SOURCE_URL = "https://download.geofabrik.de/russia/central-fed-district-latest.osm.pbf"
+# OSMlab publishes Moscow city and Moscow Oblast as separate regional extracts.
+# RU-MOW is Moscow city, RU-MOS is Moscow Oblast (not interchangeable).
+SOURCE_REGIONS = (
+    ("RU-MOW", "https://www.osmlab.ru/regions/RU-MOW.pbf"),
+    ("RU-MOS", "https://www.osmlab.ru/regions/RU-MOS.pbf"),
+)
+MERGED_SOURCE_NAME = "moscow-regions-osmlab.osm.pbf"
+MERGED_MANIFEST_NAME = "moscow-regions-osmlab.sources.json"
+TRANSPORT_CACHE_NAME = "moscow-transport-osmlab-v1.osm.pbf"
+PEDESTRIAN_CACHE_NAME = "moscow-pedestrian-osmlab-v1.json.gz"
+PEDESTRIAN_TEST_CACHE_NAME = "moscow-pedestrian-osmlab-v1-private-test.json.gz"
+TRANSFERS_CACHE_NAME = "moscow-walk-transfers-osmlab-v1.json.gz"
+TRANSFERS_TEST_CACHE_NAME = "moscow-walk-transfers-osmlab-v1-private-test.json.gz"
 NETWORK = (
     "\u041c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0439 "
     "\u0442\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442"
@@ -45,8 +58,7 @@ SURFACE_MODES = {"bus", "tram", "trolleybus"}
 RAIL_ROUTE_TYPES = {"subway", "train", "light_rail", "railway"}
 # Explicit intercity services are not ordinary suburban trains.
 INTERCITY_SERVICES = {"long_distance", "high_speed", "intercity", "international"}
-# The downloaded source includes the entire Central Federal District.
-# Only commuter stops inside the Moscow catchment enter the final index.
+# Keep commuter stops inside the Moscow catchment in the final index.
 
 SUPPORTED_ROUTE_TYPES = SURFACE_MODES | RAIL_ROUTE_TYPES
 MCD_REF_PATTERN = re.compile(
@@ -120,8 +132,8 @@ def transport_mode(tags, route_type):
         return "mcd"
 
     if route_type == "subway":
-        # The source extract covers the Central Federal District; Moscow
-        # is its only subway network. The network tag may be absent.
+        # The paired Moscow/Oblast extracts cover the Moscow subway network.
+        # Its route relation network tag may be absent.
         return "metro"
 
     if route_type == "light_rail" and MOSCOW_METROPOLITAN in network:
@@ -137,56 +149,220 @@ def transport_mode(tags, route_type):
     return None
 
 
-def download_source(source_path):
+def download_source(url, source_path):
+    """Download one regional PBF with retries, HTTP Range resume and atomic replace."""
     source_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = source_path.with_name(source_path.stem + ".tmp" + source_path.suffix)
-    tmp_path.unlink(missing_ok=True)
-
-    for attempt in range(1, 4):
-        request = urllib.request.Request(
-            SOURCE_URL,
-            headers={"User-Agent": f"moscow-transport-reachability/{PROJECT_VERSION}"},
-        )
-
+    part = source_path.with_name(source_path.name + ".part")
+    metadata_path = part.with_name(part.name + ".json")
+    for attempt in range(1, 6):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            metadata = {}
+        # Avoid appending a newer region snapshot to an obsolete partial file.
+        validator = metadata.get("validator") if metadata.get("url") == url else None
+        if not validator:
+            part.unlink(missing_ok=True)
+        offset = part.stat().st_size if part.exists() else 0
+        headers = {"User-Agent": f"moscow-transport-reachability/{PROJECT_VERSION}"}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+            headers["If-Range"] = validator
+        request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                total_header = response.headers.get("Content-Length")
-                total = int(total_header) if total_header else 0
-                downloaded = 0
-                next_report = 64 * 1024 * 1024
-
-                with tmp_path.open("wb") as output:
+                status = response.status
+                content_range = response.headers.get("Content-Range", "")
+                if status == 206:
+                    if not content_range.startswith(f"bytes {offset}-"):
+                        raise RuntimeError("Unexpected Content-Range from " + url)
+                    returned_validator = response.headers.get(
+                        "ETag"
+                    ) or response.headers.get("Last-Modified")
+                    if (
+                        validator
+                        and returned_validator
+                        and returned_validator != validator
+                    ):
+                        part.unlink(missing_ok=True)
+                        metadata_path.unlink(missing_ok=True)
+                        raise RuntimeError("Regional PBF changed during HTTP resume")
+                    mode = "ab"
+                elif status == 200:
+                    # A server may ignore Range: restart instead of appending.
+                    offset = 0
+                    mode = "wb"
+                else:
+                    raise RuntimeError(f"Unexpected HTTP status {status}: {url}")
+                validator = response.headers.get("ETag") or response.headers.get(
+                    "Last-Modified"
+                )
+                if validator:
+                    metadata_path.write_text(
+                        json.dumps({"url": url, "validator": validator}),
+                        encoding="utf-8",
+                    )
+                else:
+                    metadata_path.unlink(missing_ok=True)
+                content_length = response.headers.get("Content-Length")
+                total = offset + int(content_length) if content_length else None
+                downloaded = offset
+                next_report = ((downloaded // (64 * 1048576)) + 1) * 64 * 1048576
+                with part.open(mode) as output:
                     while True:
                         chunk = response.read(1024 * 1024)
-
                         if not chunk:
                             break
-
                         output.write(chunk)
                         downloaded += len(chunk)
-
                         if downloaded >= next_report:
-                            if total:
-                                percent = 100.0 * downloaded / total
-                                print(
-                                    f"Downloaded {downloaded // 1048576} MiB "
-                                    f"({percent:.1f}%)"
-                                )
-                            else:
-                                print(f"Downloaded {downloaded // 1048576} MiB")
-
-                            next_report += 64 * 1024 * 1024
-
-            tmp_path.replace(source_path)
+                            suffix = f" / {total // 1048576} MiB" if total else ""
+                            print(
+                                f"[{source_path.name}] {downloaded // 1048576}"
+                                f" MiB{suffix}",
+                                flush=True,
+                            )
+                            next_report += 64 * 1048576
+                if total is not None and downloaded != total:
+                    raise OSError(f"Truncated download: {downloaded}/{total} bytes")
+            if downloaded == 0:
+                raise OSError("Received an empty PBF")
+            part.replace(source_path)
+            metadata_path.unlink(missing_ok=True)
+            print(f"Downloaded: {source_path} ({downloaded // 1048576} MiB)")
             return
-        except (OSError, urllib.error.URLError) as error:
-            tmp_path.unlink(missing_ok=True)
+        except (OSError, urllib.error.URLError, RuntimeError) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code == 416:
+                part.unlink(missing_ok=True)
+                metadata_path.unlink(missing_ok=True)
+            if attempt == 5:
+                raise RuntimeError(f"Failed to download {url}: {error}") from error
+            print(f"Download retry {attempt}/5 for {url}: {error}", flush=True)
+            time.sleep(3)
 
-            if attempt == 3:
-                raise RuntimeError(f"Failed to download {SOURCE_URL}") from error
 
-            print(f"Download failed ({attempt}/3): {error}")
-            time.sleep(5)
+def source_signature(paths):
+    """Manifest key invalidating the merged PBF after a region changes."""
+    return [
+        {
+            "name": path.name,
+            "bytes": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        for path in paths
+    ]
+
+
+def osm_object_key(obj):
+    """Sort nodes, ways and relations by type and then original OSM ID."""
+    ranks = {"n": 0, "w": 1, "r": 2}
+    return ranks[obj.type_str()], obj.id
+
+
+def merge_osm_pbf_files(sources, destination):
+    """Merge sorted regional extracts with bounded memory using pyosmium.
+
+    Keep one current OSM object per source, writing it before advancing that
+    source's iterator. This matters because pyosmium returns temporary views.
+    If extracts overlap, prefer the higher version of the same OSM object.
+    """
+    if not hasattr(osmium, "FileProcessor"):
+        raise RuntimeError(
+            "The OSMlab merge needs pyosmium 4.x (python -m pip install -U osmium)"
+        )
+    if len(sources) != 2:
+        raise ValueError("Expected the two Moscow regional PBF files")
+
+    city = iter(osmium.FileProcessor(str(sources[0])))
+    oblast = iter(osmium.FileProcessor(str(sources[1])))
+    city_obj = next(city, None)
+    oblast_obj = next(oblast, None)
+    written = 0
+    duplicates = 0
+    differing_versions = 0
+    previous = None
+
+    with osmium.SimpleWriter(str(destination)) as writer:
+        while city_obj is not None or oblast_obj is not None:
+            city_key = osm_object_key(city_obj) if city_obj is not None else None
+            oblast_key = osm_object_key(oblast_obj) if oblast_obj is not None else None
+            if oblast_key is None or (city_key is not None and city_key < oblast_key):
+                key = city_key
+                chosen = city_obj
+                take_city, take_oblast = True, False
+            elif city_key is None or oblast_key < city_key:
+                key = oblast_key
+                chosen = oblast_obj
+                take_city, take_oblast = False, True
+            else:
+                key = city_key
+                duplicates += 1
+                if city_obj.version != oblast_obj.version:
+                    differing_versions += 1
+                chosen = (
+                    city_obj if city_obj.version >= oblast_obj.version else oblast_obj
+                )
+                take_city, take_oblast = True, True
+
+            if previous is not None and key <= previous:
+                raise RuntimeError(
+                    "Unsorted or duplicated OSM objects in source PBF: "
+                    f"{key}. Expected strictly increasing type/ID order."
+                )
+            # The writer must copy the chosen view before either iterator moves.
+            writer.add(chosen)
+            written += 1
+            previous = key
+            if take_city:
+                city_obj = next(city, None)
+            if take_oblast:
+                oblast_obj = next(oblast, None)
+            if written % 2000000 == 0:
+                print(f"[merge] {written:,} OSM objects written", flush=True)
+
+    if differing_versions:
+        print(
+            f"[merge] WARNING: {differing_versions} overlapping objects "
+            "have different versions; confirm the regional snapshot dates",
+            flush=True,
+        )
+    print(
+        f"[merge] {written:,} objects, {duplicates:,} shared IDs removed",
+        flush=True,
+    )
+    return written
+
+
+def merge_osmlab_sources(cache_dir, sources, rebuild=False):
+    """Cache a sorted, ID-deduplicated union of the two OSMlab regions."""
+    target = cache_dir / MERGED_SOURCE_NAME
+    manifest = cache_dir / MERGED_MANIFEST_NAME
+    signature = source_signature(sources)
+    if not rebuild and target.is_file() and manifest.is_file():
+        try:
+            if json.loads(manifest.read_text(encoding="utf-8")) == signature:
+                print(f"Using cached regional union: {target}")
+                return target, False
+        except (OSError, ValueError):
+            pass
+
+    tmp = cache_dir / "moscow-regions-osmlab.tmp.osm.pbf"
+    manifest_tmp = manifest.with_name(manifest.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    manifest_tmp.unlink(missing_ok=True)
+    print("Merging Moscow city + Moscow Oblast using pyosmium...", flush=True)
+    try:
+        count = merge_osm_pbf_files(sources, tmp)
+        if not count or not tmp.is_file() or not tmp.stat().st_size:
+            raise RuntimeError("Merged OSM PBF is empty")
+        manifest_tmp.write_text(json.dumps(signature, indent=2) + "\n", "utf-8")
+        tmp.replace(target)
+        manifest_tmp.replace(manifest)
+    finally:
+        tmp.unlink(missing_ok=True)
+        manifest_tmp.unlink(missing_ok=True)
+    print(f"Merged regional OSM: {target}")
+    return target, True
 
 
 def build_transport_extract(source_path, transport_path):
@@ -222,31 +398,24 @@ def build_transport_extract(source_path, transport_path):
 
 def build_cache(cache_dir, update=False, rebuild=False):
     cache_dir.mkdir(parents=True, exist_ok=True)
+    sources = []
+    for region, url in SOURCE_REGIONS:
+        source = cache_dir / f"{region}.osm.pbf"
+        if update or not source.is_file():
+            print(f"Downloading OSMlab region {region}: {url}", flush=True)
+            download_source(url, source)
+        else:
+            print(f"Using cached: {source}")
+        sources.append(source)
 
-    source = cache_dir / "central-fed-district.osm.pbf"
-    # v4 did not contain ordinary route=train relations.
-    transport_pbf = cache_dir / "moscow-transport-v5.osm.pbf"
-
-    if update:
-        print("Downloading fresh Central Federal District data...")
-        download_source(source)
-        transport_pbf.unlink(missing_ok=True)
-    elif not source.exists():
-        print("Downloading Central Federal District data...")
-        download_source(source)
-    else:
-        print(f"Using cached: {source}")
-
-    if rebuild:
-        transport_pbf.unlink(missing_ok=True)
-
-    if not transport_pbf.exists():
+    source, source_changed = merge_osmlab_sources(cache_dir, sources)
+    transport_pbf = cache_dir / TRANSPORT_CACHE_NAME
+    if update or rebuild or source_changed or not transport_pbf.is_file():
         print("Selecting surface, metro, MCC, MCD and suburban train routes...")
         build_transport_extract(source, transport_pbf)
     else:
         print(f"Using cached: {transport_pbf}")
-
-    return transport_pbf
+    return transport_pbf, source
 
 
 def member_key(member_type, member_id):
@@ -1027,6 +1196,8 @@ WALK_HIGHWAYS = {
     "path",
     "pedestrian",
     "steps",
+    "corridor",
+    "elevator",
     "living_street",
     "residential",
     "service",
@@ -1052,7 +1223,7 @@ WALK_DENIED = {
     "use_sidepath",
 }
 WALK_GRID_M = 100.0
-WALK_CACHE_VERSION = 3
+WALK_CACHE_VERSION = 7
 # Explicit test-only override of four OSM ways found by the v0.7.6 inspector.
 # These ways are tagged access=private. Do not apply the exception globally.
 MOSKVORECHYE_PRIVATE_WAYS = frozenset(
@@ -1096,7 +1267,9 @@ WALK_ZONE_MARGIN_M = 130.0
 
 def is_walkable_way(tags):
     highway = tags.get("highway")
-    if highway not in WALK_HIGHWAYS:
+    if highway not in WALK_HIGHWAYS and not (
+        highway is None and tags.get("indoor") == "corridor"
+    ):
         return False
     if tags.get("area") == "yes" or tags.get("highway") == "construction":
         return False
@@ -1221,6 +1394,7 @@ class WalkNodeCollector(OsmiumSimpleHandler):
     def __init__(self, stops, origin, limit_m):
         super().__init__()
         self.origin = origin
+        self.entrances = StationEntranceCollector(stops, origin)
         self.zones = StopZoneIndex(
             stops,
             limit_m + WALK_ZONE_MARGIN_M,
@@ -1248,6 +1422,7 @@ class WalkNodeCollector(OsmiumSimpleHandler):
         x, y = project(lon, lat, *self.origin)
         if not self.zones.contains(x, y):
             return
+        self.entrances.node(node)
         self.nodes[node.id] = (round(x, 1), round(y, 1))
         tags = node.tags
         if tags.get("barrier") and tags.get("access") in WALK_DENIED:
@@ -1255,15 +1430,26 @@ class WalkNodeCollector(OsmiumSimpleHandler):
         if tags.get("foot") in WALK_DENIED:
             self.blocked.add(node.id)
 
+    def relation(self, relation):
+        self.entrances.relation(relation)
+
 
 class WalkWayCollector(OsmiumSimpleHandler):
-    def __init__(self, nodes, blocked, allow_private_station_ways=False):
+    def __init__(
+        self,
+        nodes,
+        blocked,
+        allow_private_station_ways=False,
+        station_way_ids=None,
+    ):
         super().__init__()
         self.nodes = nodes
         self.blocked = blocked
         self.allow_private_station_ways = allow_private_station_ways
         self.graph_nodes = []
         self.graph_index = {}
+        self.station_way_ids = station_way_ids or set()
+        self.station_way_nodes = {}
         self.edges = []
         self.preferred_edges = set()
         self.accepted_private_way_ids = set()
@@ -1314,6 +1500,12 @@ class WalkWayCollector(OsmiumSimpleHandler):
                 self.preferred_edges.add(len(self.edges) - 1)
             used = True
         if used:
+            if way.id in self.station_way_ids:
+                self.station_way_nodes[way.id] = [
+                    self.graph_index[ref]
+                    for ref in references
+                    if ref in self.graph_index
+                ]
             self.ways_count += 1
             if private_station:
                 self.accepted_private_way_ids.add(way.id)
@@ -1375,18 +1567,153 @@ def nearest_walk_segment(x, y, nodes, edges, grid, max_snap, preferred_edges=Non
     return best
 
 
-def attach_stops_to_walk_graph(nodes, edges, stops, preferred_edges=None):
-    """Split OSM edges at stop projections; never link unrelated street edges."""
+# A route stop is a boarding position, not necessarily a street entrance.
+# Only same-stop_area membership authorizes a virtual indoor connection.
+# These links are routing estimates, not mapped pedestrian geometries.
+
+
+class StationEntranceCollector(OsmiumSimpleHandler):
+    def __init__(self, stops, origin):
+        super().__init__()
+        self.origin = origin
+        self.rail_stops = {
+            stop["id"]
+            for stop in stops
+            if set(stop.get("modes", ())) & {"metro", "mcc", "mcd", "train"}
+        }
+        self.entrances = {}
+        self.access = defaultdict(dict)
+        self.matched_areas = 0
+
+    def node(self, node):
+        if not node.location.valid():
+            return
+        tags = node.tags
+        is_entrance = (
+            tags.get("railway") == "subway_entrance"
+            or tags.get("entrance") in {"yes", "main", "entrance", "exit"}
+            or tags.get("public_transport") == "entrance"
+        )
+        if not is_entrance:
+            return
+        if (tags.get("access") or "").lower() in WALK_DENIED:
+            return
+        if (tags.get("foot") or "").lower() in WALK_DENIED:
+            return
+        x, y = project(node.location.lon, node.location.lat, *self.origin)
+        role = (tags.get("entrance") or "").lower()
+        direction = 12 if role == "exit" else 13 if role == "entrance" else 11
+        self.entrances[node.id] = (round(x, 1), round(y, 1), direction)
+
+    def relation(self, relation):
+        tags = relation.tags
+        if tags.get("public_transport") != "stop_area":
+            return
+        member_stops = []
+        entrance_ids = []
+        for member in relation.members:
+            key = member.type + str(member.ref)
+            if key in self.rail_stops:
+                member_stops.append(key)
+            if member.type == "n" and member.ref in self.entrances:
+                entrance_ids.append(member.ref)
+        if not member_stops or not entrance_ids:
+            return
+        self.matched_areas += 1
+        for stop_id in member_stops:
+            for entrance_id in entrance_ids:
+                self.access[stop_id][entrance_id] = self.entrances[entrance_id]
+
+
+def add_station_access_links(graph, stops, entrances, count):
+    """Join boarding hubs to confirmed stop_area entrances via estimated corridors.
+
+    No entrance can become an outdoor routing point without a connected
+    pedestrian edge. A 12 m snap is an approximation and remains audited.
+    """
+    nodes = graph["nodes"]
+    edges = graph["edges"]
+    attached = 0
+    connected_entrances = 0
+    entrance_nodes = {item["entrance_id"]: item["walk_node"] for item in count}
+    for stop in stops:
+        entries = entrances.access.get(stop["id"], {})
+        available = []
+        for entrance_id, (x, y, direction) in entries.items():
+            access_node = entrance_nodes.get(entrance_id, -1)
+            if access_node < 0:
+                continue
+            available.append((access_node, x, y, direction))
+        if not available:
+            continue
+        hub = len(nodes)
+        nodes.append([stop["x"], stop["y"]])
+        stop["walk_node"] = hub
+        for access_node, x, y, direction in available:
+            # The exact indoor length is not known; the conservative penalty
+            # is a routing estimate rather than a fabricated OSM walkway.
+            straight = math.hypot(x - stop["x"], y - stop["y"])
+            length = round(max(100.0, min(400.0, straight + 50.0)), 1)
+            edges.append([hub, access_node, length, direction])
+            connected_entrances += 1
+        attached += 1
+    print(
+        "[station] stop_area:",
+        entrances.matched_areas,
+        "stations with street access:",
+        attached,
+        "indoor access links:",
+        connected_entrances,
+    )
+    return attached
+
+
+def attach_stops_to_walk_graph(
+    nodes,
+    edges,
+    stops,
+    preferred_edges=None,
+    osm_node_index=None,
+    osm_way_index=None,
+):
+    """Attach exact OSM nodes first; snap other stops to nearby walking edges."""
     grid = build_walk_segment_grid(nodes, edges)
     attachments = defaultdict(list)
     stop_nodes = [-1] * len(stops)
     missed = Counter()
+    direct = 0
+    direct_ways = 0
     for idx, stop in enumerate(stops):
+        # A shared OSM node ID is real topology. Snapping by coordinates
+        # instead might choose the wrong side of a railway or an overpass.
+        stop_id = stop["id"]
+        if osm_node_index is not None and stop_id.startswith("n"):
+            walk_node = osm_node_index.get(int(stop_id[1:]))
+            if walk_node is not None:
+                stop_nodes[idx] = walk_node
+                direct += 1
+                continue
+        if osm_way_index is not None and stop_id.startswith("w"):
+            vertices = osm_way_index.get(int(stop_id[1:]), ())
+            if vertices:
+                stop_nodes[idx] = min(
+                    vertices,
+                    key=lambda node: math.hypot(
+                        nodes[node][0] - stop["x"],
+                        nodes[node][1] - stop["y"],
+                    ),
+                )
+                direct_ways += 1
+                continue
         # Rail station-centre points may be some distance from mapped entrances.
         modes = stop.get("modes", ())
-        snap_limit = (
-            100.0 if any(mode in ("metro", "mcc", "mcd") for mode in modes) else 45.0
-        )
+        snap_limit = stop.get("snap_limit")
+        if snap_limit is None:
+            snap_limit = (
+                100.0
+                if any(mode in ("metro", "mcc", "mcd") for mode in modes)
+                else 45.0
+            )
         rail_preference = (
             preferred_edges if stop["id"] in MOSKVORECHYE_PLATFORM_IDS else None
         )
@@ -1444,6 +1771,8 @@ def attach_stops_to_walk_graph(nodes, edges, stops, preferred_edges=None):
                 result_edges.append([n0, n1, round(length * (t1 - t0), 1), direction])
     for index, node in enumerate(stop_nodes):
         stops[index]["walk_node"] = node
+    print(f"pedestrian stops attached by exact OSM node: {direct}")
+    print(f"pedestrian stops attached by platform way: {direct_ways}")
     return {"nodes": nodes, "edges": result_edges}, dict(missed)
 
 
@@ -1462,11 +1791,16 @@ def build_pedestrian_graph(
     points = WalkNodeCollector(stops, origin, limit_m)
     points.apply_file(str(source_path))
     print(f"pedestrian candidate nodes: {len(points.nodes)}")
+    # Node and stop_area discovery piggybacks on WalkNodeCollector's PBF pass.
+    entrances = points.entrances
     print("Pedestrian graph: reading walkable highways...")
     ways = WalkWayCollector(
         points.nodes,
         points.blocked,
         allow_private_station_ways,
+        station_way_ids={
+            int(stop["id"][1:]) for stop in stops if stop["id"].startswith("w")
+        },
     )
     ways.apply_file(str(source_path))
     del points
@@ -1478,12 +1812,31 @@ def build_pedestrian_graph(
             print("[station] WARNING: missing or unusable test ways:", absent)
     print(f"pedestrian walkable ways: {ways.ways_count}")
     print(f"pedestrian walking segments: {len(ways.edges)}")
+    used_entrances = {
+        entrance_id for area in entrances.access.values() for entrance_id in area
+    }
+    entrance_stops = [
+        {
+            "id": "n" + str(entrance_id),
+            "entrance_id": entrance_id,
+            "x": entry[0],
+            "y": entry[1],
+            "snap_limit": 12.0,
+            "modes": [],
+        }
+        for entrance_id, entry in entrances.entrances.items()
+        if entrance_id in used_entrances
+    ]
+    all_stops = stops + entrance_stops
     graph, missed = attach_stops_to_walk_graph(
         ways.graph_nodes,
         ways.edges,
-        stops,
+        all_stops,
         preferred_edges=(ways.preferred_edges if allow_private_station_ways else None),
+        osm_node_index=ways.graph_index,
+        osm_way_index=ways.station_way_nodes,
     )
+    add_station_access_links(graph, stops, entrances, entrance_stops)
     if not graph["edges"]:
         raise RuntimeError("No walking edges extracted from the source PBF")
     print(f"pedestrian graph nodes: {len(graph['nodes'])}")
@@ -1508,12 +1861,12 @@ def load_or_build_pedestrian(
     cache_dir, source, index, limit_m, rebuild=False, allow_private_station_ways=False
 ):
     filename = (
-        "moscow-pedestrian-v4-moskvorechye-test.json.gz"
+        PEDESTRIAN_TEST_CACHE_NAME
         if allow_private_station_ways
-        else "moscow-pedestrian-v3.json.gz"
+        else PEDESTRIAN_CACHE_NAME
     )
     path = cache_dir / filename
-    cache_version = 4 if allow_private_station_ways else WALK_CACHE_VERSION
+    cache_version = WALK_CACHE_VERSION + int(allow_private_station_ways)
     fingerprint = stop_fingerprint(index["stops"])
     source_path = Path(source)
     source_stat = source_path.stat() if source_path.is_file() else None
@@ -1529,9 +1882,7 @@ def load_or_build_pedestrian(
             cached.get("version") == cache_version
             and cached.get("stop_fingerprint") == fingerprint
             and cached.get("walk_limit_m") == limit_m
-            and (
-                not allow_private_station_ways or cached.get("source_key") == source_key
-            )
+            and cached.get("source_key") == source_key
         ):
             print(f"Using cached: {path}")
             graph = cached["walking"]
@@ -1550,7 +1901,7 @@ def load_or_build_pedestrian(
         "version": cache_version,
         "stop_fingerprint": fingerprint,
         "walk_limit_m": limit_m,
-        "source_key": source_key if allow_private_station_ways else None,
+        "source_key": source_key,
         "allowed_private_ways": (
             sorted(MOSKVORECHYE_PRIVATE_WAYS) if allow_private_station_ways else []
         ),
@@ -1567,7 +1918,7 @@ def load_or_build_pedestrian(
 
 # Offline walking transfer graph: directed CSR with network shortest paths.
 # This is distinct from the full OSM graph needed for on-map coverage.
-WALK_TRANSFER_CACHE_VERSION = 2
+WALK_TRANSFER_CACHE_VERSION = 4
 
 
 def build_walk_transfers(walking, stops, radius_m):
@@ -1582,9 +1933,9 @@ def build_walk_transfers(walking, stops, radius_m):
     # Directed adjacency exactly matches the browser's walking CSR.
     degree = array("I", [0]) * count
     for a, b, length, direction in walking["edges"]:
-        if direction != 3:
+        if direction not in (3, 13):
             degree[a] += 1
-        if direction != 2:
+        if direction not in (2, 12):
             degree[b] += 1
     offsets = array("I", [0]) * (count + 1)
     for node in range(count):
@@ -1593,12 +1944,12 @@ def build_walk_transfers(walking, stops, radius_m):
     weight = array("f", [0.0]) * offsets[-1]
     cursor = array("I", offsets[:-1])
     for a, b, length, direction in walking["edges"]:
-        if direction != 3:
+        if direction not in (3, 13):
             slot = cursor[a]
             to[slot] = b
             weight[slot] = length
             cursor[a] += 1
-        if direction != 2:
+        if direction not in (2, 12):
             slot = cursor[b]
             to[slot] = a
             weight[slot] = length
@@ -1715,9 +2066,9 @@ def load_or_build_walk_transfers(
 ):
     cache_dir.mkdir(parents=True, exist_ok=True)
     filename = (
-        "moscow-walk-transfers-v3-moskvorechye-test.json.gz"
+        TRANSFERS_TEST_CACHE_NAME
         if allow_private_station_ways
-        else "moscow-walk-transfers-v2.json.gz"
+        else TRANSFERS_CACHE_NAME
     )
     path = cache_dir / filename
     source = Path(walking_source)
@@ -1733,7 +2084,7 @@ def load_or_build_walk_transfers(
             )
         )
     metadata = {
-        "version": 3 if allow_private_station_ways else WALK_TRANSFER_CACHE_VERSION,
+        "version": WALK_TRANSFER_CACHE_VERSION,
         "stop_fingerprint": fingerprint.hexdigest(),
         "source": source_key,
         "radius_m": radius_m,
@@ -2172,7 +2523,9 @@ def walk_weak_components(walking):
             rank[a] += 1
     counts = Counter()
     for i in range(size):
-        counts[root(i)] += 1
+        component = root(i)
+        parent[i] = component
+        counts[component] += 1
     return parent, counts
 
 
@@ -2283,10 +2636,11 @@ class LocalStationNodes(OsmiumSimpleHandler):
 class LocalStationWays(OsmiumSimpleHandler):
     """Collect nearby ways, including candidates rejected by walking filter."""
 
-    def __init__(self, local_nodes, coordinate_components):
+    def __init__(self, local_nodes, coordinate_components, allow_private_ways=False):
         super().__init__()
         self.nodes = local_nodes
         self.components = coordinate_components
+        self.allow_private_ways = allow_private_ways
         self.ways = []
         self.node_ways = defaultdict(list)
 
@@ -2336,7 +2690,11 @@ class LocalStationWays(OsmiumSimpleHandler):
             )
         ):
             return
-        accepted = is_walkable_way(tags) or is_linear_station_walkway(tags, refs)
+        accepted = (
+            is_walkable_way(tags)
+            or is_linear_station_walkway(tags, refs)
+            or allow_station_private_way(way.id, tags, self.allow_private_ways)
+        )
         components = sorted(
             {
                 component
@@ -2356,7 +2714,9 @@ class LocalStationWays(OsmiumSimpleHandler):
             self.node_ways[ref].append(len(self.ways) - 1)
 
 
-def local_station_access_diagnostic(index, walking, source, name, radius):
+def local_station_access_diagnostic(
+    index, walking, source, name, radius, allow_private_station_ways=False
+):
     """Find topological gaps and nearby raw OSM ways; never repair by proximity."""
     if osmium is None:
         raise RuntimeError("Install osmium for station diagnosis: pip install osmium")
@@ -2428,7 +2788,7 @@ def local_station_access_diagnostic(index, walking, source, name, radius):
     print("[access] Reading local OSM nodes and ways...", flush=True)
     nodes = LocalStationNodes(index["origin"], cx, cy, radius)
     nodes.apply_file(str(source))
-    ways = LocalStationWays(nodes, coordinate_components)
+    ways = LocalStationWays(nodes, coordinate_components, allow_private_station_ways)
     ways.apply_file(str(source))
     coordinate_to_ids = defaultdict(list)
     for ref, xy in nodes.coords.items():
@@ -2587,9 +2947,7 @@ def local_station_access_diagnostic(index, walking, source, name, radius):
                 "id": stop["id"],
                 "name": stop.get("name"),
                 "walk_node": stop.get("walk_node", -1),
-                "component": (
-                    next(iter(target_roots)) if len(target_roots) == 1 else None
-                ),
+                "component": (station_roots[i]),
             }
             for i, stop in targets
         ],
@@ -2608,6 +2966,7 @@ def local_station_access_diagnostic(index, walking, source, name, radius):
         "rejected_or_bridge_ways": relevant_ways[:150],
         "notes": [
             "Component IDs are diagnostic only and can change on rebuild.",
+            "Components use fully resolved disjoint-set roots.",
             "Nearest gaps are geometrical candidates, NOT verified passages.",
             "A crossing on the map does not establish a shared OSM node.",
             "No graph links have been added by this diagnostic.",
@@ -2703,12 +3062,16 @@ def station_access_geojson(summary, ways, nodes, platform_roots, street_roots, o
     return {"type": "FeatureCollection", "features": features}
 
 
-def write_station_access_diagnostic(args, index, walking):
-    source = Path(args.cache_dir) / "central-fed-district.osm.pbf"
+def write_station_access_diagnostic(args, index, walking, source):
     if args.walking_json:
         raise ValueError("Station access audit requires the original OSM PBF")
     report, geometry = local_station_access_diagnostic(
-        index, walking, source, args.diagnose_station, args.diagnose_radius
+        index,
+        walking,
+        source,
+        args.diagnose_station,
+        args.diagnose_radius,
+        allow_private_station_ways=args.allow_moskvorechye_private,
     )
     Path(args.diagnose_output).write_text(
         json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="ascii"
@@ -4564,7 +4927,72 @@ async function loadTransportData() {
         .pipeThrough(new DecompressionStream("gzip"));
 
     const text = await new Response(stream).text();
-    return JSON.parse(text);
+    const data = JSON.parse(text);
+    if (data.walking && data.walking.format === "delta-varint-dm-v1") {
+        const graph = data.walking;
+        const decode = value => {
+            const raw = atob(value);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) {
+                bytes[i] = raw.charCodeAt(i);
+            }
+            return bytes;
+        };
+        const reader = bytes => {
+            let position = 0;
+            return {
+                unsigned() {
+                    let result = 0;
+                    let factor = 1;
+                    for (let part = 0; part < 5; part++) {
+                        if (position >= bytes.length) {
+                            throw new Error("Truncated walking graph varint");
+                        }
+                        const byte = bytes[position++];
+                        result += (byte & 127) * factor;
+                        if (byte < 128) return result;
+                        factor *= 128;
+                    }
+                    throw new Error("Invalid walking graph varint");
+                },
+                signed() {
+                    const value = this.unsigned();
+                    return (value % 2 === 0) ? value / 2 : -(value + 1) / 2;
+                },
+                byte() {
+                    if (position >= bytes.length) throw new Error("Missing graph direction");
+                    return bytes[position++];
+                },
+                complete() { return position === bytes.length; }
+            };
+        };
+        const xy = reader(decode(graph.nodes));
+        const arcs = reader(decode(graph.edges));
+        const nodes = new Array(graph.node_count);
+        const edges = new Array(graph.edge_count);
+        let x = 0, y = 0, previousA = 0;
+        for (let i = 0; i < nodes.length; i++) {
+            x += xy.signed();
+            y += xy.signed();
+            nodes[i] = [x / 10, y / 10];
+        }
+        for (let i = 0; i < edges.length; i++) {
+            const a = previousA + arcs.signed();
+            const b = a + arcs.signed();
+            const length = arcs.unsigned() / 10;
+            const direction = arcs.byte();
+            if (a < 0 || a >= nodes.length || b < 0 || b >= nodes.length) {
+                throw new Error("Walking graph edge references invalid node");
+            }
+            edges[i] = [a, b, length, direction];
+            previousA = a;
+        }
+        if (!xy.complete() || !arcs.complete()) {
+            throw new Error("Trailing walking graph data");
+        }
+        data.walking = {nodes: nodes, edges: edges};
+    }
+    return data;
 }
 
 (async () => {
@@ -5155,8 +5583,8 @@ for (let i = 0; i < stops.length; ++i) {
 const csrStarted = performance.now();
 const walkDegree = new Uint32Array(walkNodes.length);
 for (const edge of walkEdges) {
-    if (edge[3] !== 3) walkDegree[edge[0]]++;
-    if (edge[3] !== 2) walkDegree[edge[1]]++;
+    if (edge[3] !== 3 && edge[3] !== 13) walkDegree[edge[0]]++;
+    if (edge[3] !== 2 && edge[3] !== 12) walkDegree[edge[1]]++;
 }
 const walkOffsets = new Uint32Array(walkNodes.length + 1);
 for (let i = 0; i < walkNodes.length; ++i) {
@@ -5166,12 +5594,12 @@ const walkTo = new Uint32Array(walkOffsets[walkNodes.length]);
 const walkWeight = new Float32Array(walkTo.length);
 const walkNext = walkOffsets.slice(0, walkNodes.length);
 for (const [a, b, length, direction] of walkEdges) {
-    if (direction !== 3) {
+    if (direction !== 3 && direction !== 13) {
         const slot = walkNext[a]++;
         walkTo[slot] = b;
         walkWeight[slot] = length;
     }
-    if (direction !== 2) {
+    if (direction !== 2 && direction !== 12) {
         const slot = walkNext[b]++;
         walkTo[slot] = a;
         walkWeight[slot] = length;
@@ -5278,7 +5706,7 @@ function* buildWalkSegmentGridSteps() {
     const grid = new Map();
     for (let i = 0; i < walkEdges.length; ++i) {
         const edge = walkEdges[i];
-        if (edge[3] === 5) continue; // Never snap to station connector.
+        if (edge[3] === 5 || edge[3] >= 10) continue; // No virtual links.
         const a = walkNodes[edge[0]];
         const b = walkNodes[edge[1]];
         const x0 = Math.floor(Math.min(a[0], b[0]) / WALK_GRID_METERS);
@@ -5550,7 +5978,7 @@ function walkCoverageFromNodes(sources) {
     }
     const lines = [];
     for (const edge of walkEdges) {
-        if (edge[3] === 5) continue; // Sidewalks, not abstract stop connectors.
+        if (edge[3] === 5 || edge[3] >= 10) continue; // Actual sidewalks only.
         const a = remaining.get(edge[0]) ?? -1;
         const b = remaining.get(edge[1]) ?? -1;
         const length = edge[2];
@@ -6155,7 +6583,7 @@ function* rebuildCoverageViewSteps() {
                 if (seen[id]) continue;
                 seen[id] = 1;
                 const edge = walkEdges[id];
-                if (edge[3] === 5 || !coverageEdgeInView(edge)) continue;
+                if (edge[3] === 5 || edge[3] >= 10 || !coverageEdgeInView(edge)) continue;
                 for (let tier = 0; tier < 4; ++tier) {
                     const reached = coverageState.settled[tier];
                     if (reached[edge[0]] || reached[edge[1]]) {
@@ -6293,7 +6721,8 @@ function drawCoverageBatch(tier, deadline) {
         if ((scanned & 255) === 0 && performance.now() >= deadline) break;
         const edge = walkEdges[ids[position++]];
         scanned++;
-        if (!coverageEdgeInView(edge) || edge[2] <= 0 || edge[3] === 5) continue;
+        if (!coverageEdgeInView(edge) || edge[2] <= 0 ||
+            edge[3] === 5 || edge[3] >= 10) continue;
         const a = edge[0], b = edge[1];
         const left = edge[3] === 3 || !settled[a] ? 0 :
             Math.min(1, Math.max(0, budgets[a] / edge[2]));
@@ -11312,6 +11741,55 @@ console.info("[map] BOOT COMPLETE", Math.round(performance.now() - bootStarted),
 """
 
 
+# Pack 0.1 m coordinates and edge lengths into 32-bit integers. This
+# changes only the HTML payload; build caches retain the readable graph.
+# A 2.3M-node graph otherwise generates tens of millions of JSON digits.
+
+
+def encode_unsigned_varint(output, value):
+    if value < 0 or value >= 2**32:
+        raise ValueError("Walking graph value exceeds unsigned 32-bit range")
+    while value >= 128:
+        output.append((value & 127) | 128)
+        value >>= 7
+    output.append(value)
+
+
+def encode_signed_varint(output, value):
+    if not -(2**31) <= value < 2**31:
+        raise ValueError("Walking graph coordinate/delta exceeds 32 bits")
+    encode_unsigned_varint(output, (value << 1) ^ (value >> 31))
+
+
+def pack_walking_payload(data):
+    walking = data["walking"]
+    vertices = bytearray()
+    arcs = bytearray()
+    previous_x = 0
+    previous_y = 0
+    for x, y in walking["nodes"]:
+        next_x = round(x * 10)
+        next_y = round(y * 10)
+        encode_signed_varint(vertices, next_x - previous_x)
+        encode_signed_varint(vertices, next_y - previous_y)
+        previous_x, previous_y = next_x, next_y
+    previous_a = 0
+    for a, b, meters, direction in walking["edges"]:
+        encode_signed_varint(arcs, a - previous_a)
+        encode_signed_varint(arcs, b - a)
+        encode_unsigned_varint(arcs, round(meters * 10))
+        arcs.append(direction)
+        previous_a = a
+    encoded = {
+        "format": "delta-varint-dm-v1",
+        "node_count": len(walking["nodes"]),
+        "edge_count": len(walking["edges"]),
+        "nodes": base64.b64encode(vertices).decode("ascii"),
+        "edges": base64.b64encode(arcs).decode("ascii"),
+    }
+    return {**data, "walking": encoded}
+
+
 # Single-file page generator
 
 
@@ -11324,7 +11802,7 @@ def build_html(
     html_started = time.monotonic()
     print("[build] START JSON serialization", flush=True)
     raw_payload = json.dumps(
-        data,
+        pack_walking_payload(data),
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -11585,6 +12063,8 @@ def parse_args():
         parser.error("--input-geojson requires --walking-json for pedestrian routing")
     if args.input_geojson and (args.update or args.rebuild):
         parser.error("--input-geojson conflicts with --update and --rebuild")
+    if args.input_geojson and args.diagnose_station:
+        parser.error("--diagnose-station requires original OSM input")
     return args
 
 
@@ -11615,7 +12095,7 @@ def main():
                 "Install osmium for OSM PBF extraction: pip install osmium"
             )
 
-        transport_pbf = build_cache(
+        transport_pbf, raw_source = build_cache(
             Path(args.cache_dir), update=args.update, rebuild=args.rebuild
         )
         feature_collection = build_transport_data(
@@ -11650,7 +12130,7 @@ def main():
         cache_dir = Path(args.cache_dir)
         walking = load_or_build_pedestrian(
             cache_dir,
-            cache_dir / "central-fed-district.osm.pbf",
+            raw_source,
             index,
             MAX_WALK_UI_MINUTES * args.walk_speed,
             rebuild=(args.update or args.rebuild_walking),
@@ -11683,7 +12163,7 @@ def main():
     if args.diagnose_station:
         phase_started = time.monotonic()
         print("[build] START station access diagnosis", flush=True)
-        write_station_access_diagnostic(args, index, walking)
+        write_station_access_diagnostic(args, index, walking, raw_source)
         step_done("station access diagnosis", phase_started)
         if args.diagnose_only:
             print("[build] DONE diagnostic-only run", flush=True)
@@ -11691,9 +12171,9 @@ def main():
     phase_started = time.monotonic()
     print("[build] START walking transfers or cache", flush=True)
     walking_file = (
-        "moscow-pedestrian-v4-moskvorechye-test.json.gz"
+        PEDESTRIAN_TEST_CACHE_NAME
         if args.allow_moskvorechye_private
-        else "moscow-pedestrian-v3.json.gz"
+        else PEDESTRIAN_CACHE_NAME
     )
     walk_source = args.walking_json or (Path(args.cache_dir) / walking_file)
     index["walk_transfers"] = load_or_build_walk_transfers(
