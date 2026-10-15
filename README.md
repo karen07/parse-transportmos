@@ -81,7 +81,7 @@ scanning the relevant grid cells, and very wide zoom levels can be costly.
 - The expensive 128 px dirty-tile tracking per segment is removed.
 - The now-unused 2-entries-per-edge walking drawing index is not built.
 - Stop-dot radius now depends on zoom (1.4 px at city scale).
-- At zoom <= 12, subpixel edges that land in the same screen cell are drawn
+- At zoom \<= 12, subpixel edges that land in the same screen cell are drawn
   only once per tier; the underlying OSM reachability remains unchanged.
 - The profiler records separate viewport-indexing and Canvas-painting phases.
 - Routing algorithms and the v4/v2/v1 graph caches are unchanged.

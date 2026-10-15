@@ -64,8 +64,7 @@ MCD_FULL = (
     "\u0435 \u0434\u0438\u0430\u043c\u0435\u0442\u0440\u044b"
 )
 METROPOLITAN = (
-    "\u043c\u0435\u0442\u0440\u043e\u043f\u043e\u043b\u0438\u0442"
-    "\u0435\u043d"
+    "\u043c\u0435\u0442\u0440\u043e\u043f\u043e\u043b\u0438\u0442" "\u0435\u043d"
 )
 MOSCOW_METROPOLITAN = (
     "\u043c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0439 "
@@ -82,9 +81,17 @@ def transport_mode(tags, route_type):
     text = " ".join(
         (tags.get(key) or "").casefold()
         for key in (
-            "network", "network:short", "name", "name:ru", "alt_name",
-            "official_name", "short_name", "description", "ref",
-            "line", "brand",
+            "network",
+            "network:short",
+            "name",
+            "name:ru",
+            "alt_name",
+            "official_name",
+            "short_name",
+            "description",
+            "ref",
+            "line",
+            "brand",
         )
     )
 
@@ -95,15 +102,16 @@ def transport_mode(tags, route_type):
         return None
 
     if any(
-        value in text
-        for value in (MCC_SHORT, MCC_FULL, "moscow central circle", "mcc")
+        value in text for value in (MCC_SHORT, MCC_FULL, "moscow central circle", "mcc")
     ) or (ref == "14" and route_type in RAIL_ROUTE_TYPES):
         return "mcc"
 
-    if (MCD_REF_PATTERN.search(text)
-            or MCD_SHORT in text
-            or MCD_FULL in text
-            or "moscow central diameters" in text):
+    if (
+        MCD_REF_PATTERN.search(text)
+        or MCD_SHORT in text
+        or MCD_FULL in text
+        or "moscow central diameters" in text
+    ):
         return "mcd"
 
     if route_type == "subway":
@@ -263,10 +271,7 @@ def is_station(tags):
         return True
     if tags.get("public_transport") == "station":
         return True
-    return (
-        tags.get("railway") == "platform"
-        and tags.get("train") == "yes"
-    )
+    return tags.get("railway") == "platform" and tags.get("train") == "yes"
 
 
 class TransportMasterDiscovery(OsmiumSimpleHandler):
@@ -295,8 +300,11 @@ class TransportSelectionHandler(OsmiumSimpleHandler):
         self.selected_routes = 0
 
     def node(self, node):
-        if (is_station(node.tags) and node.location.valid()
-                and station_in_area(node.location.lon, node.location.lat)):
+        if (
+            is_station(node.tags)
+            and node.location.valid()
+            and station_in_area(node.location.lon, node.location.lat)
+        ):
             self.writer.add_node(node)
 
     def way(self, way):
@@ -453,8 +461,11 @@ class ObjectHandler(OsmiumSimpleHandler):
         }
 
     def way(self, way):
-        if (way.id not in self.stop_way_ids and way.id not in self.route_way_ids
-                and not is_station(way.tags)):
+        if (
+            way.id not in self.stop_way_ids
+            and way.id not in self.route_way_ids
+            and not is_station(way.tags)
+        ):
             return
 
         coords = [
@@ -762,9 +773,7 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         # The route_master carries the line identity. A child route=subway
         # without MCC tags is otherwise incorrectly classified as metro.
         mode = (
-            master_info[master_key]["mode"]
-            if master_key is not None
-            else route["mode"]
+            master_info[master_key]["mode"] if master_key is not None else route["mode"]
         )
         if mode is None:
             continue
@@ -788,11 +797,7 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
             ref = master.get("ref") or route.get("ref")
         else:
             ref = route.get("ref")
-            route_key = (
-                f"{mode}:{ref}"
-                if ref
-                else f"{mode}:relation:{relation_id}"
-            )
+            route_key = f"{mode}:{ref}" if ref else f"{mode}:relation:{relation_id}"
 
         resolved_stops = []
         resolved_stop_roles = []
@@ -830,7 +835,6 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
                 "geometry": geometry,
             }
         )
-
 
     stop_features = []
 
@@ -874,9 +878,9 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         print(f"  {mode}: {mode_counts[mode]} route directions")
     shabolovskaya = "\u0428\u0430\u0431\u043e\u043b\u043e\u0432"
     matching = [
-        feature for feature in stop_features
-        if shabolovskaya.casefold()
-        in (feature["properties"]["name"] or "").casefold()
+        feature
+        for feature in stop_features
+        if shabolovskaya.casefold() in (feature["properties"]["name"] or "").casefold()
     ]
     print(f"Shabolovskaya stop objects: {len(matching)}")
     if not matching:
@@ -890,17 +894,38 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         "features": route_features + stop_features,
     }
 
+
 # Pedestrian network: OSM node topology, never coordinate-line intersections.
 # Walking segments cross a river only if OSM actually connects them via a way.
 
 WALK_HIGHWAYS = {
-    "footway", "path", "pedestrian", "steps", "living_street",
-    "residential", "service", "unclassified", "tertiary", "secondary",
-    "primary", "trunk", "track", "bridleway", "road",
-    "tertiary_link", "secondary_link", "primary_link", "trunk_link",
+    "footway",
+    "path",
+    "pedestrian",
+    "steps",
+    "living_street",
+    "residential",
+    "service",
+    "unclassified",
+    "tertiary",
+    "secondary",
+    "primary",
+    "trunk",
+    "track",
+    "bridleway",
+    "road",
+    "tertiary_link",
+    "secondary_link",
+    "primary_link",
+    "trunk_link",
 }
 WALK_DENIED = {
-    "no", "private", "agricultural", "forestry", "delivery", "use_sidepath",
+    "no",
+    "private",
+    "agricultural",
+    "forestry",
+    "delivery",
+    "use_sidepath",
 }
 WALK_GRID_M = 100.0
 WALK_CACHE_VERSION = 2
@@ -921,11 +946,16 @@ def is_walkable_way(tags):
     if access in WALK_DENIED and foot not in {"yes", "designated", "permissive"}:
         return False
     if highway in {"trunk", "trunk_link"} and foot not in {
-        "yes", "designated", "permissive",
+        "yes",
+        "designated",
+        "permissive",
     }:
         return False
     if tags.get("sidewalk") == "separate" and highway not in {
-        "footway", "path", "pedestrian", "steps",
+        "footway",
+        "path",
+        "pedestrian",
+        "steps",
     }:
         # A sidewalk mapped separately must be used instead of the car road.
         return False
@@ -970,13 +1000,13 @@ class StopZoneIndex:
                         continue
                     min_x, max_x = gx * cell_size, (gx + 1) * cell_size
                     min_y, max_y = gy * cell_size, (gy + 1) * cell_size
-                    dx = max(min_x-x, 0.0, x-max_x)
-                    dy = max(min_y-y, 0.0, y-max_y)
-                    if dx*dx + dy*dy > self.radius_squared:
+                    dx = max(min_x - x, 0.0, x - max_x)
+                    dy = max(min_y - y, 0.0, y - max_y)
+                    if dx * dx + dy * dy > self.radius_squared:
                         continue
-                    fx = max(abs(min_x-x), abs(max_x-x))
-                    fy = max(abs(min_y-y), abs(max_y-y))
-                    if fx*fx + fy*fy <= self.radius_squared:
+                    fx = max(abs(min_x - x), abs(max_x - x))
+                    fy = max(abs(min_y - y), abs(max_y - y))
+                    if fx * fx + fy * fy <= self.radius_squared:
                         self.whole_cells.add(key)
                         self.boundary.pop(key, None)
                     else:
@@ -991,8 +1021,8 @@ class StopZoneIndex:
         if key in self.whole_cells:
             return True
         for sx, sy in self.boundary.get(key, ()):
-            dx, dy = sx-x, sy-y
-            if dx*dx + dy*dy <= self.radius_squared:
+            dx, dy = sx - x, sy - y
+            if dx * dx + dy * dy <= self.radius_squared:
                 return True
         return False
 
@@ -1002,7 +1032,8 @@ class WalkNodeCollector(OsmiumSimpleHandler):
         super().__init__()
         self.origin = origin
         self.zones = StopZoneIndex(
-            stops, limit_m + WALK_ZONE_MARGIN_M,
+            stops,
+            limit_m + WALK_ZONE_MARGIN_M,
         )
         self.nodes = {}
         self.blocked = set()
@@ -1069,10 +1100,14 @@ class WalkWayCollector(OsmiumSimpleHandler):
             length = math.hypot(a[0] - b[0], a[1] - b[1])
             if length < 0.1:
                 continue
-            self.edges.append([
-                self.index_for(a_id), self.index_for(b_id),
-                round(length, 1), direction,
-            ])
+            self.edges.append(
+                [
+                    self.index_for(a_id),
+                    self.index_for(b_id),
+                    round(length, 1),
+                    direction,
+                ]
+            )
             used = True
         if used:
             self.ways_count += 1
@@ -1083,8 +1118,8 @@ def walk_segment_distance(x, y, a, b):
     length_squared = dx * dx + dy * dy
     if length_squared <= 0:
         return 0.0, math.hypot(x - a[0], y - a[1])
-    t = min(1.0, max(0.0, ((x-a[0])*dx + (y-a[1])*dy) / length_squared))
-    dist = math.hypot(x-a[0]-t*dx, y-a[1]-t*dy)
+    t = min(1.0, max(0.0, ((x - a[0]) * dx + (y - a[1]) * dy) / length_squared))
+    dist = math.hypot(x - a[0] - t * dx, y - a[1] - t * dy)
     return t, dist
 
 
@@ -1097,10 +1132,10 @@ def build_walk_segment_grid(nodes, edges, cell_size=WALK_GRID_M):
         y0 = math.floor(min(a[1], b[1]) / cell_size)
         y1 = math.floor(max(a[1], b[1]) / cell_size)
         # Avoid multiplying very long edges across thousands of cells.
-        if (x1-x0+1)*(y1-y0+1) > 10000:
+        if (x1 - x0 + 1) * (y1 - y0 + 1) > 10000:
             continue
-        for gx in range(x0, x1+1):
-            for gy in range(y0, y1+1):
+        for gx in range(x0, x1 + 1):
+            for gy in range(y0, y1 + 1):
                 grid[(gx, gy)].append(index)
     return grid
 
@@ -1110,8 +1145,8 @@ def nearest_walk_segment(x, y, nodes, edges, grid, max_snap):
     radius = math.ceil(max_snap / WALK_GRID_M) + 1
     best = None
     checked = set()
-    for gx in range(cx-radius, cx+radius+1):
-        for gy in range(cy-radius, cy+radius+1):
+    for gx in range(cx - radius, cx + radius + 1):
+        for gy in range(cy - radius, cy + radius + 1):
             for idx in grid.get((gx, gy), ()):
                 if idx in checked:
                     continue
@@ -1132,11 +1167,16 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
     for idx, stop in enumerate(stops):
         # Rail station-centre points may be some distance from mapped entrances.
         modes = stop.get("modes", ())
-        snap_limit = 100.0 if any(
-            mode in ("metro", "mcc", "mcd") for mode in modes
-        ) else 45.0
+        snap_limit = (
+            100.0 if any(mode in ("metro", "mcc", "mcd") for mode in modes) else 45.0
+        )
         nearest = nearest_walk_segment(
-            stop["x"], stop["y"], nodes, edges, grid, snap_limit,
+            stop["x"],
+            stop["y"],
+            nodes,
+            edges,
+            grid,
+            snap_limit,
         )
         if nearest is None:
             missed["no_pedestrian_path_near_stop"] += 1
@@ -1160,25 +1200,27 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
                 walk_node = sequence[-1][1]
             else:
                 first, second = nodes[a], nodes[b]
-                nodes.append([
-                    round(first[0] + (second[0]-first[0])*t, 1),
-                    round(first[1] + (second[1]-first[1])*t, 1),
-                ])
-                walk_node = len(nodes)-1
+                nodes.append(
+                    [
+                        round(first[0] + (second[0] - first[0]) * t, 1),
+                        round(first[1] + (second[1] - first[1]) * t, 1),
+                    ]
+                )
+                walk_node = len(nodes) - 1
                 sequence.append((t, walk_node))
             stop = stops[stop_index]
             if lateral < 0.15:
                 stop_nodes[stop_index] = walk_node
             else:
                 nodes.append([stop["x"], stop["y"]])
-                stop_node = len(nodes)-1
+                stop_node = len(nodes) - 1
                 stop_nodes[stop_index] = stop_node
                 # Local stop-to-sidewalk connector, not a stop-to-stop shortcut.
                 result_edges.append([walk_node, stop_node, round(lateral, 1), 5])
         sequence.append((1.0, b))
         for (t0, n0), (t1, n1) in zip(sequence, sequence[1:]):
-            if n0 != n1 and t1-t0 > 0.0000001:
-                result_edges.append([n0, n1, round(length*(t1-t0), 1), direction])
+            if n0 != n1 and t1 - t0 > 0.0000001:
+                result_edges.append([n0, n1, round(length * (t1 - t0), 1), direction])
     for index, node in enumerate(stop_nodes):
         stops[index]["walk_node"] = node
     return {"nodes": nodes, "edges": result_edges}, dict(missed)
@@ -1204,7 +1246,9 @@ def build_pedestrian_graph(source_path, stops, origin, limit_m):
     print(f"pedestrian walkable ways: {ways.ways_count}")
     print(f"pedestrian walking segments: {len(ways.edges)}")
     graph, missed = attach_stops_to_walk_graph(
-        ways.graph_nodes, ways.edges, stops,
+        ways.graph_nodes,
+        ways.edges,
+        stops,
     )
     if not graph["edges"]:
         raise RuntimeError("No walking edges extracted from the source PBF")
@@ -1232,8 +1276,10 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
     if path.is_file() and not rebuild:
         with gzip.open(path, "rt", encoding="ascii") as stream:
             cached = json.load(stream)
-        if (cached.get("stop_fingerprint") == fingerprint
-                and cached.get("walk_limit_m") == limit_m):
+        if (
+            cached.get("stop_fingerprint") == fingerprint
+            and cached.get("walk_limit_m") == limit_m
+        ):
             print(f"Using cached: {path}")
             graph = cached["walking"]
             for stop, node in zip(index["stops"], cached["stop_nodes"]):
@@ -1241,10 +1287,14 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
             return graph
         print("Pedestrian cache differs from transport stops; rebuilding...")
     graph = build_pedestrian_graph(
-        source, index["stops"], index["origin"], limit_m,
+        source,
+        index["stops"],
+        index["origin"],
+        limit_m,
     )
     content = {
-        "version": WALK_CACHE_VERSION, "stop_fingerprint": fingerprint,
+        "version": WALK_CACHE_VERSION,
+        "stop_fingerprint": fingerprint,
         "walk_limit_m": limit_m,
         "stop_nodes": [stop["walk_node"] for stop in index["stops"]],
         "walking": graph,
@@ -1342,28 +1392,42 @@ def build_walk_transfers(walking, stops, radius_m):
         result_offsets.append(len(result_to))
         if (stop_index + 1) % 1000 == 0:
             elapsed = time.monotonic() - started
-            print("  transfer graph:", stop_index + 1, "/", len(stops),
-                  "stops;", len(result_to), "arcs;", f"{elapsed:.1f}s")
+            print(
+                "  transfer graph:",
+                stop_index + 1,
+                "/",
+                len(stops),
+                "stops;",
+                len(result_to),
+                "arcs;",
+                f"{elapsed:.1f}s",
+            )
 
-    print("walking transfer graph:", len(result_to), "arcs in",
-          f"{time.monotonic()-started:.1f}s")
-    return {"offsets": result_offsets, "to": result_to,
-            "meters": result_meters}
+    print(
+        "walking transfer graph:",
+        len(result_to),
+        "arcs in",
+        f"{time.monotonic()-started:.1f}s",
+    )
+    return {"offsets": result_offsets, "to": result_to, "meters": result_meters}
 
 
-def load_or_build_walk_transfers(cache_dir, walking_source, walking, stops,
-                                 radius_m, rebuild=False):
+def load_or_build_walk_transfers(
+    cache_dir, walking_source, walking, stops, radius_m, rebuild=False
+):
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / "moscow-walk-transfers-v1.json.gz"
     source = Path(walking_source)
     stamp = source.stat() if source.is_file() else None
-    source_key = [str(source.resolve()), stamp.st_size, stamp.st_mtime_ns] \
-        if stamp else None
+    source_key = (
+        [str(source.resolve()), stamp.st_size, stamp.st_mtime_ns] if stamp else None
+    )
     fingerprint = hashlib.sha256()
     for stop in stops:
         fingerprint.update(
-            (str(stop["id"]) + ":" + str(stop.get("walk_node", -1)) + ";")
-            .encode("utf-8")
+            (str(stop["id"]) + ":" + str(stop.get("walk_node", -1)) + ";").encode(
+                "utf-8"
+            )
         )
     metadata = {
         "version": WALK_TRANSFER_CACHE_VERSION,
@@ -1378,9 +1442,11 @@ def load_or_build_walk_transfers(cache_dir, walking_source, walking, stops,
             cached = json.load(stream)
         if all(cached.get(key) == value for key, value in metadata.items()):
             graph = cached["transfers"]
-            if (len(graph.get("offsets", ())) == len(stops) + 1
-                    and graph["offsets"][-1] == len(graph.get("to", ()))
-                    and len(graph["to"]) == len(graph.get("meters", ()))):
+            if (
+                len(graph.get("offsets", ())) == len(stops) + 1
+                and graph["offsets"][-1] == len(graph.get("to", ()))
+                and len(graph["to"]) == len(graph.get("meters", ()))
+            ):
                 print(f"Using cached walking transfers: {path}")
                 return graph
         print("Walking transfer cache differs; rebuilding...")
@@ -1405,6 +1471,7 @@ def project(lon, lat, origin_lon, origin_lat):
     y = EARTH_RADIUS_M * math.radians(lat - origin_lat)
 
     return x, y
+
 
 def build_index(data_json, grid_size):
     features = data_json.get("features", [])
@@ -1538,9 +1605,7 @@ def build_index(data_json, grid_size):
             }
         )
 
-    routes = {
-        key: route for key, route in routes.items() if route["directions"]
-    }
+    routes = {key: route for key, route in routes.items() if route["directions"]}
 
     for route in routes.values():
         route_stops = set()
@@ -1567,6 +1632,7 @@ def build_index(data_json, grid_size):
         "stops": stops,
         "routes": routes,
     }
+
 
 # Index diagnostics
 
@@ -1600,16 +1666,19 @@ def audit_index(data):
             for a, b in zip(positions, positions[1:]):
                 distance = stop_distance_m(stops[a], stops[b])
                 if distance > 15000:
-                    suspicious.append({
-                        "route": key,
-                        "from": stops[a]["name"],
-                        "to": stops[b]["name"],
-                        "distance_m": round(distance),
-                    })
+                    suspicious.append(
+                        {
+                            "route": key,
+                            "from": stops[a]["name"],
+                            "to": stops[b]["name"],
+                            "distance_m": round(distance),
+                        }
+                    )
 
     shabolovskaya = "\u0428\u0430\u0431\u043e\u043b\u043e\u0432\u0441\u043a\u0430\u044f"
     station_matches = [
-        stop["name"] for stop in stops
+        stop["name"]
+        for stop in stops
         if stop.get("name") and shabolovskaya.casefold() in stop["name"].casefold()
     ]
     return {
@@ -1621,6 +1690,7 @@ def audit_index(data):
         "suspicious_stop_gaps_over_15km": suspicious[:50],
         "shabolovskaya_matches": station_matches,
     }
+
 
 # Standalone HTML/CSS/JavaScript source
 
@@ -2006,7 +2076,6 @@ PAGE_HTML = r"""<!doctype html>
 </body>
 </html>
 """
-
 
 
 MAP_CSS = r"""
@@ -10088,8 +10157,11 @@ def build_html(
         separators=(",", ":"),
     ).encode("utf-8")
 
-    print("[build] DONE JSON serialization:",
-          f"{time.monotonic()-html_started:.3f}s", flush=True)
+    print(
+        "[build] DONE JSON serialization:",
+        f"{time.monotonic()-html_started:.3f}s",
+        flush=True,
+    )
     html_started = time.monotonic()
     print("[build] START gzip compression", flush=True)
     compressed_payload = gzip.compress(
@@ -10098,8 +10170,11 @@ def build_html(
         mtime=0,
     )
 
-    print("[build] DONE gzip compression:",
-          f"{time.monotonic()-html_started:.3f}s", flush=True)
+    print(
+        "[build] DONE gzip compression:",
+        f"{time.monotonic()-html_started:.3f}s",
+        flush=True,
+    )
     html_started = time.monotonic()
     print("[build] START base64 embedding", flush=True)
     payload = base64.b64encode(compressed_payload).decode("ascii")
@@ -10108,8 +10183,11 @@ def build_html(
         for offset in range(0, len(payload), 72)
     )
 
-    print("[build] DONE base64 embedding:",
-          f"{time.monotonic()-html_started:.3f}s", flush=True)
+    print(
+        "[build] DONE base64 embedding:",
+        f"{time.monotonic()-html_started:.3f}s",
+        flush=True,
+    )
     print(
         "embedded data:",
         f"{len(raw_payload) / (1024 * 1024):.1f} MiB raw ->",
@@ -10139,8 +10217,7 @@ def build_html(
         "bus": "&#1040;&#1074;&#1090;&#1086;&#1073;&#1091;&#1089;",
         "tram": "&#1058;&#1088;&#1072;&#1084;&#1074;&#1072;&#1081;",
         "trolleybus": (
-            "&#1058;&#1088;&#1086;&#1083;&#1083;&#1077;&#1081;&#1073;&#1091;"
-            "&#1089;"
+            "&#1058;&#1088;&#1086;&#1083;&#1083;&#1077;&#1081;&#1073;&#1091;" "&#1089;"
         ),
         "metro": "&#1052;&#1077;&#1090;&#1088;&#1086;",
         "mcc": "&#1052;&#1062;&#1050;",
@@ -10232,6 +10309,7 @@ def build_html(
         raise ValueError(f"Generated HTML lines exceed 100: {long_lines[:10]}")
     return result
 
+
 # CLI
 
 #!/usr/bin/env python3
@@ -10250,11 +10328,13 @@ def parse_args():
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--rebuild-walking", action="store_true")
     parser.add_argument(
-        "--rebuild-transfers", action="store_true",
+        "--rebuild-transfers",
+        action="store_true",
         help="Recompute the offline pedestrian stop-to-stop transfer graph",
     )
     parser.add_argument(
-        "--walking-json", type=Path,
+        "--walking-json",
+        type=Path,
         help="Use a prebuilt walking graph for normalized GeoJSON fixtures",
     )
     parser.add_argument("--walk-minutes", type=float, default=5.0)
@@ -10262,19 +10342,23 @@ def parse_args():
     parser.add_argument("--grid-size", type=float, default=400.0)
     parser.add_argument("--circle-opacity", type=float, default=40.0)
     parser.add_argument(
-        "--input-geojson", type=Path,
+        "--input-geojson",
+        type=Path,
         help="Use a normalized route/stop fixture instead of reading OSM PBF",
     )
     parser.add_argument(
-        "--dump-geojson", type=Path,
+        "--dump-geojson",
+        type=Path,
         help="Save normalized route/stop features for debugging and tests",
     )
     parser.add_argument(
-        "--report-json", type=Path,
+        "--report-json",
+        type=Path,
         help="Save model diagnostics (mode counts, provenance and gaps)",
     )
     parser.add_argument(
-        "--infer-rail-stops", action="store_true",
+        "--infer-rail-stops",
+        action="store_true",
         help="Opt into heuristic railway station recovery (unverified)",
     )
     parser.add_argument(
@@ -10312,7 +10396,9 @@ def main():
         feature_collection = json.loads(args.input_geojson.read_text(encoding="utf-8"))
     else:
         if osmium is None:
-            raise RuntimeError("Install osmium for OSM PBF extraction: pip install osmium")
+            raise RuntimeError(
+                "Install osmium for OSM PBF extraction: pip install osmium"
+            )
 
         transport_pbf = build_cache(
             Path(args.cache_dir), update=args.update, rebuild=args.rebuild
@@ -10348,8 +10434,10 @@ def main():
     else:
         cache_dir = Path(args.cache_dir)
         walking = load_or_build_pedestrian(
-            cache_dir, cache_dir / "central-fed-district.osm.pbf",
-            index, MAX_WALK_UI_MINUTES * args.walk_speed,
+            cache_dir,
+            cache_dir / "central-fed-district.osm.pbf",
+            index,
+            MAX_WALK_UI_MINUTES * args.walk_speed,
             rebuild=(args.update or args.rebuild_walking),
         )
     if not walking.get("nodes") or not walking.get("edges"):
@@ -10365,13 +10453,21 @@ def main():
     step_done("graph validation", phase_started)
     phase_started = time.monotonic()
     print("[build] START walking transfers or cache", flush=True)
-    walk_source = args.walking_json or (Path(args.cache_dir) /
-                                         "moscow-pedestrian-v2.json.gz")
+    walk_source = args.walking_json or (
+        Path(args.cache_dir) / "moscow-pedestrian-v2.json.gz"
+    )
     index["walk_transfers"] = load_or_build_walk_transfers(
-        Path(args.cache_dir), walk_source, walking, index["stops"],
+        Path(args.cache_dir),
+        walk_source,
+        walking,
+        index["stops"],
         MAX_WALK_UI_MINUTES * args.walk_speed,
-        rebuild=(args.rebuild_transfers or args.rebuild_walking
-                 or args.update or args.rebuild),
+        rebuild=(
+            args.rebuild_transfers
+            or args.rebuild_walking
+            or args.update
+            or args.rebuild
+        ),
     )
     step_done("walking transfers or cache", phase_started)
     phase_started = time.monotonic()
@@ -10392,11 +10488,14 @@ def main():
         "disconnected_stops": len(index["stops"]) - walk_connected,
         "sample_unconnected_stops": [
             {"id": s["id"], "name": s.get("name")}
-            for s in index["stops"] if s.get("walk_node", -1) < 0
+            for s in index["stops"]
+            if s.get("walk_node", -1) < 0
         ][:30],
     }
-    print(f"pedestrian graph: {len(walking['nodes'])} nodes, "
-          f"{len(walking['edges'])} edges")
+    print(
+        f"pedestrian graph: {len(walking['nodes'])} nodes, "
+        f"{len(walking['edges'])} edges"
+    )
     print(f"mode directions: {report['mode_directions']}")
     print(f"geometry sources: {report['geometry_sources']}")
     if report["synthetic_route_relations"]:
@@ -10412,9 +10511,7 @@ def main():
     step_done("statistics and audit", phase_started)
     phase_started = time.monotonic()
     print("[build] START HTML encode + gzip", flush=True)
-    html = build_html(
-        index, args.walk_minutes, args.walk_speed, args.circle_opacity
-    )
+    html = build_html(index, args.walk_minutes, args.walk_speed, args.circle_opacity)
     step_done("HTML encode + gzip", phase_started)
     phase_started = time.monotonic()
     print("[build] START HTML file write", flush=True)
