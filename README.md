@@ -1,91 +1,118 @@
-# Moscow transport reachability v0.7.3
+# Moscow Transport Map v0.7.7 - Moskvo-rechye station access test
 
-One readable `build-transport-map.py` generates a single `routes.html`.
-This is a walking-coverage performance release based on the real v0.7.1
-profile: routing ended in approximately 0.65 s, but the last canvas
-completed only after 85.6 s.
+Single readable `build-transport-map.py` creates a standalone `routes.html`.
+The fast v0.7.3-based RAPTOR, walking wave, Canvas, 7 transport modes,
+Reset, and profiler are unchanged.
 
-## Generate
+## Why this update exists
+
+The v0.7.6 OSM inspection confirmed that both railway stops at Moskvo-rechye
+are attached to an 11-node walking component. Four adjoining OSM ways form a
+chain but were rejected because of `access=private`:
+
+- `149737448`, `149737460`, `149737453`: `highway=footway`
+- `160799180`: `highway=steps`, `bridge=yes`, `layer=1`
+
+These are NOT evidence that the chain is publicly accessible. The explicit
+CLI switch below is an EXPERIMENT to determine whether excluding these ways
+is the cause of the missing walking wave. Do not use an experimental map as
+an authoritative walking or accessibility guide. No other private ways are
+permitted and `foot=no` is never overridden. No link is invented across rail
+tracks, fences, roads, or unrelated OSM nodes.
+
+## Quick verification (recommended FIRST)
+
+Run from your existing `parse-transportmos` directory, after replacing the
+script with this version (do NOT delete your caches):
 
 ```sh
-./build-transport-map.py --report-json report.json
+./build-transport-map.py \
+    --allow-moskvorechye-private \
+    --check-moskvorechye-only
 ```
 
-The transport v4 cache, pedestrian v2 cache, and walk-transfers v1 cache
-are compatible. No new data-cache format is required.
+This builds or reuses a separate pedestrian cache and checks weak graph
+connectivity from OSM railway platforms to nearby surface transit stops.
+The first run must process the complete OSM pedestrian input and may take
+several minutes. Subsequent checks load the new cache quickly. The check
+exits with code 0 for PASS, code 2 for FAIL; check the printed lines:
 
-## Changes
-
-- Wait for RAPTOR (previously ~0.25 s) to collect all walk sources before
-  starting one multi-source pedestrian wave. This prevents late sources
-  from repeatedly improving previously visited vertices.
-- Track four transfer-priority classes with dense numeric budgets and settled
-  flags, and use a typed binary heap without an allocation per insertion.
-- Do not accumulate millions of global intermediate line segments. Only
-  enqueue visible OSM edges for Canvas; paint each edge at most twice per tier
-  in the initial pass (once per settled endpoint).
-- Rebuild a new viewport from saved walking distances and the existing OSM
-  spatial grid on pan/zoom, without rerunning RAPTOR or walking Dijkstra.
-- Cache Web Mercator screen coordinates for vertices per map transform.
-- Batch opaque color-mask composition approximately every 70 ms; retain
-  one 40%-opacity output layer with the same transfer-priority order.
-- Preserve progressive transit lines/stops, the detailed v0.7.1 report,
-  Reset, route details, and all mode switches.
-
-There is one deliberate visual change: walking coverage starts immediately
-*after* routing finishes, rather than while RAPTOR is still discovering
-stops. This sacrifices ~0.25 s of early walking animation in exchange for a
-much smaller total search and render workload.
-
-## Diagnostics
-
-Open DevTools Console after selecting a starting point. Watch for
-`[map] DONE Walking coverage wave`, `[map] FULLY IDLE`, and the final profile:
-
-```js
-copy(JSON.stringify(window.transportLastProfile, null, 2))
+```text
+[station] permitted private OSM ways with graph edges: [...]
+[station] platform: n1987940555 component: ... nodes: ...
+[station] platform: n1987940556 component: ... nodes: ...
+[station] nearby street stops: ... connected to platforms: ...
+[station] CONNECTION PASS
 ```
 
-If a run is still active:
+A PASS is a topological *weak-connectivity* check, not proof that the
+station has a public entry, or that directed walking is possible. If it
+fails, the four ways are insufficient; do not add guessed connections.
+Share the `[station]` log to investigate the next missing piece.
 
-```js
-copy(JSON.stringify(window.transportCurrentProfile(), null, 2))
+## Build the full map in experimental mode
+
+If the check passes, run:
+
+```sh
+./build-transport-map.py \
+    --allow-moskvorechye-private \
+    --report-json report.json
 ```
 
-Compare `totalWallMs`, the `Walking coverage wave` phase, `final.wave.cpuMs`,
-`final.wave.settled`, `final.wave.segments`, `cpuMs.coveragePaint`, and
-`cpuMs.coverageComposite` against v0.7.1 with the same origin, zoom, and
-controls. The initial snapshot can legitimately show `Walking coverage wave`
-after transport has completed.
+The output is `routes.html` alongside the script. After building the walking
+transfer graph, read the additional directional check:
 
-## Verification and limitations
+```text
+[station] Directed walking transfers FROM n1987940555 ...
+[station] Directed walking transfers FROM n1987940556 ...
+[station] DIRECTED CONNECTION PASS
+```
 
-The generated HTML is ASCII and the Python/JS source stays within 100
-characters per line. A test fixture builds successfully; wave distances
-match an independent algorithm on 40 randomized directed graphs.
-The full Moscow PBF, live Leaflet UI with online CDN resources, and the
-user's `format-go`/HTML Tidy pipeline were not benchmarked in this
-execution environment. Do not assume any particular speedup until the
-real Moscow profile is collected. Initial viewport rebuilding still requires
-scanning the relevant grid cells, and very wide zoom levels can be costly.
+That test confirms actual outward directed pedestrian paths within the 15 min
+walking transfer radius (still not whether use of private ways is lawful).
 
-## v0.7.3: faster final Canvas and smaller stops
+The `--allow-moskvorechye-private` switch must also be supplied for every
+subsequent build that should use the experimental graph. Without it, the
+previous safe graph and caches are used, unchanged.
 
-- The multi-source walking wave computes only vertex budgets; it never
-  enqueues per-edge drawing while the search is still running.
-- Once the wave completes, a viewport query enumerates each OSM edge once,
-  even if both endpoints or several stop sources reached that edge.
-- Each of the four offscreen opaque tier masks is drawn in large,
-  time-budgeted batches. Masks are composited into one translucent canvas
-  every ~150 ms for preview and immediately at completion.
-- The expensive 128 px dirty-tile tracking per segment is removed.
-- The now-unused 2-entries-per-edge walking drawing index is not built.
-- Stop-dot radius now depends on zoom (1.4 px at city scale).
-- At zoom \<= 12, subpixel edges that land in the same screen cell are drawn
-  only once per tier; the underlying OSM reachability remains unchanged.
-- The profiler records separate viewport-indexing and Canvas-painting phases.
-- Routing algorithms and the v4/v2/v1 graph caches are unchanged.
+## Cache isolation
 
-Check the same origin and settings as previous versions and compare `FULLY IDLE`,
-`Coverage viewport index`, `Coverage Canvas painting`, `coveragePaint` and `coverageTinySkipped`.
-Full Moscow dataset speed is not guaranteed without testing on that dataset.
+The normal caches are preserved, including:
+
+```text
+cache/moscow-pedestrian-v3.json.gz
+cache/moscow-walk-transfers-v2.json.gz
+```
+
+Test mode writes new, separate files:
+
+```text
+cache/moscow-pedestrian-v4-moskvorechye-test.json.gz
+cache/moscow-walk-transfers-v3-moskvorechye-test.json.gz
+```
+
+The test walking cache detects changes in the original PBF timestamp and
+size. To force rebuilding the experimental graph, add `--rebuild-walking`.
+The walking transfer cache is also rebuilt when walking graph input changes.
+
+## What was changed
+
+- Local, opt-in `access=private` exception for exactly 4 known OSM way IDs,
+  only if the way has a pedestrian `highway`, with no explicit `foot=no`.
+- Prefer these station footways over a nearby service road when attaching
+  the two specific Moskvo-rechye railway stops, but only if within 12 m of
+  the closest candidate, and still within the established snap limit.
+- Report post-build station components and directed train-to-street transfers.
+- No changes to the high-performance routing, viewport drawing, or UI.
+
+## Validation and limitations
+
+Checks: Python compile, generated HTML JavaScript syntax, ASCII and 100-char
+line limits. A synthetic network verified that disabling the override keeps
+the platform isolated, enabling the exact four ways joins it to an existing
+street path by shared OSM nodes, and `foot=no` remains excluded.
+
+The full Moscow PBF is not in the test environment. Whether these exact ways
+join the real street graph and whether they should be accessible to ordinary
+passengers still need checking on the user's OSM source and in the field.

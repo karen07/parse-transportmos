@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.7.3"
+PROJECT_VERSION = "0.7.7"
 
 
 # OSM extraction and normalization
@@ -43,6 +43,11 @@ NETWORK = (
 )
 SURFACE_MODES = {"bus", "tram", "trolleybus"}
 RAIL_ROUTE_TYPES = {"subway", "train", "light_rail", "railway"}
+# Explicit intercity services are not ordinary suburban trains.
+INTERCITY_SERVICES = {"long_distance", "high_speed", "intercity", "international"}
+# The downloaded source includes the entire Central Federal District.
+# Only commuter stops inside the Moscow catchment enter the final index.
+
 SUPPORTED_ROUTE_TYPES = SURFACE_MODES | RAIL_ROUTE_TYPES
 MCD_REF_PATTERN = re.compile(
     r"(?<![A-Za-z\u0410-\u042f\u0430-\u044f0-9])"
@@ -121,6 +126,13 @@ def transport_mode(tags, route_type):
 
     if route_type == "light_rail" and MOSCOW_METROPOLITAN in network:
         return "metro"
+
+    if route_type == "train":
+        service = (tags.get("service") or "").casefold()
+        train = (tags.get("train") or "").casefold()
+        if service in INTERCITY_SERVICES or train in INTERCITY_SERVICES:
+            return None
+        return "train"
 
     return None
 
@@ -212,7 +224,8 @@ def build_cache(cache_dir, update=False, rebuild=False):
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     source = cache_dir / "central-fed-district.osm.pbf"
-    transport_pbf = cache_dir / "moscow-transport-v4.osm.pbf"
+    # v4 did not contain ordinary route=train relations.
+    transport_pbf = cache_dir / "moscow-transport-v5.osm.pbf"
 
     if update:
         print("Downloading fresh Central Federal District data...")
@@ -228,7 +241,7 @@ def build_cache(cache_dir, update=False, rebuild=False):
         transport_pbf.unlink(missing_ok=True)
 
     if not transport_pbf.exists():
-        print("Selecting Moscow surface transport, metro, MCC and MCD routes...")
+        print("Selecting surface, metro, MCC, MCD and suburban train routes...")
         build_transport_extract(source, transport_pbf)
     else:
         print(f"Using cached: {transport_pbf}")
@@ -262,6 +275,16 @@ def is_night_route(route_type, ref):
 
 def station_in_area(lon, lat):
     return 36.3 <= lon <= 39.0 and 54.9 <= lat <= 56.4
+
+
+RAIL_AUDIT_TERMS = (
+    "\u0433\u0430\u0433\u0430\u0440\u0438\u043d",
+    "\u043c\u043e\u0441\u043a\u0432\u043e\u0440\u0435\u0447",
+)
+
+
+def relevant_rail_audit_name(name):
+    return bool(name) and any(term in name.casefold() for term in RAIL_AUDIT_TERMS)
 
 
 def is_station(tags):
@@ -394,8 +417,9 @@ class RelationHandler(OsmiumSimpleHandler):
         ]
 
         if route_type in RAIL_ROUTE_TYPES:
-            # OSM PTv2 may list fewer stop positions than platforms or vice versa.
-            selected = stops if len(stops) >= len(platforms) else platforms
+            # Keep both lists for later station-by-station pairing, after the
+            # member coordinates have been resolved. Never choose by counts.
+            selected = [item for item in members if item in stops or item in platforms]
         elif platforms:
             selected = platforms
         elif stops:
@@ -414,6 +438,11 @@ class RelationHandler(OsmiumSimpleHandler):
                 "roundtrip": relation.tags.get("roundtrip"),
                 "stop_members": [member_key(item[0], item[1]) for item in selected],
                 "stop_roles": [item[2] for item in selected],
+                "rail_members": (
+                    [(member_key(t, ident), role) for t, ident, role in selected]
+                    if route_type in RAIL_ROUTE_TYPES
+                    else []
+                ),
                 "way_members": [
                     (item[1], item[2])
                     for item in members
@@ -635,9 +664,60 @@ def station_route_position(lon, lat, geometry):
     return best_distance, best_position
 
 
+def merge_rail_station_members(route, objects):
+    """Pair neighboring PTv2 stop/platform members without dropping orphans.
+
+    PTv2 normally orders stop/platform for each station. Use the platform
+    coordinate as the boarding access point when a close, compatible stop
+    position exists. Otherwise retain the lone member. Never manufacture
+    a station or join unrelated platforms merely because they are nearby.
+    """
+    result = []
+    merged = 0
+    for key, role in route.get("rail_members", ()):
+        obj = objects.objects.get(key)
+        if obj is None:
+            result.append((key, role))
+            continue
+        kind = "platform" if role.startswith("platform") else "stop"
+        if result:
+            prior_key, prior_role = result[-1]
+            prior = objects.objects.get(prior_key)
+            prior_kind = "platform" if prior_role.startswith("platform") else "stop"
+            left = (prior or {}).get("name") or ""
+            right = obj.get("name") or ""
+            same_name = not left or not right or left.casefold() == right.casefold()
+            if prior and kind != prior_kind and same_name:
+                distance = coord_distance_m(
+                    (prior["lon"], prior["lat"]), (obj["lon"], obj["lat"])
+                )
+                if distance <= 180.0:
+                    # PTv2 entry/exit restrictions must survive the pairing.
+                    suffix = ""
+                    for tail in ("_entry_only", "_exit_only"):
+                        if role.endswith(tail) or prior_role.endswith(tail):
+                            suffix = tail
+                            break
+                    chosen_key = key if kind == "platform" else prior_key
+                    chosen_kind = "platform" if kind == "platform" else prior_kind
+                    chosen_role = chosen_kind + suffix
+                    result[-1] = (chosen_key, chosen_role)
+                    merged += 1
+                    continue
+        result.append((key, role))
+    # An OSM relation may repeat exactly the same member; skip that only.
+    unique = []
+    for entry in result:
+        if not unique or unique[-1] != entry:
+            unique.append(entry)
+    route["stop_members"] = [key for key, _role in unique]
+    route["stop_roles"] = [role for _key, role in unique]
+    return merged
+
+
 def enrich_rail_stops(route, mode, geometry, objects):
     """Recover station nodes missing from incomplete OSM route members."""
-    if mode not in ("metro", "mcc", "mcd") or geometry is None:
+    if mode not in ("metro", "mcc", "mcd", "train") or geometry is None:
         return
 
     resolved = [
@@ -766,6 +846,9 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
     stop_relations = defaultdict(set)
     route_features = []
     missing_stop_members = 0
+    rail_members_merged = 0
+    rail_members_orphaned = 0
+    rail_routes_outside_area = 0
 
     for route in relations.routes:
         relation_id = route["relation_id"]
@@ -773,10 +856,33 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         # The route_master carries the line identity. A child route=subway
         # without MCC tags is otherwise incorrectly classified as metro.
         mode = (
-            master_info[master_key]["mode"] if master_key is not None else route["mode"]
+            route["mode"]
+            if route["mode"] in ("mcc", "mcd")
+            else (
+                master_info[master_key]["mode"]
+                if master_key is not None
+                else route["mode"]
+            )
         )
         if mode is None:
             continue
+        if route["route"] in RAIL_ROUTE_TYPES:
+            before = len(route["rail_members"])
+            rail_members_merged += merge_rail_station_members(route, objects)
+            rail_members_orphaned += before - len(route["stop_members"])
+        if mode == "train":
+            # Prevent all regional rail of the Central Federal District from
+            # expanding the Moscow pedestrian graph or creating remote routes.
+            in_area = []
+            for key, role in zip(route["stop_members"], route["stop_roles"]):
+                obj = objects.objects.get(key)
+                if obj and station_in_area(obj["lon"], obj["lat"]):
+                    in_area.append((key, role))
+            if len(in_area) < 2:
+                rail_routes_outside_area += 1
+                continue
+            route["stop_members"] = [key for key, _role in in_area]
+            route["stop_roles"] = [role for _key, role in in_area]
 
         geometry = route_geometry(route, objects.route_ways)
         geometry_source = "osm_ways"
@@ -869,12 +975,14 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
     print(f"route masters: {len(relations.masters)}")
     print(f"stops: {len(stop_features)}")
     print(f"missing stop members: {missing_stop_members}")
+    print(f"paired rail stop/platform members: {rail_members_merged}")
+    print(f"regional train relations outside Moscow area: {rail_routes_outside_area}")
     if infer_rail_stops:
         print("WARNING: heuristic railway station inference is enabled")
     mode_counts = defaultdict(int)
     for feature in route_features:
         mode_counts[feature["properties"]["mode"]] += 1
-    for mode in sorted(SURFACE_MODES | {"metro", "mcc", "mcd"}):
+    for mode in sorted(SURFACE_MODES | {"metro", "mcc", "mcd", "train"}):
         print(f"  {mode}: {mode_counts[mode]} route directions")
     shabolovskaya = "\u0428\u0430\u0431\u043e\u043b\u043e\u0432"
     matching = [
@@ -892,6 +1000,22 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
     return {
         "type": "FeatureCollection",
         "features": route_features + stop_features,
+        "extraction_audit": {
+            "rail_stop_platform_pairs": rail_members_merged,
+            "rail_member_reductions": rail_members_orphaned,
+            "regional_train_relations_outside_area": rail_routes_outside_area,
+            "missing_stop_members": missing_stop_members,
+            "named_station_candidates": [
+                {
+                    "id": key,
+                    "name": obj["name"],
+                    "lon": round(obj["lon"], 6),
+                    "lat": round(obj["lat"], 6),
+                }
+                for key, obj in objects.stations.items()
+                if relevant_rail_audit_name(obj.get("name"))
+            ],
+        },
     }
 
 
@@ -928,7 +1052,44 @@ WALK_DENIED = {
     "use_sidepath",
 }
 WALK_GRID_M = 100.0
-WALK_CACHE_VERSION = 2
+WALK_CACHE_VERSION = 3
+# Explicit test-only override of four OSM ways found by the v0.7.6 inspector.
+# These ways are tagged access=private. Do not apply the exception globally.
+MOSKVORECHYE_PRIVATE_WAYS = frozenset(
+    {
+        149737448,
+        149737453,
+        149737460,
+        160799180,
+    }
+)
+MOSKVORECHYE_PLATFORM_IDS = frozenset(
+    {
+        "n1987940555",
+        "n1987940556",
+    }
+)
+
+
+def allow_station_private_way(way_id, tags, enabled):
+    """Explicit, local, experimental station-path access override.
+
+    Private access is not proof of public access. Never bypass foot=no or
+    non-footway restrictions, and never generate a synthetic connector.
+    """
+    if not enabled or way_id not in MOSKVORECHYE_PRIVATE_WAYS:
+        return False
+    if tags.get("highway") not in {"footway", "path", "steps"}:
+        return False
+    if (tags.get("access") or "").lower() != "private":
+        return False
+    if (tags.get("foot") or "").lower() in WALK_DENIED:
+        return False
+    if tags.get("area") == "yes":
+        return False
+    return True
+
+
 MAX_WALK_UI_MINUTES = 15.0
 WALK_ZONE_MARGIN_M = 130.0
 
@@ -960,6 +1121,35 @@ def is_walkable_way(tags):
         # A sidewalk mapped separately must be used instead of the car road.
         return False
     return True
+
+
+def is_linear_station_walkway(tags, references):
+    """Trace walkable railway platform geometry using actual OSM way nodes.
+
+    Open ways represent linear platform paths. Closed railway platform ways
+    represent a platform surface; its perimeter is a conservative walkable
+    approximation. Ways meet only through shared OSM node IDs, never by
+    proximity or a visually crossing line. No railway track is walkable.
+    """
+    if len(references) < 2:
+        return False
+    railway_platform = tags.get("railway") == "platform"
+    public_platform = tags.get("public_transport") == "platform"
+    if not (railway_platform or public_platform):
+        return False
+    foot = (tags.get("foot") or "").lower()
+    access = (tags.get("access") or "").lower()
+    if foot in WALK_DENIED:
+        return False
+    if access in WALK_DENIED and foot not in {"yes", "designated", "permissive"}:
+        return False
+    closed = references[0] == references[-1]
+    if closed and (not railway_platform or len(references) < 4):
+        return False
+    if tags.get("area") == "yes" and not railway_platform:
+        return False
+    # Ordinary walking highways are already checked by is_walkable_way().
+    return tags.get("highway") is None
 
 
 def walking_direction(tags):
@@ -1067,13 +1257,16 @@ class WalkNodeCollector(OsmiumSimpleHandler):
 
 
 class WalkWayCollector(OsmiumSimpleHandler):
-    def __init__(self, nodes, blocked):
+    def __init__(self, nodes, blocked, allow_private_station_ways=False):
         super().__init__()
         self.nodes = nodes
         self.blocked = blocked
+        self.allow_private_station_ways = allow_private_station_ways
         self.graph_nodes = []
         self.graph_index = {}
         self.edges = []
+        self.preferred_edges = set()
+        self.accepted_private_way_ids = set()
         self.ways_count = 0
 
     def index_for(self, osm_id):
@@ -1085,10 +1278,19 @@ class WalkWayCollector(OsmiumSimpleHandler):
         return index
 
     def way(self, way):
-        if not is_walkable_way(way.tags):
+        references = [node.ref for node in way.nodes]
+        private_station = allow_station_private_way(
+            way.id,
+            way.tags,
+            self.allow_private_station_ways,
+        )
+        if (
+            not private_station
+            and not is_walkable_way(way.tags)
+            and not is_linear_station_walkway(way.tags, references)
+        ):
             return
         direction = walking_direction(way.tags)
-        references = [node.ref for node in way.nodes]
         used = False
         for a_id, b_id in zip(references, references[1:]):
             if a_id not in self.nodes or b_id not in self.nodes:
@@ -1108,9 +1310,13 @@ class WalkWayCollector(OsmiumSimpleHandler):
                     direction,
                 ]
             )
+            if private_station:
+                self.preferred_edges.add(len(self.edges) - 1)
             used = True
         if used:
             self.ways_count += 1
+            if private_station:
+                self.accepted_private_way_ids.add(way.id)
 
 
 def walk_segment_distance(x, y, a, b):
@@ -1140,10 +1346,11 @@ def build_walk_segment_grid(nodes, edges, cell_size=WALK_GRID_M):
     return grid
 
 
-def nearest_walk_segment(x, y, nodes, edges, grid, max_snap):
+def nearest_walk_segment(x, y, nodes, edges, grid, max_snap, preferred_edges=None):
     cx, cy = math.floor(x / WALK_GRID_M), math.floor(y / WALK_GRID_M)
     radius = math.ceil(max_snap / WALK_GRID_M) + 1
     best = None
+    preferred = None
     checked = set()
     for gx in range(cx - radius, cx + radius + 1):
         for gy in range(cy - radius, cy + radius + 1):
@@ -1155,10 +1362,20 @@ def nearest_walk_segment(x, y, nodes, edges, grid, max_snap):
                 t, dist = walk_segment_distance(x, y, nodes[a], nodes[b])
                 if dist <= max_snap and (best is None or dist < best[2]):
                     best = (idx, t, dist)
+                if (
+                    preferred_edges is not None
+                    and idx in preferred_edges
+                    and dist <= max_snap
+                    and (preferred is None or dist < preferred[2])
+                ):
+                    preferred = (idx, t, dist)
+    # Use a station footway only if it is near the otherwise closest edge.
+    if preferred and best and preferred[2] <= best[2] + 12.0:
+        return preferred
     return best
 
 
-def attach_stops_to_walk_graph(nodes, edges, stops):
+def attach_stops_to_walk_graph(nodes, edges, stops, preferred_edges=None):
     """Split OSM edges at stop projections; never link unrelated street edges."""
     grid = build_walk_segment_grid(nodes, edges)
     attachments = defaultdict(list)
@@ -1170,6 +1387,9 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
         snap_limit = (
             100.0 if any(mode in ("metro", "mcc", "mcd") for mode in modes) else 45.0
         )
+        rail_preference = (
+            preferred_edges if stop["id"] in MOSKVORECHYE_PLATFORM_IDS else None
+        )
         nearest = nearest_walk_segment(
             stop["x"],
             stop["y"],
@@ -1177,6 +1397,7 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
             edges,
             grid,
             snap_limit,
+            preferred_edges=rail_preference,
         )
         if nearest is None:
             missed["no_pedestrian_path_near_stop"] += 1
@@ -1226,7 +1447,9 @@ def attach_stops_to_walk_graph(nodes, edges, stops):
     return {"nodes": nodes, "edges": result_edges}, dict(missed)
 
 
-def build_pedestrian_graph(source_path, stops, origin, limit_m):
+def build_pedestrian_graph(
+    source_path, stops, origin, limit_m, allow_private_station_ways=False
+):
     if osmium is None:
         raise RuntimeError("Install osmium for walking graph: pip install osmium")
     if not stops:
@@ -1240,15 +1463,26 @@ def build_pedestrian_graph(source_path, stops, origin, limit_m):
     points.apply_file(str(source_path))
     print(f"pedestrian candidate nodes: {len(points.nodes)}")
     print("Pedestrian graph: reading walkable highways...")
-    ways = WalkWayCollector(points.nodes, points.blocked)
+    ways = WalkWayCollector(
+        points.nodes,
+        points.blocked,
+        allow_private_station_ways,
+    )
     ways.apply_file(str(source_path))
     del points
+    if allow_private_station_ways:
+        found = sorted(ways.accepted_private_way_ids)
+        absent = sorted(MOSKVORECHYE_PRIVATE_WAYS - set(found))
+        print("[station] permitted private OSM ways with graph edges:", found)
+        if absent:
+            print("[station] WARNING: missing or unusable test ways:", absent)
     print(f"pedestrian walkable ways: {ways.ways_count}")
     print(f"pedestrian walking segments: {len(ways.edges)}")
     graph, missed = attach_stops_to_walk_graph(
         ways.graph_nodes,
         ways.edges,
         stops,
+        preferred_edges=(ways.preferred_edges if allow_private_station_ways else None),
     )
     if not graph["edges"]:
         raise RuntimeError("No walking edges extracted from the source PBF")
@@ -1270,15 +1504,34 @@ def stop_fingerprint(stops):
     return digest.hexdigest()
 
 
-def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
-    path = cache_dir / "moscow-pedestrian-v2.json.gz"
+def load_or_build_pedestrian(
+    cache_dir, source, index, limit_m, rebuild=False, allow_private_station_ways=False
+):
+    filename = (
+        "moscow-pedestrian-v4-moskvorechye-test.json.gz"
+        if allow_private_station_ways
+        else "moscow-pedestrian-v3.json.gz"
+    )
+    path = cache_dir / filename
+    cache_version = 4 if allow_private_station_ways else WALK_CACHE_VERSION
     fingerprint = stop_fingerprint(index["stops"])
+    source_path = Path(source)
+    source_stat = source_path.stat() if source_path.is_file() else None
+    source_key = (
+        [source_stat.st_size, source_stat.st_mtime_ns]
+        if source_stat is not None
+        else None
+    )
     if path.is_file() and not rebuild:
         with gzip.open(path, "rt", encoding="ascii") as stream:
             cached = json.load(stream)
         if (
-            cached.get("stop_fingerprint") == fingerprint
+            cached.get("version") == cache_version
+            and cached.get("stop_fingerprint") == fingerprint
             and cached.get("walk_limit_m") == limit_m
+            and (
+                not allow_private_station_ways or cached.get("source_key") == source_key
+            )
         ):
             print(f"Using cached: {path}")
             graph = cached["walking"]
@@ -1291,11 +1544,16 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
         index["stops"],
         index["origin"],
         limit_m,
+        allow_private_station_ways=allow_private_station_ways,
     )
     content = {
-        "version": WALK_CACHE_VERSION,
+        "version": cache_version,
         "stop_fingerprint": fingerprint,
         "walk_limit_m": limit_m,
+        "source_key": source_key if allow_private_station_ways else None,
+        "allowed_private_ways": (
+            sorted(MOSKVORECHYE_PRIVATE_WAYS) if allow_private_station_ways else []
+        ),
         "stop_nodes": [stop["walk_node"] for stop in index["stops"]],
         "walking": graph,
     }
@@ -1309,7 +1567,7 @@ def load_or_build_pedestrian(cache_dir, source, index, limit_m, rebuild=False):
 
 # Offline walking transfer graph: directed CSR with network shortest paths.
 # This is distinct from the full OSM graph needed for on-map coverage.
-WALK_TRANSFER_CACHE_VERSION = 1
+WALK_TRANSFER_CACHE_VERSION = 2
 
 
 def build_walk_transfers(walking, stops, radius_m):
@@ -1412,11 +1670,56 @@ def build_walk_transfers(walking, stops, radius_m):
     return {"offsets": result_offsets, "to": result_to, "meters": result_meters}
 
 
+def check_moskvorechye_transfers(transfers, stops):
+    """Verify directed reachable street stops, not just weak connectivity."""
+    count = 0
+    for i, rail in enumerate(stops):
+        if rail["id"] not in MOSKVORECHYE_PLATFORM_IDS:
+            continue
+        matches = []
+        start, end = transfers["offsets"][i : i + 2]
+        for pos in range(start, end):
+            other = stops[transfers["to"][pos]]
+            if not (set(other.get("modes", ())) & SURFACE_MODES):
+                continue
+            if math.hypot(rail["x"] - other["x"], rail["y"] - other["y"]) > 700.0:
+                continue
+            matches.append((other["id"], round(transfers["meters"][pos])))
+        count += len(matches)
+        print(
+            "[station] Directed walking transfers FROM",
+            rail["id"],
+            "to nearby surface stops:",
+            len(matches),
+            flush=True,
+        )
+        for osm_id, meters in matches[:5]:
+            print("[station]   ->", osm_id, meters, "m", flush=True)
+    if count == 0:
+        print(
+            "[station] WARNING: still no directed platform-to-street path!", flush=True
+        )
+    else:
+        print("[station] DIRECTED CONNECTION PASS", flush=True)
+    return count > 0
+
+
 def load_or_build_walk_transfers(
-    cache_dir, walking_source, walking, stops, radius_m, rebuild=False
+    cache_dir,
+    walking_source,
+    walking,
+    stops,
+    radius_m,
+    rebuild=False,
+    allow_private_station_ways=False,
 ):
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / "moscow-walk-transfers-v1.json.gz"
+    filename = (
+        "moscow-walk-transfers-v3-moskvorechye-test.json.gz"
+        if allow_private_station_ways
+        else "moscow-walk-transfers-v2.json.gz"
+    )
+    path = cache_dir / filename
     source = Path(walking_source)
     stamp = source.stat() if source.is_file() else None
     source_key = (
@@ -1430,7 +1733,7 @@ def load_or_build_walk_transfers(
             )
         )
     metadata = {
-        "version": WALK_TRANSFER_CACHE_VERSION,
+        "version": 3 if allow_private_station_ways else WALK_TRANSFER_CACHE_VERSION,
         "stop_fingerprint": fingerprint.hexdigest(),
         "source": source_key,
         "radius_m": radius_m,
@@ -1645,6 +1948,818 @@ def stop_distance_m(a, b):
     value = math.sin(dlat / 2) ** 2
     value += math.cos(lat_a) * math.cos(lat_b) * math.sin(dlon / 2) ** 2
     return 2 * EARTH_RADIUS_M * math.asin(min(1, math.sqrt(value)))
+
+
+def audit_rail_stations(index, feature_collection):
+    """Diagnose routing presence and walking attachment; never invent links."""
+    stations = feature_collection.get("extraction_audit", {}).get(
+        "named_station_candidates", []
+    )
+    result = []
+    for term in RAIL_AUDIT_TERMS:
+        matched = []
+        for stop in index["stops"]:
+            if term not in (stop.get("name") or "").casefold():
+                continue
+            modes = sorted(stop.get("modes", ()))
+            matched.append(
+                {
+                    "id": stop["id"],
+                    "name": stop.get("name"),
+                    "lon": stop["lon"],
+                    "lat": stop["lat"],
+                    "modes": modes,
+                    "walk_node": stop.get("walk_node", -1),
+                    "walking_connected": stop.get("walk_node", -1) >= 0,
+                    "route_keys": stop.get("routes", []),
+                }
+            )
+        candidates = [
+            station
+            for station in stations
+            if term in (station.get("name") or "").casefold()
+        ]
+        nearby = []
+        for candidate in candidates:
+            best = []
+            for stop in index["stops"]:
+                meters = stop_distance_m(candidate, stop)
+                if meters <= 350:
+                    best.append(
+                        {
+                            "id": stop["id"],
+                            "name": stop.get("name"),
+                            "meters": round(meters),
+                            "modes": stop.get("modes", []),
+                            "walk_node": stop.get("walk_node", -1),
+                        }
+                    )
+            best.sort(key=lambda item: item["meters"])
+            nearby.append(
+                {
+                    "station": candidate["name"],
+                    "station_osm_id": candidate["id"],
+                    "nearest_route_stops": best[:12],
+                }
+            )
+        result.append(
+            {
+                "query": term,
+                "stops": matched,
+                "osm_station_candidates": candidates,
+                "nearby_route_stops": nearby,
+            }
+        )
+    return result
+
+
+def audit_station_walk_components(walking, stops):
+    """Report weak components of selected rail stops without inventing edges.
+
+    Components are an undirected lower bound: different components imply no
+    walking route, while one component does not guarantee directed reachability.
+    """
+    started = time.monotonic()
+    count = len(walking["nodes"])
+    parent = array("I", range(count))
+    rank = bytearray(count)
+
+    def find(node):
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for a, b, _length, _direction in walking["edges"]:
+        a, b = find(a), find(b)
+        if a == b:
+            continue
+        if rank[a] < rank[b]:
+            a, b = b, a
+        parent[b] = a
+        if rank[a] == rank[b]:
+            rank[a] += 1
+
+    # Sparse sizes are sufficient: only components containing station/stop
+    # attachments need descriptions in the report.
+    matched = []
+    roots = set()
+    for idx, stop in enumerate(stops):
+        if not relevant_rail_audit_name(stop.get("name")):
+            continue
+        node = stop.get("walk_node", -1)
+        if node < 0 or node >= count:
+            root = None
+        else:
+            root = find(node)
+            roots.add(root)
+        matched.append((idx, stop, root))
+
+    stop_roots = []
+    for stop in stops:
+        node = stop.get("walk_node", -1)
+        stop_roots.append(find(node) if 0 <= node < count else None)
+
+    sizes = {root: 0 for root in roots}
+    for node in range(count):
+        root = find(node)
+        if root in sizes:
+            sizes[root] += 1
+    del parent, rank
+
+    nearby = []
+    for idx, stop, root in matched:
+        if (
+            "mcd" not in stop.get("modes", ())
+            and "mcc" not in stop.get("modes", ())
+            and "train" not in stop.get("modes", ())
+        ):
+            continue
+        street = []
+        for candidate_idx, other in enumerate(stops):
+            if candidate_idx == idx:
+                continue
+            dist = math.hypot(stop["x"] - other["x"], stop["y"] - other["y"])
+            if dist > 600.0:
+                continue
+            other_node = other.get("walk_node", -1)
+            if other_node < 0:
+                continue
+            street.append((round(dist), candidate_idx, stop_roots[candidate_idx]))
+        street.sort()
+        nearby.append((idx, stop, root, street[:36]))
+
+    result = []
+    for idx, stop, root, neighbours in nearby:
+        result.append(
+            {
+                "id": stop["id"],
+                "name": stop.get("name"),
+                "stop_index": idx,
+                "walk_node": stop.get("walk_node", -1),
+                "component": root,
+                "component_nodes": sizes.get(root, 0),
+                "nearby_stop_candidates": [
+                    {
+                        "stop_index": other_idx,
+                        "id": stops[other_idx]["id"],
+                        "name": stops[other_idx].get("name"),
+                        "meters": meters,
+                        "modes": stops[other_idx].get("modes", ()),
+                        "same_component": (candidate_root == root),
+                    }
+                    for meters, other_idx, candidate_root in neighbours[:12]
+                ],
+            }
+        )
+    print(
+        "[audit] station walk components:",
+        len(result),
+        "entries in",
+        f"{time.monotonic()-started:.1f}s",
+        flush=True,
+    )
+    for item in result:
+        print(
+            "[audit]",
+            item["name"],
+            item["id"],
+            "component nodes:",
+            item["component_nodes"],
+            flush=True,
+        )
+        street = [
+            entry
+            for entry in item["nearby_stop_candidates"]
+            if set(entry["modes"]) & SURFACE_MODES
+        ]
+        for entry in street[:3]:
+            print(
+                "[audit]   street stop:",
+                entry["name"],
+                "distance:",
+                entry["meters"],
+                "m; same component:",
+                entry["same_component"],
+                flush=True,
+            )
+    return result
+
+
+# Offline station-access investigation. This is deliberately separate from the
+# map engine: no candidate gap becomes a routing edge without OSM evidence.
+
+
+def walk_weak_components(walking):
+    size = len(walking["nodes"])
+    parent = array("I", range(size))
+    rank = bytearray(size)
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, b, _length, _direction in walking["edges"]:
+        a, b = root(a), root(b)
+        if a == b:
+            continue
+        if rank[a] < rank[b]:
+            a, b = b, a
+        parent[b] = a
+        if rank[a] == rank[b]:
+            rank[a] += 1
+    counts = Counter()
+    for i in range(size):
+        counts[root(i)] += 1
+    return parent, counts
+
+
+def check_moskvorechye_connection(walking, stops):
+    """Report whether station platforms join nearby street stop components."""
+    rail = [stop for stop in stops if stop["id"] in MOSKVORECHYE_PLATFORM_IDS]
+    if len(rail) != 2:
+        print("[station] FAIL: two Moskvo-rechye platform nodes not found")
+        return False
+    parent, sizes = walk_weak_components(walking)
+    roots = []
+    for stop in rail:
+        node = stop.get("walk_node", -1)
+        root = int(parent[node]) if 0 <= node < len(parent) else None
+        roots.append(root)
+        print(
+            "[station] platform:",
+            stop["id"],
+            "component:",
+            root,
+            "nodes:",
+            sizes.get(root, 0),
+            flush=True,
+        )
+    street = []
+    for stop in stops:
+        if not (set(stop.get("modes", ())) & SURFACE_MODES):
+            continue
+        if (
+            min(
+                math.hypot(stop["x"] - target["x"], stop["y"] - target["y"])
+                for target in rail
+            )
+            > 700
+        ):
+            continue
+        node = stop.get("walk_node", -1)
+        if 0 <= node < len(parent):
+            root = int(parent[node])
+            street.append((stop, root))
+    reachable = [(stop, root) for stop, root in street if root in roots]
+    print(
+        "[station] nearby street stops:",
+        len(street),
+        "connected to platforms:",
+        len(reachable),
+        flush=True,
+    )
+    for stop, root in reachable[:6]:
+        print(
+            "[station]   reachable street stop:",
+            stop["id"],
+            stop.get("name"),
+            "component:",
+            root,
+            flush=True,
+        )
+    # This verifies weak graph connectivity. It does not verify public access
+    # rights, correct OSM topology or directed walking reachability.
+    ok = bool(reachable) and roots[0] == roots[1]
+    print("[station] CONNECTION", "PASS" if ok else "FAIL", flush=True)
+    return ok
+
+
+class LocalStationNodes(OsmiumSimpleHandler):
+    """Read only local OSM node coordinates from the cached PBF."""
+
+    def __init__(self, origin, x, y, radius):
+        super().__init__()
+        self.origin = origin
+        self.center = (x, y)
+        self.radius2 = (radius + 80.0) ** 2
+        self.coords = {}
+        self.tags = {}
+
+    def node(self, node):
+        if not node.location.valid():
+            return
+        x, y = project(node.location.lon, node.location.lat, *self.origin)
+        dx, dy = x - self.center[0], y - self.center[1]
+        if dx * dx + dy * dy > self.radius2:
+            return
+        self.coords[node.id] = (round(x, 1), round(y, 1))
+        tags = {
+            k: node.tags.get(k)
+            for k in (
+                "highway",
+                "railway",
+                "entrance",
+                "indoor",
+                "level",
+                "layer",
+                "bridge",
+                "tunnel",
+                "barrier",
+                "foot",
+                "access",
+                "name",
+                "public_transport",
+                "wheelchair",
+            )
+            if node.tags.get(k)
+        }
+        if tags:
+            self.tags[node.id] = tags
+
+
+class LocalStationWays(OsmiumSimpleHandler):
+    """Collect nearby ways, including candidates rejected by walking filter."""
+
+    def __init__(self, local_nodes, coordinate_components):
+        super().__init__()
+        self.nodes = local_nodes
+        self.components = coordinate_components
+        self.ways = []
+        self.node_ways = defaultdict(list)
+
+    def way(self, way):
+        refs = [ref.ref for ref in way.nodes]
+        present = [ref for ref in refs if ref in self.nodes.coords]
+        if len(present) < 2:
+            return
+        tags = {
+            k: way.tags.get(k)
+            for k in (
+                "highway",
+                "railway",
+                "public_transport",
+                "footway",
+                "indoor",
+                "bridge",
+                "tunnel",
+                "layer",
+                "level",
+                "foot",
+                "access",
+                "sidewalk",
+                "oneway:foot",
+                "area",
+                "name",
+                "barrier",
+            )
+            if way.tags.get(k)
+        }
+        if not any(
+            k in tags
+            for k in (
+                "highway",
+                "public_transport",
+                "railway",
+                "indoor",
+            )
+        ):
+            return
+        if (
+            "highway" not in tags
+            and tags.get("railway") != "platform"
+            and (
+                tags.get("public_transport") != "platform"
+                and tags.get("indoor") != "corridor"
+            )
+        ):
+            return
+        accepted = is_walkable_way(tags) or is_linear_station_walkway(tags, refs)
+        components = sorted(
+            {
+                component
+                for ref in present
+                for component in self.components.get(self.nodes.coords[ref], ())
+            }
+        )
+        entry = {
+            "id": way.id,
+            "refs": present,
+            "tags": tags,
+            "accepted_by_filter": accepted,
+            "components": components,
+        }
+        self.ways.append(entry)
+        for ref in present:
+            self.node_ways[ref].append(len(self.ways) - 1)
+
+
+def local_station_access_diagnostic(index, walking, source, name, radius):
+    """Find topological gaps and nearby raw OSM ways; never repair by proximity."""
+    if osmium is None:
+        raise RuntimeError("Install osmium for station diagnosis: pip install osmium")
+    rail_modes = {"mcc", "mcd", "train", "metro"}
+    targets = [
+        (i, stop)
+        for i, stop in enumerate(index["stops"])
+        if name.casefold() in (stop.get("name") or "").casefold()
+        and rail_modes.intersection(stop.get("modes", ()))
+    ]
+    if not targets:
+        raise ValueError("No rail stops matching station name: " + name)
+    cx = sum(stop["x"] for _, stop in targets) / len(targets)
+    cy = sum(stop["y"] for _, stop in targets) / len(targets)
+    print("[access] Computing connected components...", flush=True)
+    parent, sizes = walk_weak_components(walking)
+    station_roots = {
+        i: (
+            parent[stop["walk_node"]]
+            if 0 <= stop.get("walk_node", -1) < len(parent)
+            else None
+        )
+        for i, stop in targets
+    }
+    target_roots = {root for root in station_roots.values() if root is not None}
+    nearby_stops = []
+    street_roots = set()
+    for i, stop in enumerate(index["stops"]):
+        distance = math.hypot(stop["x"] - cx, stop["y"] - cy)
+        if distance > radius:
+            continue
+        node = stop.get("walk_node", -1)
+        root = parent[node] if 0 <= node < len(parent) else None
+        if root is not None and set(stop.get("modes", ())) & SURFACE_MODES:
+            street_roots.add(root)
+        if distance <= min(radius, 650.0):
+            nearby_stops.append(
+                {
+                    "index": i,
+                    "id": stop["id"],
+                    "name": stop.get("name"),
+                    "meters": round(distance),
+                    "modes": stop.get("modes", ()),
+                    "walk_node": node,
+                    "component": root,
+                    "lon": stop["lon"],
+                    "lat": stop["lat"],
+                    "component_nodes": sizes.get(root, 0),
+                }
+            )
+    nearby_stops.sort(key=lambda item: item["meters"])
+    # A street component is a component with at least one nearby surface stop.
+    # Include large nearby components when no surface stops are available.
+    coordinate_components = defaultdict(set)
+    graph_local = []
+    for i, (x, y) in enumerate(walking["nodes"]):
+        if abs(x - cx) > radius + 80 or abs(y - cy) > radius + 80:
+            continue
+        if (x - cx) ** 2 + (y - cy) ** 2 > (radius + 80) ** 2:
+            continue
+        root = parent[i]
+        coordinate_components[(round(x, 1), round(y, 1))].add(root)
+        graph_local.append((i, x, y, root))
+    del parent
+    if not street_roots:
+        candidates = [root for _, _, _, root in graph_local if root not in target_roots]
+        if candidates:
+            street_roots.add(max(candidates, key=lambda root: sizes[root]))
+    print("[access] Reading local OSM nodes and ways...", flush=True)
+    nodes = LocalStationNodes(index["origin"], cx, cy, radius)
+    nodes.apply_file(str(source))
+    ways = LocalStationWays(nodes, coordinate_components)
+    ways.apply_file(str(source))
+    coordinate_to_ids = defaultdict(list)
+    for ref, xy in nodes.coords.items():
+        coordinate_to_ids[xy].append(ref)
+
+    # Search only graph nodes within the local circle, not every OSM way pair.
+    cell_m = 15.0
+    city_grid = defaultdict(list)
+    platform = []
+    for node, x, y, root in graph_local:
+        if root in target_roots:
+            platform.append((node, x, y, root))
+        if root in street_roots and root not in target_roots:
+            city_grid[(int(x // cell_m), int(y // cell_m))].append((node, x, y, root))
+    gaps = []
+    for node, x, y, component in platform:
+        gx, gy = int(x // cell_m), int(y // cell_m)
+        nearby = []
+        for dx in range(-10, 11):
+            for dy in range(-10, 11):
+                for other, ox, oy, other_root in city_grid.get((gx + dx, gy + dy), ()):
+                    distance = math.hypot(x - ox, y - oy)
+                    if distance <= 140:
+                        nearby.append((distance, other, ox, oy, other_root))
+        for distance, other, ox, oy, other_root in sorted(nearby)[:3]:
+            a_refs = coordinate_to_ids.get((round(x, 1), round(y, 1)), [])
+            b_refs = coordinate_to_ids.get((round(ox, 1), round(oy, 1)), [])
+            gaps.append(
+                {
+                    "gap_m": round(distance, 1),
+                    "platform_graph_node": node,
+                    "street_graph_node": other,
+                    "platform_component": component,
+                    "street_component": other_root,
+                    "platform_osm_nodes": a_refs[:5],
+                    "street_osm_nodes": b_refs[:5],
+                    "from_xy": [x, y],
+                    "to_xy": [ox, oy],
+                }
+            )
+    gaps.sort(key=lambda item: item["gap_m"])
+    gap_selected = []
+    seen = set()
+    for gap in gaps:
+        key = (
+            (
+                gap["platform_osm_nodes"][0]
+                if gap["platform_osm_nodes"]
+                else gap["platform_graph_node"]
+            ),
+            gap["street_component"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        gap_selected.append(gap)
+        if len(gap_selected) >= 35:
+            break
+
+    for gap in gap_selected:
+        for prefix in ("platform", "street"):
+            linked = set()
+            for ref in gap[prefix + "_osm_nodes"]:
+                linked.update(ways.node_ways.get(ref, ()))
+            gap[prefix + "_ways"] = [
+                {
+                    "id": ways.ways[i]["id"],
+                    "tags": ways.ways[i]["tags"],
+                    "accepted": ways.ways[i]["accepted_by_filter"],
+                }
+                for i in sorted(linked)[:8]
+            ]
+
+    relevant_ways = []
+    for way in ways.ways:
+        kinds = set(way["components"])
+        suspicious = bool(kinds & target_roots and kinds & street_roots)
+        touches_platform = bool(kinds & target_roots)
+        special = (
+            way["tags"].get("highway")
+            in {
+                "steps",
+                "footway",
+                "path",
+                "elevator",
+            }
+            or way["tags"].get("indoor") == "corridor"
+        )
+        infrastructure = (
+            way["tags"].get("bridge") == "yes"
+            or way["tags"].get("highway") == "steps"
+            or way["tags"].get("tunnel") == "yes"
+        )
+        if (
+            suspicious
+            or (not way["accepted_by_filter"] and (touches_platform or special))
+            or (touches_platform and infrastructure)
+        ):
+            relevant_ways.append(
+                {
+                    "id": way["id"],
+                    "tags": way["tags"],
+                    "accepted": way["accepted_by_filter"],
+                    "touches_platform": touches_platform,
+                    "touches_street": bool(kinds & street_roots),
+                    "osm_node_ids": way["refs"][:50],
+                }
+            )
+    relevant_ways.sort(
+        key=lambda item: (
+            not (item["touches_platform"] and item["touches_street"]),
+            not item["touches_platform"],
+            item["accepted"],
+        )
+    )
+    # Retain potential entrances and stairs even if no highway way links them.
+    access_nodes = []
+    for osm_id, tags in nodes.tags.items():
+        xy = nodes.coords[osm_id]
+        if math.hypot(xy[0] - cx, xy[1] - cy) > radius:
+            continue
+        if (
+            tags.get("entrance")
+            or tags.get("highway") in {"elevator", "steps"}
+            or tags.get("railway") in {"subway_entrance", "station", "halt"}
+        ):
+            access_nodes.append(
+                {
+                    "osm_node": osm_id,
+                    "xy": xy,
+                    "tags": tags,
+                    "components": sorted(coordinate_components.get(xy, ())),
+                }
+            )
+    access_nodes.sort(
+        key=lambda item: math.hypot(item["xy"][0] - cx, item["xy"][1] - cy)
+    )
+    # Limit detail but retain all nearby geometry in GeoJSON.
+    closest_nodes = []
+    for node, x, y, component in platform[:500]:
+        closest_nodes.append(
+            {
+                "graph_node": node,
+                "osm_ids": coordinate_to_ids.get((x, y), [])[:5],
+                "xy": [x, y],
+                "component": component,
+            }
+        )
+    summary = {
+        "station": name,
+        "radius_m": radius,
+        "center_xy": [round(cx, 1), round(cy, 1)],
+        "station_stops": [
+            {
+                "index": i,
+                "id": stop["id"],
+                "name": stop.get("name"),
+                "walk_node": stop.get("walk_node", -1),
+                "component": (
+                    next(iter(target_roots)) if len(target_roots) == 1 else None
+                ),
+            }
+            for i, stop in targets
+        ],
+        "platform_components": [
+            {"root": root, "nodes": sizes[root]} for root in sorted(target_roots)
+        ],
+        "street_components": [
+            {"root": root, "nodes": sizes[root]} for root in sorted(street_roots)
+        ],
+        "nearby_stops": nearby_stops[:60],
+        "platform_graph_nodes": closest_nodes,
+        "nearby_osm_nodes": len(nodes.coords),
+        "nearby_osm_ways": len(ways.ways),
+        "access_nodes": access_nodes[:150],
+        "nearest_gaps": gap_selected,
+        "rejected_or_bridge_ways": relevant_ways[:150],
+        "notes": [
+            "Component IDs are diagnostic only and can change on rebuild.",
+            "Nearest gaps are geometrical candidates, NOT verified passages.",
+            "A crossing on the map does not establish a shared OSM node.",
+            "No graph links have been added by this diagnostic.",
+        ],
+    }
+    return summary, station_access_geojson(
+        summary, ways.ways, nodes, target_roots, street_roots, index["origin"]
+    )
+
+
+def station_access_geojson(summary, ways, nodes, platform_roots, street_roots, origin):
+    """View suspect OSM topology and gaps in geojson.io or QGIS."""
+    lon0, lat0 = origin
+    lat_factor = 180.0 / (math.pi * EARTH_RADIUS_M)
+    lon_factor = lat_factor / math.cos(math.radians(lat0))
+
+    def ll(xy):
+        return [
+            round(lon0 + xy[0] * lon_factor, 7),
+            round(lat0 + xy[1] * lat_factor, 7),
+        ]
+
+    features = []
+    for way in ways:
+        points = [ll(nodes.coords[ref]) for ref in way["refs"]]
+        if len(points) < 2:
+            continue
+        roots = set(way["components"])
+        if roots & platform_roots:
+            category = "platform_component"
+        elif roots & street_roots:
+            category = "street_component"
+        elif not way["accepted_by_filter"]:
+            category = "rejected_by_filter"
+        else:
+            category = "other_walkway"
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": points,
+                },
+                "properties": {
+                    "category": category,
+                    "osm_way": way["id"],
+                    "accepted": way["accepted_by_filter"],
+                    "tags": way["tags"],
+                },
+            }
+        )
+    for gap in summary["nearest_gaps"]:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        ll(gap["from_xy"]),
+                        ll(gap["to_xy"]),
+                    ],
+                },
+                "properties": {
+                    "category": "unverified_gap",
+                    "gap_m": gap["gap_m"],
+                    "platform_osm_nodes": gap["platform_osm_nodes"],
+                    "street_osm_nodes": gap["street_osm_nodes"],
+                },
+            }
+        )
+    for stop in summary["nearby_stops"]:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [stop["lon"], stop["lat"]],
+                },
+                "properties": {"category": "nearby_stop", **stop},
+            }
+        )
+    for node in summary["access_nodes"]:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": ll(node["xy"]),
+                },
+                "properties": {"category": "access_node", **node},
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
+
+
+def write_station_access_diagnostic(args, index, walking):
+    source = Path(args.cache_dir) / "central-fed-district.osm.pbf"
+    if args.walking_json:
+        raise ValueError("Station access audit requires the original OSM PBF")
+    report, geometry = local_station_access_diagnostic(
+        index, walking, source, args.diagnose_station, args.diagnose_radius
+    )
+    Path(args.diagnose_output).write_text(
+        json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="ascii"
+    )
+    Path(args.diagnose_geojson).write_text(
+        json.dumps(geometry, ensure_ascii=True) + "\n", encoding="ascii"
+    )
+    print("[access] Station:", report["station"], flush=True)
+    for entry in report["platform_components"]:
+        print(
+            "[access] Platform component:",
+            entry["root"],
+            "nodes:",
+            entry["nodes"],
+            flush=True,
+        )
+    for entry in report["street_components"][:5]:
+        print(
+            "[access] Street component:",
+            entry["root"],
+            "nodes:",
+            entry["nodes"],
+            flush=True,
+        )
+    print("[access] Nearest candidate gaps (UNVERIFIED):", flush=True)
+    for item in report["nearest_gaps"][:12]:
+        print(
+            "[access]   gap:",
+            item["gap_m"],
+            "m, OSM nodes:",
+            item["platform_osm_nodes"],
+            "->",
+            item["street_osm_nodes"],
+            flush=True,
+        )
+    print("[access] Nearby entrance/stair nodes:", flush=True)
+    for item in report["access_nodes"][:15]:
+        print("[access]   node:", item["osm_node"], item["tags"], flush=True)
+    print("[access] Suspect OSM ways:", flush=True)
+    for item in report["rejected_or_bridge_ways"][:20]:
+        print(
+            "[access]   way:",
+            item["id"],
+            "accepted:",
+            item["accepted"],
+            item["tags"],
+            flush=True,
+        )
+    print("[access] JSON:", args.diagnose_output, flush=True)
+    print("[access] GeoJSON:", args.diagnose_geojson, flush=True)
+    return report
 
 
 def audit_index(data):
@@ -1882,6 +2997,20 @@ PAGE_HTML = r"""<!doctype html>
                             />
                         </svg>
                         <span data-mode-name="mcd">MCD</span>
+                    </span>
+                </label>
+                <label
+                    class="mode-option"
+                    title="Approx. 51 km/h; wait 8 min"
+                >
+                    <input class="mode-input" type="checkbox" value="train">
+                    <span class="mode-pill">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="4" y="4" width="16" height="15" rx="4"/>
+                            <path d="M4 12h16M7 7h10M8 19l-2 3m10-3 2 3"/>
+                            <path d="M8 15h.01M16 15h.01"/>
+                        </svg>
+                        <span data-mode-name="train">Train</span>
                     </span>
                 </label>
             </div>
@@ -3454,6 +4583,7 @@ const TROLLEYBUS_SPEED_M_PER_MIN = 280.0;
 const METRO_SPEED_M_PER_MIN = 630.0;
 const MCC_SPEED_M_PER_MIN = 780.0;
 const MCD_SPEED_M_PER_MIN = 900.0;
+const TRAIN_SPEED_M_PER_MIN = 850.0;
 const STOP_DELAY_MIN = 0.35;
 const BOARDING_WAIT_MIN = 4.0;
 const MODE_SPEEDS = {
@@ -3462,11 +4592,12 @@ const MODE_SPEEDS = {
     trolleybus: TROLLEYBUS_SPEED_M_PER_MIN,
     metro: METRO_SPEED_M_PER_MIN,
     mcc: MCC_SPEED_M_PER_MIN,
-    mcd: MCD_SPEED_M_PER_MIN
+    mcd: MCD_SPEED_M_PER_MIN,
+    train: TRAIN_SPEED_M_PER_MIN
 };
 const MODE_BOARDING_WAITS = {
     bus: 4.0, tram: 4.0, trolleybus: 4.0,
-    metro: 2.5, mcc: 4.0, mcd: 5.0
+    metro: 2.5, mcc: 4.0, mcd: 5.0, train: 8.0
 };
 const ROUGH_STOP_MIN = 1.4;
 const WALK_PREFERENCE_EXTRA = 0.8;
@@ -3805,7 +4936,8 @@ const MODE_NAMES = {
     trolleybus: @@MODE_TROLLEYBUS@@,
     metro: @@MODE_METRO@@,
     mcc: @@MODE_MCC@@,
-    mcd: @@MODE_MCD@@
+    mcd: @@MODE_MCD@@,
+    train: @@MODE_TRAIN@@
 };
 const MODE_HINT = @@MODE_HINT@@;
 
@@ -4307,6 +5439,44 @@ function walkContextForPoint(point) {
     return walkContextForXY(xy[0], xy[1]);
 }
 
+// DevTools diagnostic; helpers above are scoped inside the map async IIFE.
+// Usage: transportDebugStation("\u041f\u043b\u043e\u0449\u0430\u0434\u044c")
+window.transportDebugStation = function(query) {
+    const wanted = String(query || "").trim().toLocaleLowerCase();
+    if (!wanted) {
+        console.warn("Pass part of a station name to transportDebugStation().");
+        return [];
+    }
+    const xy = selectedPoint
+        ? project(selectedPoint.lon, selectedPoint.lat) : null;
+    const reached = selectedPoint
+        ? walkContextForPoint(selectedPoint).stopsReached : null;
+    const result = [];
+    for (let i = 0; i < stops.length; ++i) {
+        const stop = stops[i];
+        if (!String(stop.name || "").toLocaleLowerCase().includes(wanted)) {
+            continue;
+        }
+        const modes = Array.from(new Set(
+            stop.routes.map(key => routes[key]?.mode).filter(Boolean)
+        ));
+        result.push({
+            index: i, name: stop.name, id: stop.id,
+            modes: modes.join(", "),
+            straight_m: xy
+                ? Math.round(Math.hypot(stop.x - xy[0], stop.y - xy[1])) : null,
+            walking_m: reached
+                ? Math.round(reached.get(i) ?? Infinity) : null,
+            walk_node: stop.walk_node,
+            enabled_route: stop.routes.some(isRouteEnabled),
+            route_count: stop.routes.length
+        });
+    }
+    result.sort((a, b) => (a.straight_m ?? 0) - (b.straight_m ?? 0));
+    console.table(result);
+    return result;
+};
+
 function findNearbyStopsXY(x, y) {
     return Array.from(walkContextForXY(x, y).stopsReached.keys()).filter(
         index => stops[index].routes.some(isRouteEnabled)
@@ -4493,7 +5663,8 @@ function routeLabel(route) {
         ),
         metro: "\u041C\u0435\u0442\u0440\u043E",
         mcc: "\u041C\u0426\u041A",
-        mcd: "\u041C\u0426\u0414"
+        mcd: "\u041C\u0426\u0414",
+        train: "\u042d\u043b\u0435\u043a\u0442\u0440\u0438\u0447\u043a\u0430"
     };
     const type = route.mode || route.route || "";
     const ref = route.ref || "?";
@@ -5991,7 +7162,8 @@ const MODE_DISTANCE_FACTORS = {
     trolleybus: 1.25,
     metro: 1.10,
     mcc: 1.08,
-    mcd: 1.08
+    mcd: 1.08,
+    train: 1.08
 };
 
 function legDistanceMeters(leg) {
@@ -10222,6 +11394,9 @@ def build_html(
         "metro": "&#1052;&#1077;&#1090;&#1088;&#1086;",
         "mcc": "&#1052;&#1062;&#1050;",
         "mcd": "&#1052;&#1062;&#1044;",
+        "train": (
+            "&#1069;&#1083;&#1077;&#1082;&#1090;&#1088;&#1080;" "&#1095;&#1082;&#1080;"
+        ),
     }
     mode_hint = (
         "&#1055;&#1086; &#1091;&#1084;&#1086;&#1083;&#1095;&#1072;&#1085;"
@@ -10280,6 +11455,7 @@ def build_html(
         "@@MODE_METRO@@": js_mode_names["metro"],
         "@@MODE_MCC@@": js_mode_names["mcc"],
         "@@MODE_MCD@@": js_mode_names["mcd"],
+        "@@MODE_TRAIN@@": js_mode_names["train"],
         "@@MODE_HINT@@": js_mode_hint,
         "@@WALK_SPEED_JS@@": f"{walk_speed:.6f}",
     }
@@ -10324,9 +11500,32 @@ def parse_args():
     )
     parser.add_argument("-o", "--output", default="routes.html")
     parser.add_argument("--cache-dir", default="cache")
+    parser.add_argument(
+        "--diagnose-station",
+        metavar="NAME",
+        help="Inspect raw OSM ways and graph connectivity around a rail station",
+    )
+    parser.add_argument(
+        "--diagnose-only",
+        action="store_true",
+        help="Write access diagnostics without rebuilding the HTML or transfers",
+    )
+    parser.add_argument("--diagnose-radius", type=float, default=700.0)
+    parser.add_argument("--diagnose-output", default="station-access.json")
+    parser.add_argument("--diagnose-geojson", default="station-access.geojson")
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--rebuild-walking", action="store_true")
+    parser.add_argument(
+        "--allow-moskvorechye-private",
+        action="store_true",
+        help="TEST ONLY: allow 4 explicitly listed access=private station footways",
+    )
+    parser.add_argument(
+        "--check-moskvorechye-only",
+        action="store_true",
+        help="Check cached/rebuilt pedestrian connectivity; skip HTML/transfers",
+    )
     parser.add_argument(
         "--rebuild-transfers",
         action="store_true",
@@ -10370,6 +11569,16 @@ def parse_args():
             parser.error(f"--{name.replace('_', '-')} must be greater than zero")
     if not 0 <= args.circle_opacity <= 100:
         parser.error("--circle-opacity must be between 0 and 100")
+    if args.diagnose_radius < 100 or args.diagnose_radius > 2500:
+        parser.error("--diagnose-radius must be between 100 and 2500")
+    if args.diagnose_only and not args.diagnose_station:
+        parser.error("--diagnose-only requires --diagnose-station")
+    if args.check_moskvorechye_only and args.diagnose_station:
+        parser.error("--check-moskvorechye-only conflicts with --diagnose-station")
+    if args.check_moskvorechye_only and args.walking_json:
+        parser.error("--check-moskvorechye-only requires original OSM input")
+    if args.allow_moskvorechye_private and args.walking_json:
+        parser.error("--allow-moskvorechye-private requires original OSM input")
     if args.update and args.rebuild:
         parser.error("--update and --rebuild cannot be used together")
     if args.input_geojson and not args.walking_json:
@@ -10390,6 +11599,12 @@ def main():
         print(f"[build] DONE {name}: {duration:.3f}s", flush=True)
 
     print(f"[build] START v{PROJECT_VERSION}", flush=True)
+    if args.allow_moskvorechye_private:
+        print(
+            "[station] EXPERIMENTAL: 4 access=private ways allowed for testing",
+            flush=True,
+        )
+        print("[station] This does NOT establish public access rights.", flush=True)
     phase_started = time.monotonic()
     print("[build] START transport input", flush=True)
     if args.input_geojson:
@@ -10439,6 +11654,7 @@ def main():
             index,
             MAX_WALK_UI_MINUTES * args.walk_speed,
             rebuild=(args.update or args.rebuild_walking),
+            allow_private_station_ways=args.allow_moskvorechye_private,
         )
     if not walking.get("nodes") or not walking.get("edges"):
         raise RuntimeError("Pedestrian graph is empty")
@@ -10451,11 +11667,35 @@ def main():
             raise ValueError("Pedestrian graph contains an invalid edge")
     index["walking"] = walking
     step_done("graph validation", phase_started)
+    if args.allow_moskvorechye_private or args.check_moskvorechye_only:
+        station_ok = check_moskvorechye_connection(walking, index["stops"])
+        if not station_ok:
+            print(
+                "[station] The four private ways alone have NOT fixed access.",
+                flush=True,
+            )
+            print(
+                "[station] Inspect station-access.geojson before adding links.",
+                flush=True,
+            )
+        if args.check_moskvorechye_only:
+            raise SystemExit(0 if station_ok else 2)
+    if args.diagnose_station:
+        phase_started = time.monotonic()
+        print("[build] START station access diagnosis", flush=True)
+        write_station_access_diagnostic(args, index, walking)
+        step_done("station access diagnosis", phase_started)
+        if args.diagnose_only:
+            print("[build] DONE diagnostic-only run", flush=True)
+            return
     phase_started = time.monotonic()
     print("[build] START walking transfers or cache", flush=True)
-    walk_source = args.walking_json or (
-        Path(args.cache_dir) / "moscow-pedestrian-v2.json.gz"
+    walking_file = (
+        "moscow-pedestrian-v4-moskvorechye-test.json.gz"
+        if args.allow_moskvorechye_private
+        else "moscow-pedestrian-v3.json.gz"
     )
+    walk_source = args.walking_json or (Path(args.cache_dir) / walking_file)
     index["walk_transfers"] = load_or_build_walk_transfers(
         Path(args.cache_dir),
         walk_source,
@@ -10468,18 +11708,38 @@ def main():
             or args.update
             or args.rebuild
         ),
+        allow_private_station_ways=args.allow_moskvorechye_private,
     )
     step_done("walking transfers or cache", phase_started)
+    if args.allow_moskvorechye_private:
+        check_moskvorechye_transfers(index["walk_transfers"], index["stops"])
     phase_started = time.monotonic()
     print("[build] START statistics and audit", flush=True)
     for stop in index["stops"]:
         if stop.get("walk_node", -1) >= node_count:
             raise ValueError("Pedestrian graph contains an invalid stop node")
-        # Mode labels are needed by the offline walking connector, not the UI.
-        stop.pop("modes", None)
     walk_connected = sum(s.get("walk_node", -1) >= 0 for s in index["stops"])
     print(f"walking stops connected: {walk_connected}/{len(index['stops'])}")
     report = audit_index(index)
+    report["extraction_audit"] = feature_collection.get("extraction_audit", {})
+    report["rail_station_audit"] = audit_rail_stations(index, feature_collection)
+    if args.report_json:
+        report["rail_walking_components"] = audit_station_walk_components(
+            walking,
+            index["stops"],
+        )
+    for station in report["rail_station_audit"]:
+        print(
+            "[audit]",
+            station["query"],
+            "matches:",
+            len(station["stops"]),
+            "OSM station objects:",
+            len(station["osm_station_candidates"]),
+        )
+    for stop in index["stops"]:
+        # UI still uses route keys; drop redundant labels after the audit.
+        stop.pop("modes", None)
     report["pedestrian"] = {
         "transfer_arcs": len(index["walk_transfers"]["to"]),
         "nodes": len(walking["nodes"]),
@@ -10502,6 +11762,8 @@ def main():
         print("WARNING: unverified route relation IDs found in input")
     if not report["mode_directions"].get("mcc"):
         print("WARNING: no MCC route relations; no artificial ring is created")
+    if not report["mode_directions"].get("train"):
+        print("WARNING: no non-MCD suburban rail routes found in this OSM extract")
     if report["suspicious_stop_gaps_over_15km"]:
         print("WARNING: unusually long stop-to-stop gaps; see --report-json")
     if args.report_json:
