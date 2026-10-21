@@ -10,7 +10,6 @@ import base64
 import gzip
 import hashlib
 import heapq
-import html as html_lib
 import json
 import math
 import struct
@@ -29,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.12.2"
+PROJECT_VERSION = "0.12.3"
 
 
 # OSM extraction and normalization
@@ -8465,7 +8464,7 @@ function walkContextForPoint(point) {
 }
 
 // DevTools diagnostic; helpers above are scoped inside the map async IIFE.
-// Usage: transportDebugStation("\u041f\u043b\u043e\u0449\u0430\u0434\u044c")
+// Usage: transportDebugStation("Station name")
 window.transportDebugStation = function(query) {
     const wanted = String(query || "").trim().toLocaleLowerCase();
     if (!wanted) {
@@ -8680,16 +8679,13 @@ function routeLabel(route) {
         return "?";
     }
     const names = {
-        bus: "\u0410\u0432\u0442\u043E\u0431\u0443\u0441",
-        tram: "\u0422\u0440\u0430\u043C\u0432\u0430\u0439",
-        trolleybus: (
-            "\u0422\u0440\u043E\u043B\u043B"
-            + "\u0435\u0439\u0431\u0443\u0441"
-        ),
-        metro: "\u041C\u0435\u0442\u0440\u043E",
-        mcc: "\u041C\u0426\u041A",
-        mcd: "\u041C\u0426\u0414",
-        train: "\u042d\u043b\u0435\u043a\u0442\u0440\u0438\u0447\u043a\u0430"
+        bus: "Bus",
+        tram: "Tram",
+        trolleybus: "Trolleybus",
+        metro: "Metro",
+        mcc: "MCC",
+        mcd: "MCD",
+        train: "Train"
     };
     const type = route.mode || route.route || "";
     const ref = route.ref || "?";
@@ -14532,59 +14528,18 @@ def build_html(
         min(100.0, initial_circle_opacity),
     )
 
-    # Keep localized labels ASCII-encoded in the source and generated HTML.
+    # Render static interface labels as plain ASCII text. OSM place names
+    # remain untouched inside the compressed transport payload.
     mode_names = {
-        "heading": (
-            "&#1042;&#1080;&#1076;&#1099; &#1090;&#1088;&#1072;&#1085;&#1089;"
-            "&#1087;&#1086;&#1088;&#1090;&#1072;"
-        ),
-        "bus": "&#1040;&#1074;&#1090;&#1086;&#1073;&#1091;&#1089;",
-        "tram": "&#1058;&#1088;&#1072;&#1084;&#1074;&#1072;&#1081;",
-        "trolleybus": (
-            "&#1058;&#1088;&#1086;&#1083;&#1083;&#1077;&#1081;&#1073;&#1091;" "&#1089;"
-        ),
-        "metro": "&#1052;&#1077;&#1090;&#1088;&#1086;",
-        "mcc": "&#1052;&#1062;&#1050;",
-        "rail": (
-            "&#1052;&#1062;&#1044; + "
-            "&#1069;&#1083;&#1077;&#1082;&#1090;&#1088;&#1080;&#1095;&#1082;&#1080;"
-        ),
+        "heading": "Transport modes",
+        "bus": "Bus",
+        "tram": "Tram",
+        "trolleybus": "Trolleybus",
+        "metro": "Metro",
+        "mcc": "MCC",
+        "rail": "MCD + Trains",
     }
-    mode_hint = (
-        "&#1055;&#1086; &#1091;&#1084;&#1086;&#1083;&#1095;&#1072;&#1085;"
-        "&#1080;&#1102; &#1074;&#1082;&#1083;&#1102;&#1095;&#1105;&#1085; "
-        "&#1085;&#1072;&#1079;&#1077;&#1084;&#1085;&#1099;&#1081; &#1090;"
-        "&#1088;&#1072;&#1085;&#1089;&#1087;&#1086;&#1088;&#1090;. &#1057;"
-        "&#1082;&#1086;&#1088;&#1086;&#1089;&#1090;&#1080; &#1080; &#1074;"
-        "&#1088;&#1077;&#1084;&#1103; &#1086;&#1078;&#1080;&#1076;&#1072;"
-        "&#1085;&#1080;&#1103; &#1087;&#1088;&#1080;&#1073;&#1083;&#1080;"
-        "&#1079;&#1080;&#1090;&#1077;&#1083;&#1100;&#1085;&#1099;&#1077;."
-    )
-
-    # Keep generated HTML ASCII-safe even after tidy rewrites HTML entities.
-    def js_escaped_string(value, width=64):
-        escaped = json.dumps(value, ensure_ascii=True)[1:-1]
-        tokens = re.findall(r"\\u[0-9A-Fa-f]{4}|\\.|.", escaped)
-        chunks = []
-        current = ""
-
-        for token in tokens:
-            if len(current) + len(token) > width and current:
-                chunks.append(current)
-                current = ""
-
-            current += token
-
-        if current:
-            chunks.append(current)
-
-        return " +\n    ".join('"' + chunk + '"' for chunk in chunks)
-
-    js_mode_names = {
-        key: js_escaped_string(html_lib.unescape(value))
-        for key, value in mode_names.items()
-    }
-    js_mode_hint = js_escaped_string(html_lib.unescape(mode_hint))
+    mode_hint = "Surface transport on by default. Travel times are estimates."
 
     script = MAP_JS
     script += "\n" + ROUTING_JS
@@ -14599,14 +14554,14 @@ def build_html(
         "@@GRID_SIZE@@": f"{grid_size:.6f}",
         "@@ORIGIN_LON@@": f"{origin_lon:.6f}",
         "@@ORIGIN_LAT@@": f"{origin_lat:.6f}",
-        "@@MODE_HEADING@@": js_mode_names["heading"],
-        "@@MODE_BUS@@": js_mode_names["bus"],
-        "@@MODE_TRAM@@": js_mode_names["tram"],
-        "@@MODE_TROLLEYBUS@@": js_mode_names["trolleybus"],
-        "@@MODE_METRO@@": js_mode_names["metro"],
-        "@@MODE_MCC@@": js_mode_names["mcc"],
-        "@@MODE_RAIL@@": js_mode_names["rail"],
-        "@@MODE_HINT@@": js_mode_hint,
+        "@@MODE_HEADING@@": json.dumps(mode_names["heading"]),
+        "@@MODE_BUS@@": json.dumps(mode_names["bus"]),
+        "@@MODE_TRAM@@": json.dumps(mode_names["tram"]),
+        "@@MODE_TROLLEYBUS@@": json.dumps(mode_names["trolleybus"]),
+        "@@MODE_METRO@@": json.dumps(mode_names["metro"]),
+        "@@MODE_MCC@@": json.dumps(mode_names["mcc"]),
+        "@@MODE_RAIL@@": json.dumps(mode_names["rail"]),
+        "@@MODE_HINT@@": json.dumps(mode_hint),
         "@@WALK_SPEED_JS@@": f"{walk_speed:.6f}",
     }
     script = script.replace("@@WALK_SPEED@@", "@@WALK_SPEED_JS@@")
@@ -14615,6 +14570,8 @@ def build_html(
 
     if re.search(r"@@[A-Z_]+@@", script):
         raise ValueError("Unresolved JavaScript template placeholder")
+    if re.search(r"\\u[0-9A-Fa-f]{4}", script):
+        raise ValueError("Use ASCII literals in JavaScript interface text")
 
     # JavaScript is emitted as plain text, not compressed or dynamically injected.
     # Only the transport DATA is gzipped to keep the generated HTML compact.
@@ -14658,6 +14615,10 @@ def run_self_tests():
     assert re.search(r'\bvalue="0"', transfer_input.group("attrs"))
     assert re.search(r'\bmax="2"', transfer_input.group("attrs"))
     assert '<b id="transfer-mode-value">No transfers</b>' in PAGE_HTML
+    assert not re.search(r"\\u[0-9A-Fa-f]{4}", MAP_JS + ROUTING_JS)
+    assert 'bus: "Bus"' in MAP_JS
+    assert 'metro: "Metro"' in MAP_JS
+    assert not re.search(r"&#[0-9]+;", PAGE_HTML)
     # A bad route_master must not turn a bus into a train or vice versa.
     parent_train = {
         "train:master:9": {"relation_id": 9, "route": "train", "mode": "train"}
