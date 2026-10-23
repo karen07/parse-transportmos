@@ -3712,10 +3712,10 @@ def rail_access_quality_report(graph, stops, mapped_street_roots, major_street_r
     parent = array("I", range(count))
     size = array("I", [1]) * count
 
-    def find(node):
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
+    def find(node, parents=parent):
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
         return node
 
     for a, b, _distance, _direction in graph["edges"]:
@@ -3758,7 +3758,7 @@ def rail_access_quality_report(graph, stops, mapped_street_roots, major_street_r
                     "source": stop.get("station_access_kind", "none"),
                 }
             )
-    del parent, size
+    del find, parent, size
     print("[rail-quality] final graph components:", dict(counts), flush=True)
     return {
         "metric": "weak_connectivity_not_directed_access",
@@ -4542,10 +4542,10 @@ def audit_station_walk_components(walking, stops):
     parent = array("I", range(count))
     rank = bytearray(count)
 
-    def find(node):
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
+    def find(node, parents=parent):
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
         return node
 
     for a, b, _length, _direction in walking["edges"]:
@@ -4583,7 +4583,7 @@ def audit_station_walk_components(walking, stops):
         root = find(node)
         if root in sizes:
             sizes[root] += 1
-    del parent, rank
+    del find, parent, rank
 
     nearby = []
     for idx, stop, root in matched:
