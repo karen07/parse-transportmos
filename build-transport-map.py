@@ -12,7 +12,6 @@ import hashlib
 import heapq
 import json
 import math
-import struct
 import re
 import sys
 import time
