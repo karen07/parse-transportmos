@@ -5990,6 +5990,7 @@ PAGE_HTML = r"""<!doctype html>
 
         <div id="trip-panel" hidden>
             <div id="trip-title" class="trip-title">Trip</div>
+            <button id="trip-back-top" type="button">Back</button>
             <div id="trip-alternatives"></div>
             <div id="trip-steps"></div>
             <button id="trip-back" type="button">Back</button>
@@ -6740,6 +6741,7 @@ MAP_CSS = r"""
             border-left-color: #64748b;
         }
 
+        #trip-back-top,
         #trip-back {
             display: inline-flex;
             align-items: center;
@@ -6769,16 +6771,24 @@ MAP_CSS = r"""
                 border-color 120ms ease;
         }
 
+        #trip-back-top {
+            margin-top: 0;
+            margin-bottom: 14px;
+        }
+
+        #trip-back-top:hover,
         #trip-back:hover {
             border-color: rgb(148 163 184);
 
             background: rgb(248 250 252);
         }
 
+        #trip-back-top:active,
         #trip-back:active {
             background: rgb(241 245 249);
         }
 
+        #trip-back-top:focus-visible,
         #trip-back:focus-visible {
             outline: 3px solid rgb(147 197 253 / 0.65);
             outline-offset: 2px;
@@ -7173,6 +7183,7 @@ MAP_CSS = r"""
             }
 
             .trip-option,
+            #trip-back-top,
             #trip-back {
                 min-height: 44px;
             }
@@ -7713,6 +7724,7 @@ const tripPanel = document.getElementById("trip-panel");
 const tripTitle = document.getElementById("trip-title");
 const tripAlternatives = document.getElementById("trip-alternatives");
 const tripSteps = document.getElementById("trip-steps");
+const tripBackTop = document.getElementById("trip-back-top");
 const tripBack = document.getElementById("trip-back");
 const resetOrigin = document.getElementById("reset-origin");
 const timingStatus = document.getElementById("timing-status");
@@ -8123,6 +8135,7 @@ function updateControls() {
 
     transferLabel.textContent = TEXT.transfers;
     tripTitle.textContent = TEXT.tripTitle;
+    tripBackTop.textContent = TEXT.backToReachability;
     tripBack.textContent = TEXT.backToReachability;
 
     const transferModeLabels = [
@@ -14146,15 +14159,15 @@ circleOpacityInput.addEventListener(
     }
 );
 
-tripBack.addEventListener(
-    "click",
-    () => {
-        targetPoint = null;
-        setTargetPickMode(false);
-        tripAlternativeIndex = 0;
-        scheduleRender();
-    }
-);
+function backToReachability() {
+    targetPoint = null;
+    setTargetPickMode(false);
+    tripAlternativeIndex = 0;
+    scheduleRender();
+}
+
+tripBackTop.addEventListener("click", backToReachability);
+tripBack.addEventListener("click", backToReachability);
 
 function resetSelection() {
     profileAbort("Reset");
@@ -14614,6 +14627,10 @@ def run_self_tests():
     assert re.search(r'\bvalue="0"', transfer_input.group("attrs"))
     assert re.search(r'\bmax="2"', transfer_input.group("attrs"))
     assert '<b id="transfer-mode-value">No transfers</b>' in PAGE_HTML
+    assert PAGE_HTML.index('id="trip-back-top"') < PAGE_HTML.index('id="trip-steps"')
+    assert PAGE_HTML.index('id="trip-back"') > PAGE_HTML.index('id="trip-steps"')
+    assert 'tripBackTop.addEventListener("click", backToReachability)' in ROUTING_JS
+    assert 'tripBack.addEventListener("click", backToReachability)' in ROUTING_JS
     assert not re.search(r"\\u[0-9A-Fa-f]{4}", MAP_JS + ROUTING_JS)
     assert 'bus: "Bus"' in MAP_JS
     assert 'metro: "Metro"' in MAP_JS

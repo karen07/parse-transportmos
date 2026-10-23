@@ -530,6 +530,7 @@
             .trip-step-walk {
                 border-left-color: #64748b;
             }
+            #trip-back-top,
             #trip-back {
                 display: inline-flex;
                 align-items: center;
@@ -550,13 +551,20 @@
                     background-color 120ms ease,
                     border-color 120ms ease;
             }
+            #trip-back-top {
+                margin-top: 0;
+                margin-bottom: 14px;
+            }
+            #trip-back-top:hover,
             #trip-back:hover {
                 border-color: rgb(148 163 184);
                 background: rgb(248 250 252);
             }
+            #trip-back-top:active,
             #trip-back:active {
                 background: rgb(241 245 249);
             }
+            #trip-back-top:focus-visible,
             #trip-back:focus-visible {
                 outline: 3px solid rgb(147 197 253 / 0.65);
                 outline-offset: 2px;
@@ -814,6 +822,7 @@
                     font-size: 12px;
                 }
                 .trip-option,
+                #trip-back-top,
                 #trip-back {
                     min-height: 44px;
                 }
@@ -1183,6 +1192,7 @@
                 </div>
                 <div id="trip-panel" hidden>
                     <div id="trip-title" class="trip-title">Trip</div>
+                    <button id="trip-back-top" type="button">Back</button>
                     <div id="trip-alternatives"></div>
                     <div id="trip-steps"></div>
                     <button id="trip-back" type="button">Back</button>
@@ -411671,6 +411681,7 @@
                 const tripTitle = document.getElementById('trip-title');
                 const tripAlternatives = document.getElementById('trip-alternatives');
                 const tripSteps = document.getElementById('trip-steps');
+                const tripBackTop = document.getElementById('trip-back-top');
                 const tripBack = document.getElementById('trip-back');
                 const resetOrigin = document.getElementById('reset-origin');
                 const timingStatus = document.getElementById('timing-status');
@@ -412059,6 +412070,7 @@
                         walkMinutes.toFixed(0) + ' min (~' + Math.round(walkRadius) + ' m)';
                     transferLabel.textContent = TEXT.transfers;
                     tripTitle.textContent = TEXT.tripTitle;
+                    tripBackTop.textContent = TEXT.backToReachability;
                     tripBack.textContent = TEXT.backToReachability;
                     const transferModeLabels = [
                         TEXT.noTransfers,
@@ -417129,12 +417141,14 @@
                     circleOpacityValue.textContent = Math.round(circleOpacity * 100) + '%';
                     coverageCanvas.style.opacity = String(circleOpacity);
                 });
-                tripBack.addEventListener('click', () => {
+                function backToReachability() {
                     targetPoint = null;
                     setTargetPickMode(false);
                     tripAlternativeIndex = 0;
                     scheduleRender();
-                });
+                }
+                tripBackTop.addEventListener('click', backToReachability);
+                tripBack.addEventListener('click', backToReachability);
                 function resetSelection() {
                     profileAbort('Reset');
                     timingStatus.textContent = 'Ready';
