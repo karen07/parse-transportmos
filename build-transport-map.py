@@ -27,7 +27,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.12.3"
+PROJECT_VERSION = "0.13.0"
 
 
 # OSM extraction and normalization
@@ -1584,15 +1584,16 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         for run in runs:
             resolved_stops = [key for key, _role in run]
             resolved_stop_roles = [role or "" for _key, role in run]
+            run_route_key = route_key
             for stop_id in resolved_stops:
-                stop_routes[stop_id].add(route_key)
+                stop_routes[stop_id].add(run_route_key)
                 stop_relations[stop_id].add(relation_id)
             route_features.append(
                 {
                     "type": "Feature",
                     "properties": {
                         "feature_type": "route",
-                        "route_key": route_key,
+                        "route_key": run_route_key,
                         "route": route["route"],
                         "mode": mode,
                         "ref": ref,
@@ -4159,6 +4160,108 @@ def conservative_geometry_edge_lengths(geometry, direction_stops, stops, mode):
     return accepted
 
 
+def pair_surface_route_directions(features, stop_index, stops):
+    """Pair orphan OSM directions by reciprocal terminals AND shared corridor.
+
+    This identifies a *line*, not a physical vehicle or a guaranteed
+    through-trip. It never pairs by ref alone, never joins railway services,
+    and never joins ambiguous variants. Time-table continuity is only an
+    approximation in the static reachability model.
+    """
+    buckets = defaultdict(list)
+    for i, feat in enumerate(features):
+        p = feat.get("properties") or {}
+        mode = p.get("mode") or p.get("route")
+        ref = (p.get("ref") or "").strip().casefold()
+        network = (p.get("network") or "").strip().casefold()
+        ids = [stop_index[s] for s in p.get("stops", ()) if s in stop_index]
+        if mode not in SURFACE_MODES or not ref or len(ids) < 4:
+            continue
+        buckets[(mode, ref, network)].append((i, ids))
+
+    def distance(a, b):
+        return coord_distance_m(
+            (stops[a]["lon"], stops[a]["lat"]), (stops[b]["lon"], stops[b]["lat"])
+        )
+
+    def corridor_match(a, b):
+        # Independent matched locations: opposite platforms usually lie on
+        # opposite sides of one street, but two unrelated routes won't share
+        # three distinct stops and both terminal locations.
+        matches = []
+        for stop_a in a[1:-1]:
+            if any(distance(stop_a, stop_b) <= 130 for stop_b in b[1:-1]):
+                if all(distance(stop_a, old) > 130 for old in matches):
+                    matches.append(stop_a)
+                    if len(matches) == 3:
+                        return True
+        return False
+
+    candidates = defaultdict(set)
+    for members in buckets.values():
+        for pos, (i, a) in enumerate(members):
+            for j, b in members[pos + 1 :]:
+                p = features[i]["properties"]
+                q = features[j]["properties"]
+                if p.get("route_key") == q.get("route_key"):
+                    continue  # already grouped by the OSM route_master
+                if p.get("relation_id") == q.get("relation_id"):
+                    continue  # clipped fragments, NOT a joined journey
+                if distance(a[0], b[-1]) > 180 or distance(a[-1], b[0]) > 180:
+                    continue
+                if not corridor_match(a, b):
+                    continue
+                candidates[i].add(j)
+                candidates[j].add(i)
+
+    # Only accept unique reciprocal matches. Never choose an arbitrary
+    # partner when service variants share one or both terminals.
+    remap = {}
+    paired = []
+    for i, partners in sorted(candidates.items()):
+        if len(partners) != 1:
+            continue
+        j = next(iter(partners))
+        if j <= i or candidates[j] != {i}:
+            continue
+        left = features[i]["properties"]
+        right = features[j]["properties"]
+        key = (
+            f"{left.get('mode')}:paired:"
+            f"{min(str(left.get('relation_id')), str(right.get('relation_id')))}:"
+            f"{max(str(left.get('relation_id')), str(right.get('relation_id')))}"
+        )
+        # Don't merge a multi-variant master with an orphan: this generic
+        # matcher can only prove that two individual directions belong together.
+        if any(
+            f is not features[i]
+            and f is not features[j]
+            and (
+                f["properties"].get("route_key")
+                in (left.get("route_key"), right.get("route_key"))
+            )
+            for f in features
+        ):
+            continue
+        remap[i] = key
+        remap[j] = key
+        paired.append((left.get("relation_id"), right.get("relation_id")))
+
+    for i, key in remap.items():
+        features[i]["properties"] = {
+            **features[i]["properties"],
+            "route_key": key,
+            "topology_pair": True,
+        }
+    if paired:
+        print(
+            f"[routes] grouped {len(paired)} unique reciprocal pairs "
+            "by terminals and corridor (not proof of same vehicle)",
+            flush=True,
+        )
+    return paired
+
+
 def build_index(data_json, grid_size):
     features = data_json.get("features", [])
 
@@ -4234,6 +4337,9 @@ def build_index(data_json, grid_size):
 
         grid.setdefault(key, []).append(index)
 
+    # Group otherwise orphan surface directions BEFORE constructing routes.
+    # OSM route_master grouping remains authoritative where present.
+    pair_surface_route_directions(route_features, stop_index, stops)
     routes = {}
 
     for feature in route_features:
@@ -4287,6 +4393,8 @@ def build_index(data_json, grid_size):
         route["directions"].append(
             {
                 "relation_id": props.get("relation_id"),
+                "direction_id": f"{route_key}:{props.get('relation_id')}:"
+                f"{len(route['directions'])}",
                 "from": props.get("from"),
                 "to": props.get("to"),
                 "roundtrip": props.get("roundtrip"),
@@ -4326,6 +4434,15 @@ def build_index(data_json, grid_size):
             route_stops.update(direction["stops"])
 
         route["stops"] = sorted(route_stops)
+
+    # Any newly paired route keys must also be reflected at stops.
+    for stop in stops:
+        stop["routes"] = []
+    for route_key, route in routes.items():
+        for stop_i in route["stops"]:
+            stops[stop_i]["routes"].append(route_key)
+    for stop in stops:
+        stop["routes"].sort()
 
     stop_modes = defaultdict(set)
     for route in routes.values():
@@ -10176,13 +10293,19 @@ function legEndStopIndex(leg) {
 
 function stopChainDistanceMeters(leg) {
     let result = 0;
+    let previousEnd = null;
 
     for (const part of legParts(leg)) {
+        const first = part.direction.stops[part.startPos];
+        if (previousEnd !== null) {
+            result += stopDistanceMeters(previousEnd, first);
+        }
         for (let pos = part.startPos; pos < part.endPos; ++pos) {
             const a = part.direction.stops[pos];
             const b = part.direction.stops[pos + 1];
             result += stopDistanceMeters(a, b);
         }
+        previousEnd = part.direction.stops[part.endPos];
     }
 
     return result;
@@ -10205,8 +10328,13 @@ function legDistanceMeters(leg) {
     const mode = route ? (route.mode || route.route) : "bus";
     const factor = MODE_DISTANCE_FACTORS[mode] ?? 1.20;
     let distance = 0;
+    let previousEnd = null;
 
     for (const part of legParts(leg)) {
+        const first = part.direction.stops[part.startPos];
+        if (previousEnd !== null) {
+            distance += stopDistanceMeters(previousEnd, first) * factor;
+        }
         const edges = part.direction.edge_meters || [];
         for (let pos = part.startPos; pos < part.endPos; ++pos) {
             const mapped = edges[pos];
@@ -10218,6 +10346,7 @@ function legDistanceMeters(leg) {
                 distance += stopDistanceMeters(a, b) * factor;
             }
         }
+        previousEnd = part.direction.stops[part.endPos];
     }
     return distance;
 }
@@ -10225,12 +10354,15 @@ function legDistanceMeters(leg) {
 function legEstimatedMinutes(leg) {
     const distance = legDistanceMeters(leg);
     const speed = routeSpeedMetersPerMin(leg.routeKey);
-
+    // Count same-line terminal dwell in final itinerary metrics too, not
+    // only in the RAPTOR scan (otherwise summaries understate travel time).
+    const terminalMinutes = legParts(leg).reduce(
+        (total, part) => total + (part.terminalMinutes || 0), 0);
     return {
         distance: distance,
         minutes:
             distance / speed +
-            leg.rideStops * STOP_DELAY_MIN
+            leg.rideStops * STOP_DELAY_MIN + terminalMinutes
     };
 }
 
@@ -10644,6 +10776,10 @@ function filterReasonableItineraries(itineraries) {
 }
 
 function relationKey(direction) {
+    // Distinguish clipped variants of the same OSM relation.
+    if (direction.direction_id !== undefined && direction.direction_id !== null) {
+        return String(direction.direction_id);
+    }
     if (
         direction.relation_id !== null &&
         direction.relation_id !== undefined
@@ -12135,10 +12271,88 @@ function addReachableRouteSegment(routeSegments, segment) {
     });
 }
 
+// OSM describes route topology, not vehicle blocks. The reachability model
+// allows *estimated* same-line terminal turnaround only for an unambiguous
+// reciprocal pair of directions sharing a corridor and both endpoints.
+// Explicit roundtrip=yes with coincident endpoints is also a loop. None of
+// these static inferences establishes a scheduled in-seat GTFS block transfer.
+const routeContinuationCache = new WeakMap();
+const ALLOW_INFERRED_THROUGH_SERVICE = @@INFER_THROUGH_SERVICE@@;
+const LOOP_TERMINAL_RADIUS_M = 180.0;
+const LOOP_CORRIDOR_RADIUS_M = 130.0;
+const LOOP_TURNAROUND_MIN = 3.0;
+
+function directionHasSharedCorridor(a, b) {
+    const found = [];
+    for (const aStop of a.stops.slice(1, -1)) {
+        if (!b.stops.slice(1, -1).some(bStop =>
+            stopDistanceMeters(aStop, bStop) <= LOOP_CORRIDOR_RADIUS_M)) {
+            continue;
+        }
+        if (found.every(old =>
+            stopDistanceMeters(old, aStop) > LOOP_CORRIDOR_RADIUS_M)) {
+            found.push(aStop);
+            if (found.length >= 3) return true;
+        }
+    }
+    return false;
+}
+
 function routeDirectionContinuations(route) {
-    // A route_master groups route variants; it never proves a through trip.
-    // Without trip-level data, every OSM direction must terminate normally.
-    return new Map();
+    if (!route) return new Map();
+    const cached = routeContinuationCache.get(route);
+    if (cached) return cached;
+    const directions = route.directions || [];
+    const result = new Map();
+    const surface = ["bus", "tram", "trolleybus"].includes(route.mode || route.route);
+    if (!surface || !ALLOW_INFERRED_THROUGH_SERVICE) {
+        routeContinuationCache.set(route, result);
+        return result;
+    }
+    for (const arriving of directions) {
+        const a = arriving.stops || [];
+        if (a.length < 2) continue;
+        const last = a[a.length - 1];
+        const selfLoop = String(arriving.roundtrip || "").toLowerCase() === "yes";
+        const sameStopLoop = a[0] === last;
+        if ((selfLoop || sameStopLoop) &&
+            stopDistanceMeters(last, a[0]) <= LOOP_TERMINAL_RADIUS_M) {
+            result.set(relationKey(arriving), [{direction: arriving, terminalMinutes: 0}]);
+            continue;
+        }
+        // The two half-trips need reciprocal endpoints, an overlapping
+        // corridor and a unique partner. Merely equal ref or route_master
+        // is intentionally insufficient.
+        const candidates = directions.filter(departing => {
+            const b = departing.stops || [];
+            return departing !== arriving && b.length >= 4 && a.length >= 4 &&
+                arriving.relation_id !== departing.relation_id &&
+                stopDistanceMeters(last, b[0]) <= LOOP_TERMINAL_RADIUS_M &&
+                stopDistanceMeters(a[0], b[b.length - 1]) <= LOOP_TERMINAL_RADIUS_M &&
+                directionHasSharedCorridor(arriving, departing);
+        });
+        if (candidates.length === 1) {
+            const other = candidates[0];
+            const reverseCandidates = directions.filter(test => {
+                const b = test.stops || [];
+                return test !== other && b.length >= 4 &&
+                    test.relation_id !== other.relation_id &&
+                    stopDistanceMeters(
+                        other.stops[other.stops.length - 1], b[0]
+                    ) <= LOOP_TERMINAL_RADIUS_M &&
+                    stopDistanceMeters(other.stops[0], b[b.length - 1]) <= LOOP_TERMINAL_RADIUS_M &&
+                    directionHasSharedCorridor(other, test);
+            });
+            if (reverseCandidates.length === 1 && reverseCandidates[0] === arriving) {
+                result.set(relationKey(arriving), [{
+                    direction: other,
+                    terminalMinutes: LOOP_TURNAROUND_MIN
+                }]);
+            }
+        }
+    }
+    routeContinuationCache.set(route, result);
+    return result;
 }
 
 function cloneRouteLegParts(parts) {
@@ -12277,7 +12491,8 @@ function routeLegsFromBoard(routeKey, startDirection, startPos) {
         const nextDirections =
             continuations.get(relationKey(state.direction)) || [];
 
-        for (const nextDirection of nextDirections) {
+        for (const next of nextDirections) {
+            const nextDirection = next.direction;
             if (!nextDirection.stops || nextDirection.stops.length === 0) {
                 continue;
             }
@@ -12285,27 +12500,31 @@ function routeLegsFromBoard(routeKey, startDirection, startPos) {
             const nextStateKey = relationKey(nextDirection) + ":0";
             const previous = bestStateMinutes.get(nextStateKey);
 
-            if (
-                previous !== undefined &&
-                previous <= state.rideMinutes + EPSILON
-            ) {
+            const connectingDistance = stopDistanceMeters(
+                state.direction.stops[state.pos], nextDirection.stops[0]
+            ) * MODE_DISTANCE_FACTORS[route.mode || route.route];
+            const connectingMinutes = connectingDistance /
+                routeSpeedMetersPerMin(routeKey);
+            const nextMinutes = state.rideMinutes + connectingMinutes +
+                next.terminalMinutes;
+            if (previous !== undefined && previous <= nextMinutes + EPSILON) {
                 continue;
             }
-
             const nextParts = cloneRouteLegParts(state.parts);
             nextParts.push({
                 routeKey: routeKey,
                 direction: nextDirection,
                 startPos: 0,
-                endPos: 0
+                endPos: 0,
+                terminalMinutes: next.terminalMinutes
             });
-            bestStateMinutes.set(nextStateKey, state.rideMinutes);
+            bestStateMinutes.set(nextStateKey, nextMinutes);
             queue.push({
                 direction: nextDirection,
                 pos: 0,
                 parts: nextParts,
                 rideStops: state.rideStops,
-                rideMinutes: state.rideMinutes
+                rideMinutes: nextMinutes
             });
         }
     }
@@ -12572,13 +12791,14 @@ function extendRideLeg(leg, direction, nextPos) {
     };
 }
 
-function continueRideLeg(leg, nextDirection) {
+function continueRideLeg(leg, nextDirection, terminalMinutes=0) {
     const parts = cloneLegParts(leg.parts);
     parts.push({
         routeKey: leg.routeKey,
         direction: nextDirection,
         startPos: 0,
-        endPos: 0
+        endPos: 0,
+        terminalMinutes: terminalMinutes
     });
 
     return {
@@ -13046,8 +13266,9 @@ function* scanRaptorRoundSteps(
         const route = routes[state.routeKey];
         const continuations = routeDirectionContinuations(route);
 
-        for (const nextDirection of
+        for (const next of
             continuations.get(relationKey(state.direction)) || []) {
+            const nextDirection = next.direction;
             if (
                 !nextDirection.stops ||
                 nextDirection.stops.length === 0
@@ -13055,13 +13276,23 @@ function* scanRaptorRoundSteps(
                 continue;
             }
 
+            const gapMeters = stopDistanceMeters(
+                currentStopIndex, nextDirection.stops[0]
+            ) * MODE_DISTANCE_FACTORS[route.mode || route.route];
+            const gapMinutes = gapMeters / routeSpeedMetersPerMin(state.routeKey) +
+                next.terminalMinutes;
+            if (state.elapsedMinutes + gapMinutes >
+                maxTravelMinutes + 0.00001) continue;
             addRaptorOnboardState(nodeLabels, queue, {
                 ...state,
                 direction: nextDirection,
                 pos: 0,
+                elapsedMinutes: state.elapsedMinutes + gapMinutes,
+                transitMeters: state.transitMeters + gapMeters,
                 currentLeg: continueRideLeg(
                     state.currentLeg,
-                    nextDirection
+                    nextDirection,
+                    next.terminalMinutes
                 )
             });
         }
@@ -14426,7 +14657,8 @@ def pack_route_geometry_payload(data):
         for direction in route["directions"]:
             compact_direction = dict(direction)
             compact_direction.pop("geometry_source", None)
-            compact_direction.pop("roundtrip", None)
+            # Keep roundtrip=yes! The browser needs it for topology-based
+            # circle continuation; the old compact payload dropped it.
             geometry = direction.get("geometry") or {}
             kind = geometry.get("type")
             if kind in ("LineString", "MultiLineString"):
@@ -14575,6 +14807,9 @@ def build_html(
         "@@MODE_RAIL@@": json.dumps(mode_names["rail"]),
         "@@MODE_HINT@@": json.dumps(mode_hint),
         "@@WALK_SPEED_JS@@": f"{walk_speed:.6f}",
+        "@@INFER_THROUGH_SERVICE@@": (
+            "true" if data.get("through_service_policy") == "estimated" else "false"
+        ),
     }
     script = script.replace("@@WALK_SPEED@@", "@@WALK_SPEED_JS@@")
     for key, value in replacements.items():
@@ -14616,7 +14851,67 @@ def build_html(
 sys.dont_write_bytecode = True
 
 
+def test_surface_route_pairing():
+    """Topology regression: no numeric or named-route special cases."""
+
+    def point(idx, off=0):
+        return {
+            "id": f"n{idx}_{off}",
+            "lon": 37.0 + idx * 0.005,
+            "lat": 55.0 + off * 0.00005,
+            "name": f"Stop {idx}",
+        }
+
+    items = [point(i) for i in range(6)] + [point(i, 1) for i in range(6)]
+    stop_index = {item["id"]: i for i, item in enumerate(items)}
+
+    def feat(ref, relation, ids, mode="bus", key=None):
+        return {
+            "type": "Feature",
+            "properties": {
+                "feature_type": "route",
+                "mode": mode,
+                "ref": ref,
+                "network": "Example Transit",
+                "relation_id": relation,
+                "route_key": key or f"{mode}:relation:{relation}",
+                "stops": ids,
+            },
+        }
+
+    forward = [f"n{i}_0" for i in range(6)]
+    backward = [f"n{i}_1" for i in range(5, -1, -1)]
+    pair = [feat("ABC", 111, forward), feat("ABC", 222, backward)]
+    paired = pair_surface_route_directions(pair, stop_index, items)
+    assert len(paired) == 1
+    assert pair[0]["properties"]["route_key"] == pair[1]["properties"]["route_key"]
+    assert pair[0]["properties"]["route_key"].startswith("bus:paired:")
+    # Identical route number alone is not evidence of pairing.
+    wrong = [feat("ABC", 111, forward), feat("OTHER", 222, backward)]
+    assert not pair_surface_route_directions(wrong, stop_index, items)
+    # Rail variants must never be paired by this surface approximation.
+    train = [feat("ABC", 111, forward, "train"), feat("ABC", 222, backward, "train")]
+    assert not pair_surface_route_directions(train, stop_index, items)
+    # Opposite termini, but no shared corridor.
+    detour = [
+        feat("ABC", 111, forward),
+        feat("ABC", 222, [backward[0], backward[1], "n5_1", "n5_1", backward[-1]]),
+    ]
+    assert not pair_surface_route_directions(detour, stop_index, items)
+    # Multiple equally plausible branches: never guess a continuation.
+    ambiguous = [
+        feat("ABC", 111, forward),
+        feat("ABC", 222, backward),
+        feat("ABC", 333, backward),
+    ]
+    assert not pair_surface_route_directions(ambiguous, stop_index, items)
+    print(
+        "[test] PASS: universal reciprocal pairing, unique endpoints, corridor guards"
+    )
+
+
 def run_self_tests():
+    test_surface_route_pairing()
     """Offline regressions for stations, rail identity, and transfers."""
     transfer_input = re.search(
         r'<input\s+id="transfer-count"(?P<attrs>.*?)>',
@@ -15280,9 +15575,15 @@ def inspect_route_ref(feature_collection, requested_ref):
         for item in audit.get("route_master_mode_conflicts", [])
         if normalized_route_ref(item.get("ref")) == requested
     ]
+    stop_names = {
+        feature["properties"]["stop_id"]: feature["properties"].get("name")
+        for feature in feature_collection.get("features", [])
+        if feature.get("properties", {}).get("feature_type") == "stop"
+    }
     print("[route-inspect] reference:", requested_ref)
     print("[route-inspect] retained directions:", len(routes))
     for route in routes:
+        member_ids = route.get("stops") or []
         selected = {
             key: route.get(key)
             for key in (
@@ -15296,7 +15597,11 @@ def inspect_route_ref(feature_collection, requested_ref):
                 "geometry_source",
             )
         }
-        print("[route-inspect] direction:", json.dumps(selected, ensure_ascii=True))
+        selected["stop_count"] = len(member_ids)
+        selected["first_stop"] = stop_names.get(member_ids[0]) if member_ids else None
+        selected["last_stop"] = stop_names.get(member_ids[-1]) if member_ids else None
+        selected["roundtrip_tag"] = route.get("roundtrip")
+        print("[route-inspect] direction:", json.dumps(selected, ensure_ascii=False))
     print("[route-inspect] quarantined:", len(rejected))
     for item in rejected:
         print("[route-inspect] rejected:", json.dumps(item, ensure_ascii=True))
@@ -15323,6 +15628,13 @@ def parse_args():
         help="Run standalone station/transfer regression tests",
     )
     parser.add_argument("--cache-dir", default="cache")
+    parser.add_argument(
+        "--through-service-policy",
+        choices=("estimated", "strict"),
+        default="estimated",
+        help="Estimated: infer same-line reciprocal terminal turnarounds. "
+        "Strict: never infer in-seat continuation between OSM relations.",
+    )
     parser.add_argument(
         "--inspect-route-ref",
         metavar="REF",
@@ -15521,6 +15833,8 @@ def main():
     phase_started = time.monotonic()
     print("[build] START transport index", flush=True)
     index = build_index(feature_collection, args.grid_size)
+    index["through_service_policy"] = args.through_service_policy
+    print(f"[routes] terminal continuity policy: {args.through_service_policy}")
     print(f"indexed stops: {len(index['stops'])}")
     print(f"indexed routes: {len(index['routes'])}")
     print(f"grid cells: {len(index['grid'])}")
