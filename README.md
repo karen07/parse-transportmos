@@ -1,46 +1,234 @@
-# Moscow Transport Map v0.12.3 - ASCII interface strings
+# Moscow Transport Reachability Map
 
-## Changes since v0.12.2
+A Python generator for an interactive Moscow public transport reachability map. It
+extracts routes and stops from OpenStreetMap, builds a pedestrian network, and
+produces a single HTML page to explore where you can travel by bus, tram,
+trolleybus, metro, MCC, MCD, and suburban trains, with walking and up to two
+transfers. Travel times are estimates, not timetable-based predictions.
 
-- Replaced escaped Russian labels in the generated JavaScript with plain
-  English ASCII labels: `Bus`, `Tram`, `Trolleybus`, `Metro`, `MCC`, and
-  `MCD + Trains`, plus `Train` and `MCD` in the route details.
-- Replaced the localized mode heading/hint with simple English text.
-- Removed the HTML numeric entity -> Unicode -> JavaScript-escaped-string
-  machinery previously used solely for these interface labels.
-- Removed the Cyrillic example from a generated JavaScript comment.
-- Added a regression assertion that the JavaScript templates do not contain
-  Unicode escape sequences for static interface text.
-- Preserved the OSM names, including Russian names. They are inside the
-  existing compressed Base64 transport payload, not JavaScript source text.
-- All routing, station access, geometry, caches and default controls are
-  unchanged from v0.12.2. The default is still zero transfers, maximum two;
-  the combined MCD + Trains switch is off by default.
+## Описание
 
-## Use
+Генератор интерактивной карты транспортной доступности Москвы на Python. Он
+извлекает маршруты и остановки из OpenStreetMap, строит пешеходную сеть и
+создаёт единый HTML-файл, в котором можно исследовать доступные поездки на
+автобусах, трамваях, троллейбусах, метро, МЦК, МЦД и пригородных поездах
+с учётом пеших переходов и максимум двух пересадок. Время поездки оценивается
+приближённо, без использования расписаний.
 
+Проект позволяет выбрать начальную точку на карте и увидеть, какие остановки
+и маршруты достижимы при заданных ограничениях. Для выбранного пункта
+назначения можно построить варианты поездки с пешеходными участками и
+пересадками. Основой служит топология OpenStreetMap, а не заранее составленный
+список московских маршрутов.
+
+## Содержание
+
+- [Требования](#%D1%82%D1%80%D0%B5%D0%B1%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F)
+- [Быстрый старт](#%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9-%D1%81%D1%82%D0%B0%D1%80%D1%82)
+- [Возможности](#%D0%B2%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D0%B8)
+- [Использование](#%D0%B8%D1%81%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5)
+- [Архитектура и реализация](#%D0%B0%D1%80%D1%85%D0%B8%D1%82%D0%B5%D0%BA%D1%82%D1%83%D1%80%D0%B0-%D0%B8-%D1%80%D0%B5%D0%B0%D0%BB%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F)
+- [Тестирование](#%D1%82%D0%B5%D1%81%D1%82%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5)
+- [Ограничения](#%D0%BE%D0%B3%D1%80%D0%B0%D0%BD%D0%B8%D1%87%D0%B5%D0%BD%D0%B8%D1%8F)
+
+## Требования
+
+- Python 3.
+- [`osmium`](https://pypi.org/project/osmium/) (pyosmium 4.x) для чтения
+  и объединения файлов OSM PBF.
+- Доступ к сети при первой загрузке данных OSM и геометрии МКАД.
+- Современный браузер с поддержкой `DecompressionStream('gzip')`.
+
+Установка Python-зависимости:
+
+```bash
+python3 -m pip install -U osmium
 ```
-tar -xf transport-map-osmlab-v0.12.3.tar
-./build-transport-map.py --self-test
-./build-transport-map.py --report-json report.json
-./format-go
+
+Скрипт не требует отдельного backend-сервера для вычисления маршрутов:
+после генерации расчёты выполняются в браузере. Однако при открытии карты
+нужна загрузка Leaflet, MapLibre GL, интеграционного адаптера и картографической
+подложки из внешних источников.
+
+## Быстрый старт
+
+Запустите генератор `build-transport.py` из каталога проекта:
+
+```bash
+python3 build-transport.py --cache-dir cache -o routes.html
 ```
 
-The standalone output `routes.html` is emitted as ASCII and includes one
-self-contained compressed OSM payload. Russian station names remain available
-at runtime after the browser decompresses the payload.
+При первом запуске генератор загрузит региональные PBF, подготовит транспортные
+и пешеходные данные и сформирует HTML. Повторные сборки могут использовать кеш.
+Большие входные PBF и построение графов требуют времени и свободного места.
 
-This release targets Unicode introduced by JavaScript minification of static
-localized strings. It has not been run through the installed `minify` binary
-or against the full Moscow PBF in this environment. If `format-go` still
-reports non-ASCII after minification, inspect the actual changed characters
-rather than adding another blanket encoder.
+Для локального просмотра можно открыть `routes.html` в браузере или раздать
+каталог через простой HTTP-сервер:
 
-## Local verification
+```bash
+python3 -m http.server 8000
+```
 
-- Python `--self-test`: pass.
-- Generated synthetic standalone HTML: ASCII-only, line length \<= 100.
-- Node.js `--check` on the generated JavaScript: pass.
-- Synthetic Cyrillic station name survives Base64/gzip and JSON decoding.
-- Real OSM PBFs, real `minify` executable and complete browser run were not
-  tested in this environment.
+После запуска сервера откройте `http://localhost:8000/routes.html`.
+
+## Возможности
+
+- **Разные виды транспорта:** автобус, трамвай, троллейбус, метро, МЦК,
+  МЦД и пригородные поезда. МЦД и другие пригородные поезда объединены в один
+  переключатель интерфейса, но остаются разными типами в модели данных.
+- **Транспортная доступность:** маршруты без пересадок, с одной или двумя
+  пересадками; ограничение общего расчётного времени поездки.
+- **Пешеходная доступность:** перемещения по графу пешеходных путей OSM,
+  с учётом разрешённого направления и ограничений доступа. Покрытие строится
+  вдоль доступных путей, а не в виде кругов вокруг остановок.
+- **Маршруты до точки:** выбор начальной точки одиночным щелчком и пункта
+  назначения двойным щелчком; отображение альтернатив поездки.
+- **Настройка модели:** выбор видов транспорта, максимального времени пешего
+  хода, числа пересадок, лимита времени поездки и прозрачности покрытия.
+- **Диагностика исходных данных:** отчёты по остановкам, геометрии,
+  несвязным участкам пешеходной сети и доступу к железнодорожным станциям.
+- **Кеширование:** повторное использование скачанных PBF, извлечённых
+  маршрутов, пешеходного графа и заранее вычисленных пересадок.
+- **Статический результат:** HTML, CSS, JavaScript и сжатые данные карты
+  объединены в один выходной файл. Для подложки и библиотек используются
+  внешние ресурсы, поэтому это не полностью автономное офлайн-приложение.
+
+## Использование
+
+1. Щёлкните по карте, чтобы выбрать точку отправления.
+1. Настройте виды транспорта. По умолчанию включён наземный транспорт;
+   метро, МЦК и МЦД с пригородными поездами выключены.
+1. Выберите допустимое время пешего хода (1-15 минут), количество пересадок
+   (0-2) и максимальное время поездки (по умолчанию 60 минут).
+1. Исследуйте достижимые остановки, маршруты и пешеходные пути.
+1. Дважды щёлкните по точке назначения, чтобы увидеть варианты поездки;
+   кнопка `Reset` сбрасывает начальную точку и маршрут.
+
+Значение по умолчанию для пешего хода - 5 минут при модельной скорости
+80 м/мин. Доступность и время рассчитываются на основе OSM и оценочных
+скоростей движения, а не расписаний, пробок или текущего движения транспорта.
+
+### Основные параметры
+
+| Параметр | Назначение |
+| --- | --- |
+| `-o`, `--output` | Путь к HTML (`routes.html` по умолчанию). |
+| `--cache-dir` | Каталог кеша (`cache`). |
+| `--update` | Заново скачать региональные исходники и обновить зависимые данные. |
+| `--rebuild` | Пересобрать транспортный extract без принудительной загрузки PBF. |
+| `--rebuild-walking` | Пересобрать пешеходный граф. |
+| `--rebuild-transfers` | Пересчитать пешие пересадки между остановками. |
+| `--walk-minutes` | Начальное ограничение пешего хода, в минутах (`5`). |
+| `--walk-speed` | Модельная скорость ходьбы, м/мин (`80`). |
+| `--circle-opacity` | Начальная прозрачность покрытия в интерфейсе, 0-100 (`50`). |
+| `--mkad-buffer-km` | Буфер от МКАД, 0-50 км (`10`). |
+| `--through-service-policy` | Оценочное продолжение рейса на конечной (`estimated`) или строгий режим (`strict`). |
+| `--report-json` | JSON-отчёт об извлечении и качестве данных. |
+| `--dump-geojson` | Выгрузка нормализованных маршрутов и остановок. |
+| `--self-test` | Встроенные регрессионные тесты. |
+
+Полный список флагов, включая диагностику станций и тестовые фикстуры:
+
+```bash
+python3 build-transport.py --help
+```
+
+## Архитектура и реализация
+
+### Источники данных и область покрытия
+
+Транспортные данные загружаются из региональных выгрузок OSMlab:
+
+- [`RU-MOW`](https://www.osmlab.ru/regions/RU-MOW.pbf) - Москва.
+- [`RU-MOS`](https://www.osmlab.ru/regions/RU-MOS.pbf) - Московская область.
+
+Генератор объединяет PBF по идентификаторам OSM-объектов и удаляет дубликаты.
+По умолчанию транспортная сеть ограничивается реальным полигоном МКАД и
+буфером **10 км**, а не окружностью вокруг центра города. Граница берётся из
+[`moscow-geo`](https://github.com/karen07/moscow-geo).
+
+Размер буфера можно изменить:
+
+```bash
+python3 build-transport.py --mkad-buffer-km 20 -o routes.html
+```
+
+Также доступны `--mkad-geojson` для локального GeoJSON и `--no-mkad-clip`
+для отключения ограничения. Важно: исходные региональные выгрузки и конечная
+область покрытия - разные вещи.
+
+### Как устроена обработка
+
+1. **Загрузка и объединение OSM.** Скачивание с повторными попытками и
+   возобновлением HTTP Range, объединение регионов и построение кеша.
+1. **Извлечение маршрутов.** Разбор OSM `route` и `route_master`, остановок,
+   платформ и последовательностей геометрии. Отдельно учитываются направления
+   маршрутов и признаки МЦК/МЦД.
+1. **Пространственная фильтрация.** Обрезка геометрии по области МКАД с
+   буфером. Если маршрут выходит за границу, его участки не соединяются
+   искусственным переходом через исключённую территорию.
+1. **Пешеходный граф.** Построение сети по доступным OSM-путям, обработка
+   платформ, входов и `stop_area`, поиск связей между остановками.
+1. **Транспортный индекс.** Подготовка остановок, направлений и переходов
+   для поиска достижимости в браузере (алгоритм в стиле RAPTOR).
+1. **Упаковка HTML.** Компактное представление геометрии и графов,
+   gzip-сжатие транспортных данных, Base64-встраивание в итоговую страницу.
+   Исполняемый JavaScript остаётся обычным текстом.
+
+Система старается не создавать несуществующие пешеходные или транспортные
+соединения из-за близости объектов на карте. Некоторые пересадки могут быть
+оценочными, например на основании `stop_area_group`; это не подтверждение
+физически доступного перехода.
+
+## Тестирование
+
+Запуск встроенных тестов:
+
+```bash
+python3 build-transport.py --self-test
+```
+
+Сохранение отчёта вместе с генерацией HTML:
+
+```bash
+python3 build-transport.py \
+  --cache-dir cache \
+  --report-json report.json \
+  -o routes.html
+```
+
+Исследование конкретной железнодорожной станции:
+
+```bash
+python3 build-transport.py \
+  --cache-dir cache \
+  --diagnose-station 'Москворечье' \
+  --diagnose-only
+```
+
+Диагностика формирует JSON и GeoJSON с подробностями привязки станций к
+пешеходной сети; доступны флаги `--diagnose-output`, `--diagnose-geojson` и
+`--diagnose-radius`. Для проверки всех железнодорожных остановок предусмотрен
+`--audit-rail-access report.json`.
+
+Отладочный `--allow-moskvorechye-private` разрешает несколько явно указанных
+`access=private` путей **только для эксперимента**. Он не доказывает, что
+по ним можно ходить в действительности, и не предназначен для обычной сборки.
+
+## Ограничения
+
+- Маршруты, геометрия, пешеходные соединения и качество результата зависят от
+  полноты и актуальности OpenStreetMap.
+- В модели используются оценочные скорости, фиксированные ожидания транспорта
+  и задержки на остановках. Она не учитывает реальные расписания, интервалы,
+  пробки, задержки и закрытия.
+- Неполные OSM-отношения и недостающие пути могут приводить к пропущенным
+  остановкам, разрывам маршрутов или недоступным пересадкам.
+- Режим `estimated` допускает оценочное продолжение на конечных; для более
+  консервативной модели используйте `--through-service-policy strict`.
+- Создаётся статический снимок данных на момент сборки, а не сервис
+  мониторинга общественного транспорта в реальном времени.
+
+## История изменений
+
+Замечания о выпуске v0.12.3 сохранены в [CHANGELOG.md](CHANGELOG.md).
