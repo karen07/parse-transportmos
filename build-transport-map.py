@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Moscow transport reachability: one readable Python source, one generated HTML.
+"""Moscow transport reachability, CSP-safe static-site generator.
 
-OSM extraction, graph construction, diagnostics and page source are self-contained.
-Generated executable JavaScript is plain text; only OSM data is gzip-compressed.
+OSM extraction, graph construction, diagnostics and web sources are self-contained.
+Build produces HTML, CSS, JS, data worker, and separately downloaded gzip data.
 """
 
 import argparse
@@ -20,6 +20,7 @@ import urllib.request
 from array import array
 from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     import osmium
@@ -27,16 +28,15 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.13.0"
+PROJECT_VERSION = "0.15.4"
 
 
 # OSM extraction and normalization
 
 EARTH_RADIUS_M = 6371000.0
 
-
-# OSMlab publishes Moscow city and Moscow Oblast as separate regional extracts.
-# RU-MOW is Moscow city, RU-MOS is Moscow Oblast (not interchangeable).
+# OSMlab provides separate extracts for Moscow city and Moscow Oblast.
+# Restore original names to reuse the OSMlab cache without mixing OSM France data.
 SOURCE_REGIONS = (
     ("RU-MOW", "https://www.osmlab.ru/regions/RU-MOW.pbf"),
     ("RU-MOS", "https://www.osmlab.ru/regions/RU-MOS.pbf"),
@@ -234,9 +234,16 @@ def download_source(url, source_path):
             print(f"Downloaded: {source_path} ({downloaded // 1048576} MiB)")
             return
         except (OSError, urllib.error.URLError, RuntimeError) as error:
-            if isinstance(error, urllib.error.HTTPError) and error.code == 416:
-                part.unlink(missing_ok=True)
-                metadata_path.unlink(missing_ok=True)
+            if isinstance(error, urllib.error.HTTPError):
+                if error.code == 416:
+                    part.unlink(missing_ok=True)
+                    metadata_path.unlink(missing_ok=True)
+                # A permanent HTTP error will not be fixed by five retries.
+                if error.code in (400, 401, 403, 404, 410):
+                    raise RuntimeError(
+                        f"OSM source rejected the request (HTTP {error.code}): {url}. "
+                        "Check the URL or use a different OSM mirror."
+                    ) from error
             if attempt == 5:
                 raise RuntimeError(f"Failed to download {url}: {error}") from error
             print(f"Download retry {attempt}/5 for {url}: {error}", flush=True)
@@ -335,8 +342,8 @@ def merge_osm_pbf_files(sources, destination):
     return written
 
 
-def merge_osmlab_sources(cache_dir, sources, rebuild=False):
-    """Cache a sorted, ID-deduplicated union of the two OSMlab regions."""
+def merge_regional_sources(cache_dir, sources, rebuild=False):
+    """Cache a sorted, ID-deduplicated union of the two OSM regional extracts."""
     target = cache_dir / MERGED_SOURCE_NAME
     manifest = cache_dir / MERGED_MANIFEST_NAME
     signature = source_signature(sources)
@@ -404,13 +411,13 @@ def build_cache(cache_dir, update=False, rebuild=False):
     for region, url in SOURCE_REGIONS:
         source = cache_dir / f"{region}.osm.pbf"
         if update or not source.is_file():
-            print(f"Downloading OSMlab region {region}: {url}", flush=True)
+            print(f"Downloading OSM region {region}: {url}", flush=True)
             download_source(url, source)
         else:
             print(f"Using cached: {source}")
         sources.append(source)
 
-    source, source_changed = merge_osmlab_sources(cache_dir, sources)
+    source, source_changed = merge_regional_sources(cache_dir, sources)
     transport_pbf = cache_dir / TRANSPORT_CACHE_NAME
     if update or rebuild or source_changed or not transport_pbf.is_file():
         print("Selecting all bus/tram/trolleybus networks and urban rail routes...")
@@ -5782,9 +5789,7 @@ PAGE_HTML = r"""<!doctype html>
     href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
 >
 
-<style>
-@@CSS@@
-</style>
+<link rel="stylesheet" href="@@PAGE_CSS@@">
 </head>
 
 <body>
@@ -5796,6 +5801,34 @@ PAGE_HTML = r"""<!doctype html>
 >
 
 <div id="map" aria-label="Transport reachability map"></div>
+<div id="boot-overlay" role="status" aria-live="polite" aria-atomic="true">
+    <div id="boot-card">
+        <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
+        <h1>Building your map<span class="boot-blink">_</span></h1>
+        <div id="boot-road" aria-hidden="true">
+            <canvas id="boot-highway" width="800" height="400"></canvas>
+            <div class="boot-road-caption">
+                <span>ROUTE // MOSCOW NETWORK</span>
+                <span class="boot-road-live">LIVE DATA</span>
+            </div>
+        </div>
+        <div id="boot-stage">INITIALIZING</div>
+        <div class="boot-progress-line">
+            <span id="boot-bars">[........................................]</span>
+            <b id="boot-percent">--%</b>
+        </div>
+        <div id="boot-details">Connecting to the data source...</div>
+        <div id="boot-error" hidden>
+            <p id="boot-error-message"></p>
+            <button type="button" id="boot-retry">Reload page</button>
+        </div>
+        <div class="boot-credit">Night Highway visual theme inspired by
+            <a href="https://ascii.rest/night-highway/" target="_blank"
+               rel="noopener noreferrer">ascii.rest</a>.
+            Local Canvas animation; no external animation files.
+        </div>
+    </div>
+</div>
 
 <aside id="info" aria-label="Transport reachability controls">
     <label
@@ -6148,12 +6181,7 @@ PAGE_HTML = r"""<!doctype html>
     </div>
 </div>
 
-<script id="transport-payload" type="application/octet-stream">
-@@PAYLOAD_LINES@@
-</script>
-<script>
-@@APP_SCRIPT@@
-</script>
+<script src="@@PAGE_JS@@" defer></script>
 </body>
 </html>
 """
@@ -7463,12 +7491,136 @@ MAP_CSS = r"""
 }
 """
 
-MAP_JS = r"""
-// The gzip payload is text in a non-executable HTML script node, not a JS array.
-const TRANSPORT_DATA_BASE64 = document.getElementById(
-    "transport-payload"
-).textContent.replace(/\s+/g, "");
+LOADER_CSS = r"""
+/* Local Night Highway loading scene, inspired by https://ascii.rest/night-highway/.
+ * It never requests assets from ascii.rest and needs no extra CSP origins. */
+#boot-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100000;
+    display: grid;
+    place-items: center;
+    padding: clamp(12px, 3vh, 28px);
+    background: radial-gradient(ellipse at 50% 35%, #1b203d 0%, #080c17 68%);
+    color: #e8eafa;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    box-sizing: border-box;
+}
+#boot-overlay[hidden] { display: none; }
+#boot-card {
+    width: min(880px, 100%);
+    padding: clamp(14px, 2.8vw, 30px);
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid #49415b;
+    border-radius: 13px;
+    background: linear-gradient(150deg, rgba(13,16,34,.97), rgba(17,15,29,.96));
+    box-shadow: 0 38px 110px #000a, 0 0 95px #4b295c18;
+    text-align: center;
+}
+.boot-eyebrow {
+    color: #c3a2cd;
+    font-size: 11px;
+    letter-spacing: .23em;
+    text-transform: uppercase;
+}
+#boot-card h1 {
+    color: #f6e5ec;
+    font-size: clamp(18px, 3.3vw, 27px);
+    font-weight: 500;
+    letter-spacing: .08em;
+    margin: 12px 0 20px;
+}
+.boot-blink { color: #f59a78; animation: boot-blink 1s steps(1) infinite; }
+@keyframes boot-blink { 50% { opacity: 0; } }
+#boot-road {
+    width: 100%;
+    aspect-ratio: 2 / 1;
+    max-height: min(52vh, 410px);
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, #0a0d25 0%, #49335a 43%,
+                                #ee865b 52%, #1c1728 54%, #070910 100%);
+    border: 1px solid #5c4960;
+    box-shadow: inset 0 0 90px #070a18a8, 0 0 28px #ee865c12;
+}
+#boot-highway {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: auto;
+}
+.boot-road-caption {
+    pointer-events: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 16px 16px 10px;
+    background: linear-gradient(0deg, #0c0c1dbb, transparent);
+    font-size: 10px;
+    color: #c9a9be;
+    letter-spacing: .1em;
+}
+.boot-road-live { color: #f3ac80; }
+.boot-road-live::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 8px;
+    background: #f6b76b;
+    box-shadow: 0 0 8px #f48b5a;
+}
+#boot-stage {
+    margin-top: clamp(12px, 2vh, 20px);
+    color: #f4bc9f;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: .16em;
+}
+.boot-progress-line {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 2px 8px;
+    color: #c08b9f;
+}
+#boot-bars {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: clamp(8px, 1.6vw, 14px);
+    letter-spacing: .07em;
+    color: #e99f82;
+}
+#boot-percent { color: #ffccab; font-size: 19px; min-width: 54px; }
+#boot-details {
+    color: #a9a4b9;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    min-height: 19px;
+}
+#boot-error { margin-top: 14px; color: #ffb1ae; overflow-wrap: anywhere; }
+#boot-retry {
+    cursor: pointer;
+    padding: 9px 18px;
+    border: 1px solid #f3ad96;
+    border-radius: 6px;
+    background: #402632;
+    color: #fff0e6;
+}
+.boot-credit { margin-top: 17px; font-size: 10px; color: #8f859b; }
+.boot-credit a { color: #d6aec7; }
+@media (prefers-reduced-motion: reduce) { .boot-blink { animation: none; } }
+@media (max-height: 680px) { #boot-card h1 { margin: 8px 0 12px; } }
+"""
 
+MAP_JS = r"""
 function loadExternalScript(url, isLoaded) {
     return new Promise((resolve, reject) => {
         if (isLoaded()) {
@@ -7498,8 +7650,12 @@ async function loadMapLibraries() {
         () => !!window.L
     );
     await loadExternalScript(
-        "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js",
+        "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl-csp.js",
         () => !!window.maplibregl
+    );
+    // v4 CSP bundle with a same-origin classic Worker: no blob: exception.
+    window.maplibregl.setWorkerUrl(
+        new URL("@@MAPLIBRE_WORKER@@", document.baseURI).href
     );
     await loadExternalScript(
         "https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/" +
@@ -7686,29 +7842,39 @@ async function loadTransportData() {
         };
         const xy = reader(decode(graph.nodes));
         const arcs = reader(decode(graph.edges));
-        const nodes = new Array(graph.node_count);
-        const edges = new Array(graph.edge_count);
+        // Packed, transferable arrays avoid cloning millions of small JS arrays.
+        const nodeXY = new Int32Array(graph.node_count * 2);
+        const edgeAB = new Uint32Array(graph.edge_count * 2);
+        const edgeLengths = new Float64Array(graph.edge_count);
+        const edgeDirs = new Uint8Array(graph.edge_count);
         let x = 0, y = 0, previousA = 0;
-        for (let i = 0; i < nodes.length; i++) {
+        for (let i = 0; i < graph.node_count; i++) {
             x += xy.signed();
             y += xy.signed();
-            nodes[i] = [x / 10, y / 10];
+            nodeXY[2*i] = x;
+            nodeXY[2*i+1] = y;
         }
-        for (let i = 0; i < edges.length; i++) {
+        for (let i = 0; i < graph.edge_count; i++) {
             const a = previousA + arcs.signed();
             const b = a + arcs.signed();
             const length = arcs.unsigned() / 10;
             const direction = arcs.byte();
-            if (a < 0 || a >= nodes.length || b < 0 || b >= nodes.length) {
+            if (a < 0 || a >= graph.node_count || b < 0 || b >= graph.node_count) {
                 throw new Error("Walking graph edge references invalid node");
             }
-            edges[i] = [a, b, length, direction];
+            edgeAB[2*i] = a;
+            edgeAB[2*i+1] = b;
+            edgeLengths[i] = length;
+            edgeDirs[i] = direction;
             previousA = a;
         }
         if (!xy.complete() || !arcs.complete()) {
             throw new Error("Trailing walking graph data");
         }
-        data.walking = {nodes: nodes, edges: edges};
+        data.walking = {
+            nodeXY, edgeAB, edgeLengths, edgeDirs,
+            nodeCount: graph.node_count, edgeCount: graph.edge_count
+        };
     }
     return data;
 }
@@ -7716,9 +7882,10 @@ async function loadTransportData() {
 (async () => {
 const bootStarted = performance.now();
 console.info("[map] BOOT START");
-await loadMapLibraries();
+// Library scripts and large compressed network payload load concurrently.
+const [data] = await Promise.all([loadTransportData(), loadMapLibraries()]);
+bootPhase("RENDERING MAP", "Preparing controls and map layers...");
 console.info("[map] BOOT libraries", Math.round(performance.now() - bootStarted), "ms");
-const data = await loadTransportData();
 console.info("[map] BOOT data decoded", Math.round(performance.now() - bootStarted),
     "ms");
 
@@ -7911,7 +8078,9 @@ function profileUpdateStatus(p) {
     if (!p || p !== runProfile) return;
     const seconds = (profileElapsed(p) / 1000).toFixed(1);
     if (p.searchDone) {
-        timingStatus.textContent = "Rendering... " + seconds + " s";
+        timingStatus.textContent = "Results " +
+            (p.resultsReadyMs / 1000).toFixed(1) +
+            " s | Drawing... " + seconds + " s";
     } else {
         timingStatus.textContent = p.currentPhase + "... " + seconds + " s";
     }
@@ -7930,13 +8099,21 @@ function profileFinish(p) {
         const report = {
             version: "0.7.3", run: p.serial, settings: p.settings,
             totalWallMs: profileElapsed(p),
+            resultsReadyMs: p.resultsReadyMs,
+            graph: {
+                walkNodes: walkNodes.length,
+                walkEdges: walkEdges.length,
+                stops: stops.length,
+                routeKeys: Object.keys(routes).length
+            },
             phases: p.phases, cpuMs: p.cpu, frames: p.frames,
             firstVisibleMs: p.firstVisible,
             final: profileSnapshot(p), longTasks: p.longTasks
         };
         window.transportLastProfile = report;
-        timingStatus.textContent = "Complete in " +
-            (report.totalWallMs / 1000).toFixed(1) + " s";
+        timingStatus.textContent = "Results " +
+            (report.resultsReadyMs / 1000).toFixed(1) + " s | " +
+            "Fully drawn " + (report.totalWallMs / 1000).toFixed(1) + " s";
         console.info("[map] FULLY IDLE", report.totalWallMs + " ms");
         console.table(p.phases);
         console.info("[map] FINAL REPORT (copy window.transportLastProfile)", report);
@@ -7992,7 +8169,7 @@ function profileAbort(reason) {
 function profileBegin(token) {
     const p = {
         token, serial: ++runSerial, started: performance.now(),
-        finished: false, searchDone: false, wave: null,
+        finished: false, searchDone: false, resultsReadyMs: null, wave: null,
         finalFrame: null, currentPhase: "Preparing",
         active: {}, phases: [], cpu: {}, frames: {},
         evidenceEvents: 0, firstVisible: {},
@@ -8281,11 +8458,23 @@ function updateControls() {
 // Walk-only graph: actual OSM topology, never an Euclidean catchment disk.
 // Direction: 1=both, 2=a->b, 3=b->a, 5=stop access connector.
 const walking = data.walking;
-if (!walking || !walking.nodes || !walking.edges) {
-    throw new Error("Missing pedestrian graph in generated transport data");
+if (!walking || !walking.nodeXY || !walking.edgeAB ||
+    !walking.edgeLengths || !walking.edgeDirs) {
+    throw new Error("Missing packed pedestrian graph in transport data");
 }
-const walkNodes = walking.nodes;
-const walkEdges = walking.edges;
+const walkNodeXY = walking.nodeXY;
+const walkEdgeAB = walking.edgeAB;
+const walkEdgeLengths = walking.edgeLengths;
+const walkEdgeDirs = walking.edgeDirs;
+const walkNodes = {length: walking.nodeCount};
+const walkEdges = {length: walking.edgeCount};
+function walkNodeAt(i) {
+    return [walkNodeXY[2*i] / 10, walkNodeXY[2*i+1] / 10];
+}
+function walkEdgeAt(i) {
+    return [walkEdgeAB[2*i], walkEdgeAB[2*i+1],
+        walkEdgeLengths[i], walkEdgeDirs[i]];
+}
 const walkTransfers = data.walk_transfers;
 if (!walkTransfers || walkTransfers.offsets.length !== stops.length + 1) {
     throw new Error("Missing precomputed walking transfer graph");
@@ -8307,9 +8496,10 @@ for (let i = 0; i < stops.length; ++i) {
 // CSR adjacency avoids millions of per-node JavaScript arrays.
 const csrStarted = performance.now();
 const walkDegree = new Uint32Array(walkNodes.length);
-for (const edge of walkEdges) {
-    if (edge[3] !== 3 && edge[3] !== 13) walkDegree[edge[0]]++;
-    if (edge[3] !== 2 && edge[3] !== 12) walkDegree[edge[1]]++;
+for (let i = 0; i < walkEdges.length; ++i) {
+    const direction = walkEdgeDirs[i];
+    if (direction !== 3 && direction !== 13) walkDegree[walkEdgeAB[2*i]]++;
+    if (direction !== 2 && direction !== 12) walkDegree[walkEdgeAB[2*i+1]]++;
 }
 const walkOffsets = new Uint32Array(walkNodes.length + 1);
 for (let i = 0; i < walkNodes.length; ++i) {
@@ -8318,7 +8508,9 @@ for (let i = 0; i < walkNodes.length; ++i) {
 const walkTo = new Uint32Array(walkOffsets[walkNodes.length]);
 const walkWeight = new Float32Array(walkTo.length);
 const walkNext = walkOffsets.slice(0, walkNodes.length);
-for (const [a, b, length, direction] of walkEdges) {
+for (let i = 0; i < walkEdges.length; ++i) {
+    const a = walkEdgeAB[2*i], b = walkEdgeAB[2*i+1];
+    const length = walkEdgeLengths[i], direction = walkEdgeDirs[i];
     if (direction !== 3 && direction !== 13) {
         const slot = walkNext[a]++;
         walkTo[slot] = b;
@@ -8430,14 +8622,16 @@ function makeMinHeap() {
 function* buildWalkSegmentGridSteps() {
     const grid = new Map();
     for (let i = 0; i < walkEdges.length; ++i) {
-        const edge = walkEdges[i];
-        if (edge[3] === 5 || edge[3] >= 10) continue; // No virtual links.
-        const a = walkNodes[edge[0]];
-        const b = walkNodes[edge[1]];
-        const x0 = Math.floor(Math.min(a[0], b[0]) / WALK_GRID_METERS);
-        const x1 = Math.floor(Math.max(a[0], b[0]) / WALK_GRID_METERS);
-        const y0 = Math.floor(Math.min(a[1], b[1]) / WALK_GRID_METERS);
-        const y1 = Math.floor(Math.max(a[1], b[1]) / WALK_GRID_METERS);
+        const direction = walkEdgeDirs[i];
+        if (direction === 5 || direction >= 10) continue; // No virtual links.
+        const a = walkEdgeAB[2*i], b = walkEdgeAB[2*i+1];
+        const ax = walkNodeXY[2*a], ay = walkNodeXY[2*a+1];
+        const bx = walkNodeXY[2*b], by = walkNodeXY[2*b+1];
+        const cellSize = WALK_GRID_METERS * 10;
+        const x0 = Math.floor(Math.min(ax, bx) / cellSize);
+        const x1 = Math.floor(Math.max(ax, bx) / cellSize);
+        const y0 = Math.floor(Math.min(ay, by) / cellSize);
+        const y1 = Math.floor(Math.max(ay, by) / cellSize);
         if ((x1 - x0 + 1) * (y1 - y0 + 1) > 10000) continue;
         for (let x = x0; x <= x1; ++x) {
             for (let y = y0; y <= y1; ++y) {
@@ -8490,9 +8684,9 @@ function snapWalkXY(x, y) {
             for (const edgeIndex of entries) {
                 if (checked.has(edgeIndex)) continue;
                 checked.add(edgeIndex);
-                const edge = walkEdges[edgeIndex];
-                const a = walkNodes[edge[0]];
-                const b = walkNodes[edge[1]];
+                const edge = walkEdgeAt(edgeIndex);
+                const a = walkNodeAt(edge[0]);
+                const b = walkNodeAt(edge[1]);
                 const ux = b[0] - a[0];
                 const uy = b[1] - a[1];
                 const length2 = ux * ux + uy * uy;
@@ -8512,7 +8706,7 @@ function snapWalkXY(x, y) {
 
 function walkSeeds(anchor) {
     if (anchor.node !== undefined) return [[anchor.node, 0]];
-    const edge = walkEdges[anchor.edgeIndex];
+    const edge = walkEdgeAt(anchor.edgeIndex);
     const length = edge[2];
     const seeds = [];
     if (edge[3] !== 2 || anchor.t < 0.000001) {
@@ -8646,7 +8840,7 @@ function walkDistanceToAnchor(context, anchor) {
     if (anchor.node !== undefined) {
         return context.distance.get(anchor.node) ?? Infinity;
     }
-    const edge = walkEdges[anchor.edgeIndex];
+    const edge = walkEdgeAt(anchor.edgeIndex);
     const length = edge[2];
     let d = Infinity;
     if (edge[3] !== 3 || anchor.t < 0.000001) {
@@ -8702,7 +8896,8 @@ function walkCoverageFromNodes(sources) {
         }
     }
     const lines = [];
-    for (const edge of walkEdges) {
+    for (let i = 0; i < walkEdges.length; ++i) {
+        const edge = walkEdgeAt(i);
         if (edge[3] === 5 || edge[3] >= 10) continue; // Actual sidewalks only.
         const a = remaining.get(edge[0]) ?? -1;
         const b = remaining.get(edge[1]) ?? -1;
@@ -8729,11 +8924,11 @@ function walkPolylineXY(a, b) {
     if (!start || !end) return null;
     if (start.edgeIndex !== undefined &&
         start.edgeIndex === end.edgeIndex) {
-        const edge = walkEdges[start.edgeIndex];
+        const edge = walkEdgeAt(start.edgeIndex);
         const delta = end.t - start.t;
         if ((delta >= 0 && edge[3] !== 3) ||
             (delta <= 0 && edge[3] !== 2)) {
-            const pa = walkNodes[edge[0]], pb = walkNodes[edge[1]];
+            const pa = walkNodeAt(edge[0]), pb = walkNodeAt(edge[1]);
             const from = [pa[0]+(pb[0]-pa[0])*start.t,
                 pa[1]+(pb[1]-pa[1])*start.t];
             const to = [pa[0]+(pb[0]-pa[0])*end.t,
@@ -8742,7 +8937,7 @@ function walkPolylineXY(a, b) {
         }
     }
     const results = walkDijkstra(walkSeeds(start), walkRadius + 100, true);
-    const edge = end.node === undefined ? walkEdges[end.edgeIndex] : null;
+    const edge = end.node === undefined ? walkEdgeAt(end.edgeIndex) : null;
     const candidates = end.node !== undefined
         ? [[end.node, 0]]
         : [
@@ -8765,7 +8960,7 @@ function walkPolylineXY(a, b) {
     const seen = new Set();
     while (target !== -1 && !seen.has(target)) {
         seen.add(target);
-        sequence.push(walkNodes[target]);
+        sequence.push(walkNodeAt(target));
         target = results.previous.get(target) ?? -1;
     }
     sequence.push(a);
@@ -9207,22 +9402,22 @@ function coverageLinesForTier(tier) {
     return tier === 3 ? originWalkingLines : activeCoverageLines[tier];
 }
 
-function coverageEdgeInView(edge) {
-    const a = walkNodes[edge[0]];
-    const b = walkNodes[edge[1]];
+function coverageEdgeInViewAB(a, b) {
     const bounds = coverageBounds;
-    return !(Math.max(a[0], b[0]) < bounds[0] ||
-        Math.min(a[0], b[0]) > bounds[2] ||
-        Math.max(a[1], b[1]) < bounds[1] ||
-        Math.min(a[1], b[1]) > bounds[3]);
+    const ax = walkNodeXY[2*a] / 10, ay = walkNodeXY[2*a+1] / 10;
+    const bx = walkNodeXY[2*b] / 10, by = walkNodeXY[2*b+1] / 10;
+    return !(Math.max(ax, bx) < bounds[0] ||
+        Math.min(ax, bx) > bounds[2] ||
+        Math.max(ay, by) < bounds[1] ||
+        Math.min(ay, by) > bounds[3]);
 }
 
 function coveragePixel(node) {
     if (coveragePixelStamp[node] !== coveragePixelGeneration) {
-        const point = walkNodes[node];
-        const lon = ORIGIN_LON + point[0] * 180 /
+        const lon = ORIGIN_LON + walkNodeXY[2*node] / 10 * 180 /
             (Math.PI * EARTH_RADIUS_M * Math.cos(ORIGIN_LAT_RAD));
-        const lat = ORIGIN_LAT + point[1] * 180 / (Math.PI * EARTH_RADIUS_M);
+        const lat = ORIGIN_LAT + walkNodeXY[2*node+1] / 10 * 180 /
+            (Math.PI * EARTH_RADIUS_M);
         const phi = lat * Math.PI / 180;
         coveragePixelX[node] = coverageWorldSize * (lon + 180) / 360 -
             coverageWorldOffsetX;
@@ -9304,11 +9499,13 @@ function* rebuildCoverageViewSteps() {
             for (const id of ids) {
                 if (seen[id]) continue;
                 seen[id] = 1;
-                const edge = walkEdges[id];
-                if (edge[3] === 5 || edge[3] >= 10 || !coverageEdgeInView(edge)) continue;
+                const direction = walkEdgeDirs[id];
+                if (direction === 5 || direction >= 10) continue;
+                const a = walkEdgeAB[2*id], b = walkEdgeAB[2*id+1];
+                if (!coverageEdgeInViewAB(a, b)) continue;
                 for (let tier = 0; tier < 4; ++tier) {
                     const reached = coverageState.settled[tier];
-                    if (reached[edge[0]] || reached[edge[1]]) {
+                    if (reached[a] || reached[b]) {
                         coverageViewEdges[tier].push(id);
                     }
                 }
@@ -9441,15 +9638,16 @@ function drawCoverageBatch(tier, deadline) {
     ctx.beginPath();
     while (position < ids.length && scanned < 65536) {
         if ((scanned & 255) === 0 && performance.now() >= deadline) break;
-        const edge = walkEdges[ids[position++]];
+        const id = ids[position++];
         scanned++;
-        if (!coverageEdgeInView(edge) || edge[2] <= 0 ||
-            edge[3] === 5 || edge[3] >= 10) continue;
-        const a = edge[0], b = edge[1];
-        const left = edge[3] === 3 || !settled[a] ? 0 :
-            Math.min(1, Math.max(0, budgets[a] / edge[2]));
-        const right = edge[3] === 2 || !settled[b] ? 0 :
-            Math.min(1, Math.max(0, budgets[b] / edge[2]));
+        const length = walkEdgeLengths[id], direction = walkEdgeDirs[id];
+        if (length <= 0 || direction === 5 || direction >= 10) continue;
+        const a = walkEdgeAB[2*id], b = walkEdgeAB[2*id+1];
+        if (!coverageEdgeInViewAB(a, b)) continue;
+        const left = direction === 3 || !settled[a] ? 0 :
+            Math.min(1, Math.max(0, budgets[a] / length));
+        const right = direction === 2 || !settled[b] ? 0 :
+            Math.min(1, Math.max(0, budgets[b] / length));
         if (left <= 0 && right <= 0) continue;
         coveragePixel(a);
         coveragePixel(b);
@@ -9506,7 +9704,7 @@ function drawLegacyCoverageBatch(tier, deadline) {
     const pixel = index => {
         let value = pixels.get(index);
         if (!value) {
-            value = map.latLngToLayerPoint(walkXYToLatLng(walkNodes[index]));
+            value = map.latLngToLayerPoint(walkXYToLatLng(walkNodeAt(index)));
             pixels.set(index, value);
         }
         return value;
@@ -9518,8 +9716,8 @@ function drawLegacyCoverageBatch(tier, deadline) {
         if ((scanned & 31) === 0 && performance.now() >= deadline) break;
         const [a, b, t0, t1] = lines[position++];
         scanned++;
-        const from = walkNodes[a];
-        const to = walkNodes[b];
+        const from = walkNodeAt(a);
+        const to = walkNodeAt(b);
         if (Math.max(from[0], to[0]) < lower[0] ||
             Math.min(from[0], to[0]) > upper[0] ||
             Math.max(from[1], to[1]) < lower[1] ||
@@ -14304,6 +14502,7 @@ function scheduleRender() {
         });
         const p = runProfile;
         if (p && p.token === token) {
+            p.resultsReadyMs = profileElapsed(p);
             p.searchDone = true;
             p.currentPhase = "Finishing Canvas";
             p.cpu.walkingDijkstra = walkingStats.cpuMs - walkBefore.cpuMs;
@@ -14545,8 +14744,10 @@ updateControls();
 analysisSummary.hidden = true;
 console.info("[map] BOOT COMPLETE", Math.round(performance.now() - bootStarted),
     "ms; ready to select origin");
+bootComplete();
 })().catch(error => {
     console.error("Transport map initialization failed:", error);
+    bootFailed(error);
     const container = document.getElementById("map");
     if (container) {
         container.textContent = "Could not initialize map: " + error.message;
@@ -14555,6 +14756,383 @@ console.info("[map] BOOT COMPLETE", Math.round(performance.now() - bootStarted),
         container.style.color = "#b91c1c";
     }
 });
+"""
+
+# Night Highway loader: independent Canvas scene, visually inspired by
+# https://ascii.rest/night-highway/; no third-party runtime scripts/assets.
+# Animation geometry and drawing code are original and local.
+LOADER_JS = r"""
+/* Night Highway-inspired Canvas loading scene. Runs independently from the
+ * transport data Worker; no third-party scripts or network calls. */
+const bootUI = {
+    overlay: document.getElementById("boot-overlay"),
+    canvas: document.getElementById("boot-highway"),
+    stage: document.getElementById("boot-stage"),
+    percent: document.getElementById("boot-percent"),
+    bars: document.getElementById("boot-bars"),
+    details: document.getElementById("boot-details"),
+    error: document.getElementById("boot-error"),
+    errorMessage: document.getElementById("boot-error-message")
+};
+const bootReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let bootAnimationId = null;
+const roadContext = bootUI.canvas.getContext("2d", {alpha: false});
+const ROAD_W = 800, ROAD_H = 400, HORIZON = 206, MID = 400;
+const roadStars = Array.from({length: 75}, (_, i) => ({
+    x: (i * 263.819 + 47) % ROAD_W,
+    y: (i * 79.117 + 17) % 164,
+    size: 0.5 + (i % 4) * .3,
+    glow: (i % 13) / 13
+}));
+const roadNoise = (x) => {
+    const n = Math.sin(x * 78.233 + 12.983) * 43758.5453;
+    return n - Math.floor(n);
+};
+function polygon(ctx, points, fill) {
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+}
+function luminousDot(ctx, x, y, radius, color, halo) {
+    if (halo) {
+        const glow = ctx.createRadialGradient(x, y, 0, x, y, radius * 7);
+        glow.addColorStop(0, halo);
+        glow.addColorStop(1, "#0000");
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(x, y, radius * 7, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+}
+function mountainRidge(ctx, base, height, frequency, fill, seed) {
+    const pts = [[0, ROAD_H], [0, base]];
+    for (let x = 0; x <= ROAD_W; x += 5) {
+        const slow = Math.sin(x * frequency + seed) * .65;
+        const broad = Math.sin(x * frequency * .43 + seed * 3.2) * .32;
+        const jagged = (roadNoise(Math.floor(x / 13) + seed) - .5) * .12;
+        pts.push([x, base - height * Math.max(0, slow + broad + jagged + .4)]);
+    }
+    pts.push([ROAD_W, ROAD_H]);
+    polygon(ctx, pts, fill);
+}
+function drawHighwayScene(ms) {
+    if (!roadContext) return;
+    const ctx = roadContext;
+    const t = ms * .001;
+    const w = ROAD_W, h = ROAD_H;
+    // Dusk sky, final warm band behind the mountain range.
+    let sky = ctx.createLinearGradient(0, 0, 0, HORIZON + 42);
+    sky.addColorStop(0, "#060b1f");
+    sky.addColorStop(.39, "#262447");
+    sky.addColorStop(.71, "#6c3b69");
+    sky.addColorStop(.89, "#b85a70");
+    sky.addColorStop(1, "#f1a36a");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, w, h);
+    const sun = ctx.createRadialGradient(420, 215, 10, 420, 215, 260);
+    sun.addColorStop(0, "#ffb36a42");
+    sun.addColorStop(1, "#ffb36a00");
+    ctx.fillStyle = sun;
+    ctx.fillRect(70, 25, 680, 260);
+    // Fine sky texture, blinking stars, moon crescent.
+    for (let i = 0; i < roadStars.length; i++) {
+        const star = roadStars[i];
+        ctx.globalAlpha = .22 + .3 * (1 + Math.sin(t * .9 + i * 2.5)) / 2;
+        ctx.fillStyle = "#e7e5ff";
+        ctx.fillRect(star.x, star.y, star.size, star.size);
+    }
+    ctx.globalAlpha = 1;
+    luminousDot(ctx, 608, 53, 8, "#ffe9d2", "#f3d7c72e");
+    luminousDot(ctx, 612, 49, 7.4, "#0b1229", null);
+    // Wispy coloured cloud shelves.
+    ctx.globalAlpha = .20;
+    for (let i = 0; i < 9; i++) {
+        const y = 145 + i * 6 + Math.sin(i * 3.1) * 8;
+        ctx.strokeStyle = i % 2 ? "#f7b086" : "#392746";
+        ctx.lineWidth = 1.4 + (i % 4) * .5;
+        ctx.beginPath();
+        ctx.ellipse(160 + i * 51, y, 93, 2.2 + i % 3, -.045, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    mountainRidge(ctx, 237, 43, .011, "#30233d", 2.3);
+    mountainRidge(ctx, 244, 31, .018, "#1b1b34", 4.7);
+    mountainRidge(ctx, 255, 19, .027, "#11172b", 6.7);
+    // Foreground desert silhouettes.
+    polygon(ctx, [[0,260],[110,257],[251,275],[0,400]], "#121523");
+    polygon(ctx, [[800,256],[702,260],[548,285],[800,400]], "#151522");
+    const farLeft = MID - 10, farRight = MID + 10;
+    const nearLeft = MID - 360, nearRight = MID + 360;
+    // Soft road shoulder glow and dark asphalt.
+    polygon(ctx, [[farLeft-3,HORIZON],[farRight+3,HORIZON],
+        [nearRight+24,h],[nearLeft-24,h]], "#b85b6532");
+    const asphalt = ctx.createLinearGradient(0, HORIZON, 0, h);
+    asphalt.addColorStop(0, "#19182a");
+    asphalt.addColorStop(.65, "#10131e");
+    asphalt.addColorStop(1, "#080c16");
+    polygon(ctx, [[farLeft,HORIZON],[farRight,HORIZON],
+        [nearRight,h],[nearLeft,h]], asphalt);
+    // Perspective edge: y is quadratic in depth, width grows with distance.
+    const project = (z, side) => {
+        const q = Math.max(0, Math.min(1, z));
+        const p = q * q;
+        const y = HORIZON + (h - HORIZON) * p;
+        const edge = 10 + 350 * p;
+        return {x: MID + side * edge, y, p};
+    };
+    for (const side of [-1, 1]) {
+        ctx.strokeStyle = side === -1 ? "#db786a" : "#e7ad7e";
+        ctx.lineWidth = 1.6;
+        ctx.shadowColor = "#ffa46c";
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.moveTo(project(0,side).x,HORIZON);
+        ctx.lineTo(project(1,side).x,h);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+    // Dashed central lane markers moving towards the viewer.
+    const shift = (t * .25) % 1;
+    for (let i = 0; i < 15; i++) {
+        const z = ((i / 15 + shift) % 1);
+        const z2 = Math.min(1, z + .018 + z * .036);
+        const a = project(z, 0), b = project(z2, 0);
+        if (b.y - a.y < .2) continue;
+        const wa = .6 + 2.4 * a.p, wb = .6 + 2.4 * b.p;
+        polygon(ctx, [[MID-wa,a.y],[MID+wa,a.y],[MID+wb,b.y],[MID-wb,b.y]],
+            z > .65 ? "#f2d6b3" : "#d2a5a2");
+    }
+    // Roadside reflective posts, telephone poles, and warm roadside lights.
+    for (let i = 0; i < 18; i++) {
+        const z = ((i / 18 + t * .125) % 1);
+        if (z < .08) continue;
+        const o = project(z, 1);
+        const half = o.x - MID;
+        const size = 1.4 + 17 * o.p;
+        for (const side of [-1,1]) {
+            const x = MID + side * (half + size * 1.2);
+            const y = o.y;
+            ctx.strokeStyle = "#707084";
+            ctx.lineWidth = .6 + 3.4 * o.p;
+            ctx.beginPath();
+            ctx.moveTo(x, y); ctx.lineTo(x, y - size * 1.55); ctx.stroke();
+            luminousDot(ctx, x, y-size*1.5, .7+2*o.p,
+                side === -1 ? "#ff6957" : "#ffd7a6",
+                z > .45 ? "#ee92663a" : null);
+        }
+        if (i % 3 === 0 && z > .15) {
+            const x = MID - (half + size * 3.5);
+            const poleHeight = 13 + 73 * o.p;
+            ctx.strokeStyle = "#242437";
+            ctx.lineWidth = 1 + 3 * o.p;
+            ctx.beginPath(); ctx.moveTo(x,o.y); ctx.lineTo(x,o.y-poleHeight);ctx.stroke();
+            ctx.beginPath();ctx.moveTo(x-9*o.p,o.y-poleHeight*.8);
+            ctx.lineTo(x+9*o.p,o.y-poleHeight*.8);ctx.stroke();
+        }
+    }
+    // Ahead: persistent tail lamps, with a subtle body silhouette.
+    const sway = Math.sin(t * .7) * 3;
+    const carY = 267 + Math.sin(t * .5) * 1.4;
+    polygon(ctx, [[MID-23+sway,carY+2],[MID-17+sway,carY-10],
+        [MID+17+sway,carY-10],[MID+23+sway,carY+2],
+        [MID+20+sway,carY+11],[MID-20+sway,carY+11]], "#1a1a28");
+    polygon(ctx, [[MID-14+sway,carY-9],[MID-10+sway,carY-16],
+        [MID+10+sway,carY-16],[MID+14+sway,carY-9]], "#383348");
+    luminousDot(ctx, MID-18+sway, carY+1, 3, "#ff584f", "#fa354849");
+    luminousDot(ctx, MID+18+sway, carY+1, 3, "#ff584f", "#fa354849");
+    // Periodic approaching oncoming headlights, left-hand side of divider.
+    const approach = (t * .16) % 1;
+    const p = approach * approach;
+    const ax = MID - 8 - 126 * p, ay = HORIZON + 195 * p;
+    const spread = 2 + 16 * p;
+    if (approach < .94) {
+        luminousDot(ctx, ax-spread/2, ay, 1+4*p, "#fff0c9", "#ffd49065");
+        luminousDot(ctx, ax+spread/2, ay, 1+4*p, "#fff0c9", "#ffd49065");
+    }
+    // Optical grain as stippled halftone cells, original ascii.rest-style feel.
+    ctx.globalAlpha = .17;
+    ctx.fillStyle = "#b8a4ba";
+    for (let yi=0; yi<h; yi+=5) {
+        for (let xi=(yi % 10 ? 3:0); xi<w; xi+=10) {
+            if (roadNoise(xi*.02 + yi*.09) > .53) ctx.fillRect(xi,yi,1,1);
+        }
+    }
+    ctx.globalAlpha = 1;
+    const vignette = ctx.createRadialGradient(MID,205,115,MID,205,490);
+    vignette.addColorStop(0,"#0000");
+    vignette.addColorStop(1,"#030614b8");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0,0,w,h);
+}
+let roadLastFrame = 0;
+function updateBootFrame(timestamp) {
+    if (bootUI.overlay.hidden) return;
+    if (!document.hidden && (timestamp - roadLastFrame >= 66 || !roadLastFrame)) {
+        roadLastFrame = timestamp;
+        drawHighwayScene(bootReducedMotion ? 0 : timestamp);
+    }
+    if (!bootReducedMotion) bootAnimationId = requestAnimationFrame(updateBootFrame);
+}
+if (roadContext) {
+    if (bootReducedMotion) drawHighwayScene(0);
+    else bootAnimationId = requestAnimationFrame(updateBootFrame);
+}
+function bootPhase(stage, detail) {
+    bootUI.stage.textContent = stage;
+    if (stage === "FETCHING DATA") {
+        bootUI.percent.textContent = "--%";
+        bootUI.bars.textContent = "[........................................]";
+    } else {
+        // Percentage is valid for the download only, never for JSON/graph work.
+        bootUI.percent.textContent = "...";
+        bootUI.bars.textContent = "[.......... PROCESSING .................]";
+    }
+    if (detail) bootUI.details.textContent = detail;
+}
+function bootProgress(received, total) {
+    if (bootUI.stage.textContent !== "FETCHING DATA") return;
+    if (total > 0) {
+        const percent = Math.max(0, Math.min(100, Math.floor(received * 100 / total)));
+        bootUI.percent.textContent = percent + "%";
+        bootUI.bars.textContent = "[" + "#".repeat(Math.floor(percent * .4)) +
+            ".".repeat(40 - Math.floor(percent * .4)) + "]";
+        bootUI.details.textContent = (received / 1048576).toFixed(1) + " / " +
+            (total / 1048576).toFixed(1) + " MiB downloaded";
+    } else {
+        bootUI.percent.textContent = "--%";
+        bootUI.details.textContent = (received / 1048576).toFixed(1) + " MiB downloaded";
+    }
+}
+function bootComplete() {
+    bootUI.overlay.hidden = true;
+    if (bootAnimationId !== null) cancelAnimationFrame(bootAnimationId);
+}
+function bootFailed(error) {
+    // Keep the scene animated so a failed request cannot freeze the page.
+    bootUI.overlay.hidden = false;
+    bootUI.stage.textContent = "BOOT FAILED";
+    bootUI.percent.textContent = "ERR";
+    bootUI.error.hidden = false;
+    bootUI.errorMessage.textContent = String(error && error.message || error);
+}
+document.getElementById("boot-retry").addEventListener("click", () =>
+    location.reload()
+);
+function loadTransportData() {
+    bootPhase("FETCHING DATA", "Starting download...");
+    return new Promise((resolve, reject) => {
+        const worker = new Worker(new URL(@@DATA_WORKER_FILE@@, document.baseURI));
+        worker.onmessage = event => {
+            const message = event.data;
+            if (message.type === "progress") bootProgress(message.received, message.total);
+            else if (message.type === "phase") bootPhase(message.stage, message.detail);
+            else if (message.type === "ready") {
+                console.info("[map] WORKER decode", message.decodeMs, "ms");
+                worker.terminate(); resolve(message.data);
+            } else if (message.type === "error") {
+                worker.terminate(); reject(new Error(message.message));
+            }
+        };
+        worker.onerror = event => {
+            worker.terminate();
+            reject(new Error(event.message || "Data Worker could not start"));
+        };
+        worker.postMessage({url: new URL(@@DATA_FILE@@, document.baseURI).href});
+    });
+}
+"""
+
+WORKER_DECODE_PREFIX = r"""    if (!bytes.length) throw new Error("Downloaded data file is empty");
+    let text;
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        if (typeof DecompressionStream !== "function") {
+            throw new Error("This browser requires DecompressionStream(gzip)");
+        }
+        const stream = new Blob([bytes]).stream().pipeThrough(
+            new DecompressionStream("gzip")
+        );
+        text = await new Response(stream).text();
+    } else {
+        // Accept gzip already decompressed by an HTTP Content-Encoding header.
+        text = new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+    }
+    self.postMessage({type: "phase", stage: "PARSING JSON",
+        detail: "Decoding the transport network..."});
+    const data = JSON.parse(text);"""
+
+DATA_WORKER_JS = r"""
+// Graph decode uses transferable typed arrays, not deep structured cloning.
+self.onmessage = async event => {
+    try {
+        const {url} = event.data;
+        self.postMessage({type: "phase", stage: "FETCHING DATA",
+            detail: "Downloading the compressed transport graph..."});
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status + " for " + url);
+        }
+        const header = Number(response.headers.get("Content-Length"));
+        // fetch() may transparently decode Content-Encoding. Then the
+        // encoded Content-Length is not a valid progress denominator.
+        const encoded = response.headers.has("Content-Encoding");
+        const total = !encoded && Number.isFinite(header) && header > 0
+            ? header : 0;
+        const parts = [];
+        let received = 0, lastReport = 0;
+        if (response.body) {
+            const reader = response.body.getReader();
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                if (!value || !value.byteLength) continue;
+                parts.push(value);
+                received += value.byteLength;
+                if (Date.now() - lastReport >= 75) {
+                    self.postMessage({type: "progress", received, total});
+                    lastReport = Date.now();
+                }
+            }
+        } else {
+            const arrayBuffer = await response.arrayBuffer();
+            parts.push(new Uint8Array(arrayBuffer));
+            received = arrayBuffer.byteLength;
+        }
+        self.postMessage({type: "progress", received, total});
+        if (total && received !== total) {
+            throw new Error("Incomplete data: " + received + "/" + total);
+        }
+        const bytes = new Uint8Array(received);
+        let cursor = 0;
+        for (const part of parts) {
+            bytes.set(part, cursor);
+            cursor += part.byteLength;
+        }
+        self.postMessage({type: "phase", stage: "DECOMPRESSING",
+            detail: "Unpacking gzip (running in a Web Worker)..."});
+        const decodedStarted = performance.now();
+        const data = await decodeTransportBytes(bytes);
+        const decodeMs = Math.round(performance.now() - decodedStarted);
+        const transfer = [];
+        for (const value of Object.values(data.walking)) {
+            if (ArrayBuffer.isView(value)) transfer.push(value.buffer);
+        }
+        for (const value of Object.values(data.walk_transfers || {})) {
+            if (ArrayBuffer.isView(value)) transfer.push(value.buffer);
+        }
+        self.postMessage({type: "phase", stage: "BUILDING GRAPH",
+            detail: "Transferring binary graph buffers to the map..."});
+        self.postMessage({type: "ready", data, decodeMs}, transfer);
+    } catch (error) {
+        self.postMessage({type: "error", message: String(error.message || error)});
+    }
+};
 """
 
 
@@ -14705,7 +15283,18 @@ def pack_html_payload(data):
     return pack_walking_payload(trimmed)
 
 
-# Single-file page generator
+# Static page generator (HTML + CSS + JS + worker + compressed payload)
+
+
+def write_atomic_bytes(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_html(
@@ -14713,51 +15302,35 @@ def build_html(
     initial_walk_minutes,
     walk_speed,
     initial_circle_opacity,
+    output_path,
+    cached_payload=None,
 ):
-    html_started = time.monotonic()
-    print("[build] START JSON serialization", flush=True)
-    raw_payload = json.dumps(
-        pack_html_payload(data),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    print(
-        "[build] DONE JSON serialization:",
-        f"{time.monotonic()-html_started:.3f}s",
-        flush=True,
-    )
-    html_started = time.monotonic()
-    print("[build] START gzip compression", flush=True)
-    compressed_payload = gzip.compress(
-        raw_payload,
-        compresslevel=9,
-        mtime=0,
-    )
-
-    print(
-        "[build] DONE gzip compression:",
-        f"{time.monotonic()-html_started:.3f}s",
-        flush=True,
-    )
-    html_started = time.monotonic()
-    print("[build] START base64 embedding", flush=True)
-    payload = base64.b64encode(compressed_payload).decode("ascii")
-    payload_lines = "\n".join(
-        payload[offset : offset + 72] for offset in range(0, len(payload), 72)
-    )
-
-    print(
-        "[build] DONE base64 embedding:",
-        f"{time.monotonic()-html_started:.3f}s",
-        flush=True,
-    )
-    print(
-        "embedded data:",
-        f"{len(raw_payload) / (1024 * 1024):.1f} MiB raw ->",
-        f"{len(compressed_payload) / (1024 * 1024):.1f} MiB gzip ->",
-        f"{len(payload) / (1024 * 1024):.1f} MiB base64",
-    )
+    if cached_payload is None:
+        html_started = time.monotonic()
+        print("[build] START JSON serialization", flush=True)
+        raw_payload = json.dumps(
+            pack_html_payload(data),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        print(
+            "[build] DONE JSON serialization:",
+            f"{time.monotonic()-html_started:.3f}s",
+            flush=True,
+        )
+        html_started = time.monotonic()
+        print("[build] START gzip compression", flush=True)
+        compressed_payload = gzip.compress(raw_payload, compresslevel=9, mtime=0)
+        print(
+            "[build] DONE gzip compression:",
+            f"{time.monotonic()-html_started:.3f}s",
+            flush=True,
+        )
+        print(
+            "external data:",
+            f"{len(raw_payload) / (1024 * 1024):.1f} MiB raw ->",
+            f"{len(compressed_payload) / (1024 * 1024):.1f} MiB gzip",
+        )
 
     origin_lon, origin_lat = data["origin"]
     grid_size = data["grid_size"]
@@ -14785,13 +15358,41 @@ def build_html(
     }
     mode_hint = "Surface transport on by default. Travel times are estimates."
 
-    script = MAP_JS
+    output_path = Path(output_path)
+    base = output_path.stem
+    data_filename = base + ".json.gz"
+    js_filename = base + ".js"
+    css_filename = base + ".css"
+    data_worker_filename = base + "-data-worker.js"
+    maplibre_worker_filename = base + "-maplibre-worker.js"
+    # Move decompression, JSON.parse and binary graph decoding off the UI thread.
+    decoder = MAP_JS[
+        MAP_JS.index("function unpackCompactPayload(data) {") : MAP_JS.index(
+            "\n(async () => {"
+        )
+    ]
+    script = MAP_JS.replace(decoder, "")
     script += "\n" + ROUTING_JS
-    css = MAP_CSS
+    script = LOADER_JS + "\n" + script
+    decoder = decoder.replace(
+        "async function loadTransportData() {",
+        "async function decodeTransportBytes(bytes) {",
+        1,
+    )
+    begin = decoder.index("    const binary = atob(TRANSPORT_DATA_BASE64);")
+    finish = decoder.index("    unpackCompactPayload(data);", begin)
+    decoder = decoder[:begin] + WORKER_DECODE_PREFIX + "\n" + decoder[finish:]
+    data_worker_source = decoder + "\n" + DATA_WORKER_JS
+    css = MAP_CSS + "\n" + LOADER_CSS
     html = PAGE_HTML
 
     replacements = {
         "@@VERSION@@": PROJECT_VERSION,
+        "@@PAGE_JS@@": quote(js_filename),
+        "@@PAGE_CSS@@": quote(css_filename),
+        "@@DATA_FILE@@": json.dumps(quote(data_filename)),
+        "@@DATA_WORKER_FILE@@": json.dumps(quote(data_worker_filename)),
+        "@@MAPLIBRE_WORKER@@": quote(maplibre_worker_filename),
         "@@INITIAL_WALK_MINUTES@@": f"{initial_walk_minutes:.0f}",
         "@@INITIAL_OPACITY@@": f"{initial_circle_opacity:.0f}",
         "@@WALK_SPEED@@": f"{walk_speed:.0f}",
@@ -14817,16 +15418,12 @@ def build_html(
 
     if re.search(r"@@[A-Z_]+@@", script):
         raise ValueError("Unresolved JavaScript template placeholder")
-    if re.search(r"\\u[0-9A-Fa-f]{4}", script):
-        raise ValueError("Use ASCII literals in JavaScript interface text")
+    if re.search(r"\\u[0-9A-Fa-f]{4}", MAP_JS + ROUTING_JS):
+        raise ValueError("Use ASCII literals in application interface text")
 
-    # JavaScript is emitted as plain text, not compressed or dynamically injected.
-    # Only the transport DATA is gzipped to keep the generated HTML compact.
+    # JS and CSS are external so a strict CSP can disallow inline scripts/styles.
     if "</script" in script.lower() or "<!--" in script:
         raise ValueError("JavaScript contains HTML-sensitive script delimiters")
-    html = html.replace("@@PAYLOAD_LINES@@", payload_lines)
-    html = html.replace("@@CSS@@", css.strip())
-    html = html.replace("@@APP_SCRIPT@@", script.rstrip())
     for key, value in replacements.items():
         html = html.replace(key, value)
 
@@ -14840,6 +15437,53 @@ def build_html(
     long_lines = [i for i, line in enumerate(result.splitlines(), 1) if len(line) > 100]
     if long_lines:
         raise ValueError(f"Generated HTML lines exceed 100: {long_lines[:10]}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if cached_payload is None:
+        write_atomic_bytes(output_path.with_name(data_filename), compressed_payload)
+    write_atomic_bytes(output_path.with_name(js_filename), script.encode("utf-8"))
+    write_atomic_bytes(output_path.with_name(css_filename), css.encode("utf-8"))
+    write_atomic_bytes(
+        output_path.with_name(data_worker_filename),
+        data_worker_source.encode("utf-8"),
+    )
+    # Prefer to vendor the official matching CSP worker once at build time.
+    # If unavailable, fall back to a same-origin shim importing from the
+    # same unpkg origin that already serves MapLibre's main JS bundle.
+    csp_worker_path = output_path.with_name(maplibre_worker_filename)
+    if not csp_worker_path.is_file() or csp_worker_path.stat().st_size < 100000:
+        url = "https://unpkg.com/maplibre-gl@4.7.1/dist/" "maplibre-gl-csp-worker.js"
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "transport-map-static-builder"}
+            )
+            with urllib.request.urlopen(request, timeout=8) as response:
+                content = response.read(2 * 1024 * 1024 + 1)
+            if not 100000 < len(content) < 2 * 1024 * 1024:
+                raise ValueError("Unexpected MapLibre CSP worker size")
+            write_atomic_bytes(csp_worker_path, content)
+            print("[build] vendored MapLibre 4.7.1 CSP worker", flush=True)
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            print("[build] MapLibre worker download unavailable:", error)
+            print("[build] using CDN-backed same-origin shim", flush=True)
+            maplibre_shim = (
+                "// Same-origin MapLibre CSP Worker for worker-src 'self'.\n"
+                'importScripts("https://unpkg.com/maplibre-gl@4.7.1/'
+                'dist/maplibre-gl-csp-worker.js");\n'
+            )
+            write_atomic_bytes(csp_worker_path, maplibre_shim.encode("ascii"))
+    print(
+        "[build] web assets:",
+        ", ".join(
+            (
+                data_filename,
+                js_filename,
+                css_filename,
+                data_worker_filename,
+                maplibre_worker_filename,
+            )
+        ),
+        flush=True,
+    )
     return result
 
 
@@ -15688,6 +16332,11 @@ def parse_args():
         type=Path,
         help="Use a prebuilt walking graph for normalized GeoJSON fixtures",
     )
+    parser.add_argument(
+        "--refresh-web-assets",
+        action="store_true",
+        help="Regenerate HTML/JS/workers from existing site data, without processing OSM",
+    )
     parser.add_argument("--walk-minutes", type=float, default=5.0)
     parser.add_argument("--walk-speed", type=float, default=80.0)
     parser.add_argument("--grid-size", type=float, default=400.0)
@@ -15777,6 +16426,39 @@ def main():
     print(f"[build] START v{PROJECT_VERSION}", flush=True)
     if args.self_test:
         run_self_tests()
+        return
+    if args.refresh_web_assets:
+        output = Path(args.output)
+        data_file = output.with_name(output.stem + ".json.gz")
+        js_file = output.with_suffix(".js")
+        old_html = output.read_text(encoding="ascii")
+        old_js = js_file.read_text(encoding="utf-8")
+        compressed = data_file.read_bytes()
+        packed = json.loads(gzip.decompress(compressed))
+        if packed.get("walking", {}).get("format") != "delta-varint-dm-v1":
+            raise ValueError("Existing .json.gz is not a compatible walking graph")
+
+        def old_constant(pattern, text):
+            match = re.search(pattern, text, flags=re.DOTALL)
+            if match is None:
+                raise ValueError("Cannot preserve old generated setting: " + pattern)
+            return float(match.group(1))
+
+        packed["grid_size"] = old_constant(r"const GRID_SIZE = ([0-9.]+);", old_js)
+        walk_speed = old_constant(r"const WALK_SPEED_M_PER_MIN = ([0-9.]+);", old_js)
+        walk_minutes = old_constant(r'id="walk-time"[^>]*?value="([0-9.]+)"', old_html)
+        opacity = old_constant(r'id="circle-opacity"[^>]*?value="([0-9.]+)"', old_html)
+        print("[build] Refreshing page assets; keeping existing OSM data", flush=True)
+        html = build_html(
+            packed,
+            walk_minutes,
+            walk_speed,
+            opacity,
+            output,
+            cached_payload=compressed,
+        )
+        write_atomic_bytes(output, html.encode("ascii"))
+        print("[build] Web assets refreshed, transport data unchanged", flush=True)
         return
     if args.allow_moskvorechye_private:
         print(
@@ -16022,11 +16704,17 @@ def main():
     step_done("statistics and audit", phase_started)
     phase_started = time.monotonic()
     print("[build] START HTML encode + gzip", flush=True)
-    html = build_html(index, args.walk_minutes, args.walk_speed, args.circle_opacity)
+    html = build_html(
+        index,
+        args.walk_minutes,
+        args.walk_speed,
+        args.circle_opacity,
+        Path(args.output),
+    )
     step_done("HTML encode + gzip", phase_started)
     phase_started = time.monotonic()
     print("[build] START HTML file write", flush=True)
-    Path(args.output).write_text(html, encoding="ascii")
+    write_atomic_bytes(Path(args.output), html.encode("ascii"))
     step_done("HTML file write", phase_started)
     print(f"wrote: {Path(args.output).resolve()}")
     print("[build] FINAL TIMINGS (seconds)", flush=True)
