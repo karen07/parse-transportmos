@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.15.7"
+PROJECT_VERSION = "0.15.8"
 
 
 # OSM extraction and normalization
@@ -5779,6 +5779,11 @@ PAGE_HTML = r"""<!doctype html>
 >
 <meta name="application-version" content="@@VERSION@@">
 <title>Moscow transport reachability</title>
+<meta name="theme-color" content="#0d1534">
+<link rel="icon" type="image/x-icon" href="favicon.ico?v=@@VERSION@@">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=@@VERSION@@">
+<link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=@@VERSION@@">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=@@VERSION@@">
 
 <link
     rel="stylesheet"
@@ -15607,6 +15612,17 @@ def build_html(
     if long_lines:
         raise ValueError(f"Generated HTML lines exceed 100: {long_lines[:10]}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep browser icons available for any output directory and web asset refresh.
+    icon_assets = Path(__file__).resolve().parent / "assets"
+    for name in (
+        "favicon.svg",
+        "favicon.ico",
+        "favicon-32.png",
+        "apple-touch-icon.png",
+    ):
+        write_atomic_bytes(
+            output_path.with_name(name), (icon_assets / name).read_bytes()
+        )
     if cached_payload is None:
         write_atomic_bytes(output_path.with_name(data_filename), compressed_payload)
     write_atomic_bytes(output_path.with_name(js_filename), script.encode("utf-8"))
