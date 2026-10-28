@@ -3,7 +3,7 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <meta name="application-version" content="0.15.4" />
+        <meta name="application-version" content="0.15.7" />
         <title>Moscow transport reachability</title>
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
         <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
@@ -25,8 +25,17 @@
                 </div>
                 <div id="boot-stage">INITIALIZING</div>
                 <div class="boot-progress-line">
-                    <span id="boot-bars">[........................................]</span>
-                    <b id="boot-percent">--%</b>
+                    <div
+                        id="boot-meter"
+                        class="boot-meter is-indeterminate"
+                        role="progressbar"
+                        aria-label="Map loading progress"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                    >
+                        <span id="boot-meter-fill"></span>
+                    </div>
+                    <b id="boot-percent" hidden></b>
                 </div>
                 <div id="boot-details">Connecting to the data source...</div>
                 <div id="boot-error" hidden>
@@ -85,7 +94,7 @@
                         Click once for a start point. Double-click anywhere for route to any point
                         while keeping reachability mode.
                     </div>
-                    <div class="project-version">v0.15.4</div>
+                    <div class="project-version">v0.15.7</div>
                     <div
                         id="timing-status"
                         role="status"

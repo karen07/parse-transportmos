@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.15.4"
+PROJECT_VERSION = "0.15.7"
 
 
 # OSM extraction and normalization
@@ -5814,8 +5814,12 @@ PAGE_HTML = r"""<!doctype html>
         </div>
         <div id="boot-stage">INITIALIZING</div>
         <div class="boot-progress-line">
-            <span id="boot-bars">[........................................]</span>
-            <b id="boot-percent">--%</b>
+            <div id="boot-meter" class="boot-meter is-indeterminate"
+                 role="progressbar" aria-label="Map loading progress"
+                 aria-valuemin="0" aria-valuemax="100">
+                <span id="boot-meter-fill"></span>
+            </div>
+            <b id="boot-percent" hidden></b>
         </div>
         <div id="boot-details">Connecting to the data source...</div>
         <div id="boot-error" hidden>
@@ -7529,9 +7533,13 @@ LOADER_CSS = r"""
     font-size: clamp(18px, 3.3vw, 27px);
     font-weight: 500;
     letter-spacing: .08em;
-    margin: 12px 0 20px;
+    margin: 12px auto 20px;
+    position: relative;
+    width: max-content;
+    max-width: 100%;
+    text-align: center;
 }
-.boot-blink { color: #f59a78; animation: boot-blink 1s steps(1) infinite; }
+.boot-blink { position: absolute; left: 100%; top: 0; color: #f59a78; animation: boot-blink 1s steps(1) infinite; }
 @keyframes boot-blink { 50% { opacity: 0; } }
 #boot-road {
     width: 100%;
@@ -7583,27 +7591,64 @@ LOADER_CSS = r"""
     letter-spacing: .16em;
 }
 .boot-progress-line {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 14px 2px 8px;
+    position: relative;
+    box-sizing: border-box;
+    width: calc(100% - clamp(100px, 16vw, 136px));
+    margin-inline: auto;
+    padding: 14px 0 8px;
     color: #c08b9f;
 }
-#boot-bars {
-    flex: 1;
+.boot-meter {
+    position: relative;
     min-width: 0;
+    height: 9px;
     overflow: hidden;
-    white-space: nowrap;
-    font-size: clamp(8px, 1.6vw, 14px);
-    letter-spacing: .07em;
-    color: #e99f82;
+    border: 1px solid #7c546e;
+    border-radius: 999px;
+    background: #221b30;
+    box-shadow: inset 0 1px 4px #0008;
 }
-#boot-percent { color: #ffccab; font-size: 19px; min-width: 54px; }
+#boot-meter-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #bf677d, #f3a27f);
+    box-shadow: 0 0 12px #f3a27f80;
+    transition: width 100ms linear;
+}
+.boot-meter.is-indeterminate #boot-meter-fill {
+    width: 32% !important;
+    animation: boot-meter-sweep 1.65s ease-in-out infinite;
+}
+@keyframes boot-meter-sweep {
+    0% { transform: translateX(-105%); }
+    100% { transform: translateX(325%); }
+}
+#boot-percent {
+    position: absolute;
+    left: calc(100% + 12px);
+    top: 19px;
+    transform: translateY(-50%);
+    color: #ffccab;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    text-align: left;
+}
+#boot-percent[hidden] { display: none; }
 #boot-details {
     color: #a9a4b9;
     font-size: 12px;
     overflow-wrap: anywhere;
     min-height: 19px;
+}
+/* Match the exact center axis of the progress bar in all viewport sizes. */
+.boot-eyebrow, #boot-stage, #boot-details, .boot-credit, #boot-error {
+    box-sizing: border-box;
+    width: 100%;
+    margin-inline: auto;
+    text-align: center;
 }
 #boot-error { margin-top: 14px; color: #ffb1ae; overflow-wrap: anywhere; }
 #boot-retry {
@@ -8288,6 +8333,10 @@ const vectorMapLayer = L.maplibreGL({
         '<a href="https://www.openstreetmap.org/copyright">' +
         'OpenStreetMap contributors</a>'
 }).addTo(map);
+// Start listening while the rest of the UI is constructed.
+const baseMapReady = waitForBaseMapReady(vectorMapLayer);
+// Attach the rejection handler immediately even if other initialization is slow.
+baseMapReady.catch(() => {});
 
 // Paint opaque tiers offscreen, then composite one translucent output.
 // A pixel belongs to the smallest transfer tier, never a blend of tiers.
@@ -13507,10 +13556,28 @@ function scanRaptorRound(boardSources, roundIndex) {
     }
 }
 
+// scheduler.yield() is available in Chromium, but not in Safari.
+// Safari's setTimeout(0) fallback can be clamped to ~4 ms per yield, so use
+// MessageChannel tasks to let the browser process input without timer clamping.
+let yieldMessageChannel = null;
+const yieldResolvers = [];
 function eventLoopYield() {
     if (globalThis.scheduler &&
         typeof globalThis.scheduler.yield === "function") {
         return globalThis.scheduler.yield();
+    }
+    if (typeof MessageChannel !== "undefined") {
+        if (!yieldMessageChannel) {
+            yieldMessageChannel = new MessageChannel();
+            yieldMessageChannel.port1.onmessage = () => {
+                const resolve = yieldResolvers.shift();
+                if (resolve) resolve();
+            };
+        }
+        return new Promise(resolve => {
+            yieldResolvers.push(resolve);
+            yieldMessageChannel.port2.postMessage(0);
+        });
     }
     return new Promise(resolve => setTimeout(resolve, 0));
 }
@@ -14742,6 +14809,9 @@ map.on(
 
 updateControls();
 analysisSummary.hidden = true;
+bootPhase("LOADING MAP TILES", "Waiting for vector map tiles to become visible...");
+await baseMapReady;
+console.info("[map] BASE MAP READY", Math.round(performance.now() - bootStarted), "ms");
 console.info("[map] BOOT COMPLETE", Math.round(performance.now() - bootStarted),
     "ms; ready to select origin");
 bootComplete();
@@ -14769,7 +14839,8 @@ const bootUI = {
     canvas: document.getElementById("boot-highway"),
     stage: document.getElementById("boot-stage"),
     percent: document.getElementById("boot-percent"),
-    bars: document.getElementById("boot-bars"),
+    meter: document.getElementById("boot-meter"),
+    fill: document.getElementById("boot-meter-fill"),
     details: document.getElementById("boot-details"),
     error: document.getElementById("boot-error"),
     errorMessage: document.getElementById("boot-error-message")
@@ -14986,28 +15057,31 @@ if (roadContext) {
 }
 function bootPhase(stage, detail) {
     bootUI.stage.textContent = stage;
-    if (stage === "FETCHING DATA") {
-        bootUI.percent.textContent = "--%";
-        bootUI.bars.textContent = "[........................................]";
-    } else {
-        // Percentage is valid for the download only, never for JSON/graph work.
-        bootUI.percent.textContent = "...";
-        bootUI.bars.textContent = "[.......... PROCESSING .................]";
-    }
+    // Non-download phases have no measurable percentage. Do not fake progress.
+    bootUI.meter.classList.add('is-indeterminate');
+    bootUI.meter.removeAttribute('aria-valuenow');
+    bootUI.percent.hidden = true;
+    bootUI.percent.textContent = '';
     if (detail) bootUI.details.textContent = detail;
 }
 function bootProgress(received, total) {
-    if (bootUI.stage.textContent !== "FETCHING DATA") return;
+    if (bootUI.stage.textContent !== 'FETCHING DATA') return;
     if (total > 0) {
-        const percent = Math.max(0, Math.min(100, Math.floor(received * 100 / total)));
-        bootUI.percent.textContent = percent + "%";
-        bootUI.bars.textContent = "[" + "#".repeat(Math.floor(percent * .4)) +
-            ".".repeat(40 - Math.floor(percent * .4)) + "]";
-        bootUI.details.textContent = (received / 1048576).toFixed(1) + " / " +
-            (total / 1048576).toFixed(1) + " MiB downloaded";
+        const percent = Math.max(0, Math.min(100, Math.floor((received * 100) / total)));
+        bootUI.meter.classList.remove('is-indeterminate');
+        bootUI.fill.style.width = percent + '%';
+        bootUI.meter.setAttribute('aria-valuenow', String(percent));
+        bootUI.percent.hidden = false;
+        bootUI.percent.textContent = percent + '%';
+        bootUI.details.textContent =
+            (received / 1048576).toFixed(1) + ' / ' +
+            (total / 1048576).toFixed(1) + ' MiB downloaded';
     } else {
-        bootUI.percent.textContent = "--%";
-        bootUI.details.textContent = (received / 1048576).toFixed(1) + " MiB downloaded";
+        bootUI.meter.classList.add('is-indeterminate');
+        bootUI.meter.removeAttribute('aria-valuenow');
+        bootUI.percent.hidden = true;
+        bootUI.percent.textContent = '';
+        bootUI.details.textContent = (received / 1048576).toFixed(1) + ' MiB downloaded';
     }
 }
 function bootComplete() {
@@ -15018,13 +15092,102 @@ function bootFailed(error) {
     // Keep the scene animated so a failed request cannot freeze the page.
     bootUI.overlay.hidden = false;
     bootUI.stage.textContent = "BOOT FAILED";
-    bootUI.percent.textContent = "ERR";
+    bootUI.percent.hidden = true;
     bootUI.error.hidden = false;
     bootUI.errorMessage.textContent = String(error && error.message || error);
 }
 document.getElementById("boot-retry").addEventListener("click", () =>
     location.reload()
 );
+// Transport data decoding alone does not mean the visual base map is ready.
+// Wait for *visible* vector features rather than an idle event: a single failed
+// tile, a style transition, or a missed sourcedata callback can prevent idle
+// indefinitely, even when the actual map has been painted. A bounded fallback
+// accepts a visible (possibly partially loaded) base map without hiding the
+// overlay on a still-empty WebGL canvas.
+function waitForBaseMapReady(layer, timeoutMs = 30000) {
+    const gl = layer.getMaplibreMap();
+    if (!gl) return Promise.reject(new Error('MapLibre map was not initialized'));
+    return new Promise((resolve, reject) => {
+        let finished = false;
+        let firstVisibleAt = null;
+        let lastCheckAt = 0;
+        let lastError = '';
+        const timeout = setTimeout(() => {
+            const detail = lastError ? ' Last map error: ' + lastError : '';
+            fail(new Error('Map tiles were not visible after ' +
+                (timeoutMs / 1000) + 's.' + detail +
+                ' Check the tile server, network and WebGL support.'));
+        }, timeoutMs);
+        // Poll as well as listening to render: MapLibre can stop emitting idle
+        // when one tile fails or the style keeps repainting.
+        const poll = setInterval(check, 200);
+        function cleanup() {
+            clearTimeout(timeout);
+            clearInterval(poll);
+            gl.off('load', check);
+            gl.off('render', check);
+            gl.off('idle', check);
+            gl.off('error', onError);
+        }
+        function fail(error) {
+            if (finished) return;
+            finished = true;
+            cleanup();
+            reject(error);
+        }
+        function onError(event) {
+            lastError = String(event.error?.message || event.error || 'unknown error');
+            console.warn('[map] BASE MAP RESOURCE ERROR:', lastError);
+        }
+        function check() {
+            if (finished) return;
+            const now = Date.now();
+            if (now - lastCheckAt < 180) return; // queryRenderedFeatures is costly.
+            lastCheckAt = now;
+            const canvas = gl.getCanvas();
+            if (!canvas || !canvas.width || !canvas.height) return;
+            let features;
+            try {
+                // Unlike 'load', 'idle' and areTilesLoaded(), this proves that
+                // a real vector layer has made it into a rendered frame.
+                features = gl.queryRenderedFeatures();
+            } catch (_) { return; } // Style is not ready for querying yet.
+            if (!features || features.length === 0) {
+                firstVisibleAt = null;
+                return;
+            }
+            if (firstVisibleAt === null) firstVisibleAt = now;
+            const tilesLoaded = typeof gl.areTilesLoaded === 'function' &&
+                gl.areTilesLoaded();
+            const visibleFor = now - firstVisibleAt;
+            // Prefer fully loaded tiles, but don't block forever on an idle
+            // event or an unrelated tile that never finishes. Allow the map
+            // some time to fill the viewport before accepting partial tiles.
+            if (!(tilesLoaded && visibleFor >= 400) && visibleFor < 2500) return;
+            finished = true;
+            cleanup();
+            console.info('[map] BASE MAP PAINTED',
+                tilesLoaded ? 'tiles loaded' : 'visible tiles; other tiles pending');
+            // Let the compositing frame hit the screen before removing overlay.
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(frameFallback);
+                resolve();
+            };
+            // A hidden Safari tab may suspend requestAnimationFrame entirely.
+            const frameFallback = setTimeout(done, 500);
+            requestAnimationFrame(() => requestAnimationFrame(done));
+        }
+        gl.on('load', check);
+        gl.on('render', check);
+        gl.on('idle', check);
+        gl.on('error', onError);
+        check(); // Cached map may be rendered already.
+    });
+}
 function loadTransportData() {
     bootPhase("FETCHING DATA", "Starting download...");
     return new Promise((resolve, reject) => {
