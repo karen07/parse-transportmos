@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.15.8"
+PROJECT_VERSION = "0.15.9"
 
 
 # OSM extraction and normalization
@@ -47,7 +47,7 @@ MKAD_GEOJSON_URL = (
 MKAD_GEOJSON_CACHE_NAME = "mkad.geojson"
 MERGED_SOURCE_NAME = "moscow-regions-osmlab.osm.pbf"
 MERGED_MANIFEST_NAME = "moscow-regions-osmlab.sources.json"
-TRANSPORT_CACHE_NAME = "moscow-transport-osmlab-v2.osm.pbf"
+TRANSPORT_CACHE_NAME = "moscow-transport-osmlab-v1.osm.pbf"
 PEDESTRIAN_CACHE_NAME = "moscow-pedestrian-osmlab-v1.json.gz"
 PEDESTRIAN_TEST_CACHE_NAME = "moscow-pedestrian-osmlab-v1-private-test.json.gz"
 TRANSFERS_CACHE_NAME = "moscow-walk-transfers-osmlab-v1.json.gz"
