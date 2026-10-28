@@ -1345,7 +1345,13 @@
     max-width: 100%;
     text-align: center;
 }
-.boot-blink { position: absolute; left: 100%; top: 0; color: #f59a78; animation: boot-blink 1s steps(1) infinite; }
+.boot-blink {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    color: #f59a78;
+    animation: boot-blink 1s steps(1) infinite;
+}
 @keyframes boot-blink { 50% { opacity: 0; } }
 #boot-road {
     width: 100%;
