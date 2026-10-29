@@ -11,11 +11,39 @@
         <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=@@VERSION@@" />
         <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=@@VERSION@@" />
 
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-        <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
-
-        <link rel="stylesheet" href="@@PAGE_CSS@@?v=@@VERSION@@" />
-        <link rel="stylesheet" href="boot-loader.css?v=@@VERSION@@" />
+        <!-- First paint is entirely self-contained: no CSS or road asset request. -->
+        <style>
+            @@BOOT_CSS@@;
+        </style>
+        <!-- Noncritical app styles cannot block first paint of the loader. -->
+        <link
+            rel="preload"
+            as="style"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            onload="
+                this.onload = null;
+                this.rel = 'stylesheet';
+            "
+        />
+        <link
+            rel="preload"
+            as="style"
+            href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+            onload="
+                this.onload = null;
+                this.rel = 'stylesheet';
+            "
+        />
+        <link
+            rel="preload"
+            as="style"
+            href="@@PAGE_CSS@@?v=@@VERSION@@"
+            onload="
+                this.onload = null;
+                this.rel = 'stylesheet';
+            "
+        />
+        <noscript><link rel="stylesheet" href="@@PAGE_CSS@@?v=@@VERSION@@" /></noscript>
         <meta name="transport-config" content="@@CONFIG_JSON@@" />
     </head>
 
@@ -28,6 +56,7 @@
                 <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
                 <h1>Building your map<span class="boot-blink">_</span></h1>
                 <div id="boot-network-shell" aria-hidden="true">
+                    @@BOOT_ROADS_SVG@@
                     <canvas id="boot-network" width="800" height="400"></canvas>
                     <div class="boot-network-caption">
                         <span>
@@ -376,7 +405,10 @@
             </div>
         </div>
 
-        <script src="boot-loader.js?v=@@VERSION@@" defer></script>
-        <script src="@@PAGE_JS@@?v=@@VERSION@@" defer></script>
+        <script
+            src="boot-loader.js?v=@@VERSION@@"
+            data-map-script="@@PAGE_JS@@?v=@@VERSION@@"
+            defer
+        ></script>
     </body>
 </html>

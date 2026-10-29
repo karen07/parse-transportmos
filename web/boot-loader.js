@@ -1,4 +1,4 @@
-/* OSM major roads illustration. Animation is not a loading percentage. */
+/* Static OSM SVG is already visible when this deferred script executes. */
 const bootUI = {
     overlay: document.getElementById('boot-overlay'),
     canvas: document.getElementById('boot-network'),
@@ -11,157 +11,111 @@ const bootUI = {
     errorMessage: document.getElementById('boot-error-message'),
 };
 const bootReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const bootMainScript = document.currentScript.dataset.mapScript;
 let bootStopAnimation = () => {};
 
 (() => {
     'use strict';
-    // Real OSM road geometry, exported once by major_roads.py.
-    // Animation is decorative, never a proxy for actual loading progress.
     const canvas = bootUI.canvas;
-    const ctx = canvas.getContext('2d');
-    const reducedMotion = bootReducedMotion;
-    let w = 0;
-    let h = 0;
-    let dpr = 1;
-    let network = null;
-    let background = null;
-    let roadMask = null;
-    let highlight = null;
-    let raf = null;
-    let stopped = false;
-    let lastDraw = 0;
-    let waveStart = 0;
-    // The road map is uniform regardless of OSM highway classification.
-    const roadWidth = 1.55;
-    const roadColor = '#39465f';
-    const waveDuration = 6800;
+    const svgPath = document.getElementById('boot-road-path');
+    const geometry = svgPath.getAttribute('d').trim();
+    // The separate Canvas is decorative only. The SVG paints without JS.
+    if (!geometry || bootReducedMotion) return;
+    const ctx = canvas.getContext('2d', { alpha: true });
+    if (!ctx || typeof Path2D !== 'function') return;
+    const road = new Path2D(geometry);
+    let width = 1,
+        height = 1,
+        dpr = 1;
+    let mask = null,
+        front = null,
+        raf = null,
+        lastFrame = 0;
+    let paused = false;
+    const start = performance.now();
+    const duration = 6800;
 
-    function makeCanvas() {
-        const surface = document.createElement('canvas');
-        surface.width = canvas.width;
-        surface.height = canvas.height;
-        return surface;
+    function surface() {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = canvas.width;
+        offscreen.height = canvas.height;
+        return offscreen;
     }
 
-    function updateSize() {
+    function resize() {
         const bounds = canvas.getBoundingClientRect();
-        w = Math.max(1, bounds.width);
-        h = Math.max(1, bounds.height);
+        width = Math.max(1, bounds.width);
+        height = Math.max(1, bounds.height);
         dpr = Math.min(window.devicePixelRatio || 1, 2);
-        canvas.width = Math.round(w * dpr);
-        canvas.height = Math.round(h * dpr);
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        if (network) prepare();
+        mask = surface();
+        front = surface();
+        const scale = Math.min(width / 800, height / 400);
+        const x = (width - scale * 800) / 2;
+        const y = (height - scale * 400) / 2;
+        const painter = mask.getContext('2d');
+        painter.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
+        painter.lineWidth = 1.55;
+        painter.lineCap = 'round';
+        painter.lineJoin = 'round';
+        painter.strokeStyle = '#fff';
+        painter.stroke(road);
     }
 
-    function prepare() {
-        if (!network || !w || !h) return;
-        const [mx, my] = network.extent;
-        const scale = Math.min((w - 28) / (2 * mx), (h - 24) / (2 * my));
-        roadMask = makeCanvas();
-        highlight = makeCanvas();
-        background = makeCanvas();
-        const mask = roadMask.getContext('2d');
-        mask.setTransform(dpr, 0, 0, dpr, 0, 0);
-        mask.lineWidth = roadWidth;
-        mask.lineCap = 'round';
-        mask.lineJoin = 'round';
-        mask.strokeStyle = '#fff';
-
-        // Draw every way into one opaque mask. Where two carriageways or OSM
-        // fragments overlap, they cannot become brighter or thicker through
-        // alpha blending. Every named ring uses exactly the same stroke.
-        for (const [, coords] of network.paths) {
-            if (!Array.isArray(coords) || coords.length < 4) continue;
-            mask.beginPath();
-            mask.moveTo(w / 2 + coords[0] * scale, h / 2 + coords[1] * scale);
-            for (let i = 2; i < coords.length; i += 2) {
-                mask.lineTo(w / 2 + coords[i] * scale, h / 2 + coords[i + 1] * scale);
-            }
-            mask.stroke();
-        }
-        mask.globalCompositeOperation = 'source-in';
-        mask.fillStyle = roadColor;
-        mask.fillRect(0, 0, w, h);
-        mask.globalCompositeOperation = 'source-over';
-
-        const back = background.getContext('2d');
-        back.setTransform(dpr, 0, 0, dpr, 0, 0);
-        back.fillStyle = '#0b1020';
-        back.fillRect(0, 0, w, h);
-        back.drawImage(roadMask, 0, 0, w, h);
-        waveStart = performance.now();
-    }
-
-    function drawWave(now) {
-        // Animate a radial front from geographic central Moscow, not a random
-        // road fragment. The cycle is decorative and never reaches every road.
-        const phase = ((now - waveStart) % waveDuration) / waveDuration;
-        const radius = 4 + phase * Math.hypot(w, h) * 0.43;
-        const fade = Math.min(1, phase * 9, (1 - phase) * 7);
-        if (radius < 2 || fade <= 0) return;
-
-        const front = highlight.getContext('2d');
-        front.setTransform(dpr, 0, 0, dpr, 0, 0);
-        front.clearRect(0, 0, w, h);
-        front.drawImage(roadMask, 0, 0, w, h);
-        front.globalCompositeOperation = 'source-in';
-        const gradient = front.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, radius);
-        gradient.addColorStop(0, 'rgba(237, 139, 125, 0.2)');
-        gradient.addColorStop(0.48, 'rgba(237, 139, 125, 0.06)');
-        gradient.addColorStop(0.73, 'rgba(239, 150, 128, 0.28)');
-        gradient.addColorStop(0.91, 'rgba(253, 180, 143, 0.96)');
-        gradient.addColorStop(1, 'rgba(253, 180, 143, 0)');
-        front.fillStyle = gradient;
-        front.fillRect(0, 0, w, h);
-        front.globalCompositeOperation = 'source-over';
-
+    function frame(now) {
+        raf = null;
+        if (paused || bootUI.overlay.hidden || document.hidden) return;
+        raf = requestAnimationFrame(frame);
+        if (now - lastFrame < 50) return; // At most 20 FPS.
+        lastFrame = now;
+        ctx.clearRect(0, 0, width, height);
+        const phase = ((now - start) % duration) / duration;
+        const radius = 4 + phase * Math.hypot(width, height) * 0.43;
+        const fade = Math.max(0, Math.min(1, phase * 9, (1 - phase) * 7));
+        if (!fade) return;
+        const f = front.getContext('2d');
+        f.setTransform(dpr, 0, 0, dpr, 0, 0);
+        f.clearRect(0, 0, width, height);
+        f.drawImage(mask, 0, 0, width, height);
+        f.globalCompositeOperation = 'source-in';
+        const gradient = f.createRadialGradient(
+            width / 2,
+            height / 2,
+            0,
+            width / 2,
+            height / 2,
+            radius,
+        );
+        gradient.addColorStop(0, 'rgba(237,139,125,.2)');
+        gradient.addColorStop(0.48, 'rgba(237,139,125,.06)');
+        gradient.addColorStop(0.73, 'rgba(239,150,128,.28)');
+        gradient.addColorStop(0.91, 'rgba(253,180,143,.96)');
+        gradient.addColorStop(1, 'rgba(253,180,143,0)');
+        f.fillStyle = gradient;
+        f.fillRect(0, 0, width, height);
+        f.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = fade;
-        ctx.drawImage(highlight, 0, 0, w, h);
+        ctx.drawImage(front, 0, 0, width, height);
         ctx.globalAlpha = 1;
     }
 
-    function animate(now) {
-        if (stopped || bootUI.overlay.hidden) return;
-        if (!reducedMotion && now - lastDraw < 50) {
-            raf = requestAnimationFrame(animate);
-            return;
+    resize();
+    raf = requestAnimationFrame(frame);
+    window.addEventListener('resize', resize, { passive: true });
+    function onVisibility() {
+        if (!document.hidden && !paused && raf === null) {
+            raf = requestAnimationFrame(frame);
         }
-        lastDraw = now;
-        ctx.clearRect(0, 0, w, h);
-        if (background) ctx.drawImage(background, 0, 0, w, h);
-        if (roadMask && highlight && !reducedMotion) drawWave(now);
-        if (!reducedMotion) raf = requestAnimationFrame(animate);
     }
-
-    window.addEventListener('resize', updateSize, { passive: true });
-    updateSize();
+    document.addEventListener('visibilitychange', onVisibility);
     bootStopAnimation = () => {
-        stopped = true;
-        if (raf != null) cancelAnimationFrame(raf);
+        paused = true;
+        if (raf !== null) cancelAnimationFrame(raf);
+        window.removeEventListener('resize', resize);
+        document.removeEventListener('visibilitychange', onVisibility);
     };
-    raf = requestAnimationFrame(animate);
-    fetch('moscow-major-roads.json', { cache: 'no-cache' })
-        .then((response) => {
-            if (!response.ok) throw new Error('HTTP ' + response.status);
-            return response.json();
-        })
-        .then((data) => {
-            if (
-                data.format !== 'moscow-major-roads-v1' ||
-                !Array.isArray(data.paths) ||
-                !Array.isArray(data.extent)
-            ) {
-                throw new Error('Unexpected OSM road asset format');
-            }
-            network = data;
-            if (!stopped) prepare();
-            if (reducedMotion && !stopped) animate(performance.now());
-        })
-        .catch((error) => {
-            // The basemap loader remains independent of this decorative asset.
-            console.warn('[boot] OSM road illustration not available:', error);
-        });
 })();
 
 function bootPhase(stage, detail) {
@@ -330,3 +284,19 @@ function loadTransportData() {
         worker.postMessage({ url: new URL(transportConfig.data_file, document.baseURI).href });
     });
 }
+
+// Begin the expensive application only after the initial loader has painted.
+// A timer prevents a permanently backgrounded tab from being stuck forever.
+(() => {
+    let started = false;
+    function startMap() {
+        if (started) return;
+        started = true;
+        const script = document.createElement('script');
+        script.src = bootMainScript;
+        script.onerror = () => bootFailed(new Error('Could not load the map script'));
+        document.body.appendChild(script);
+    }
+    requestAnimationFrame(() => requestAnimationFrame(startMap));
+    setTimeout(startMap, 300);
+})();

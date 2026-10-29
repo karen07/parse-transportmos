@@ -57,25 +57,35 @@ OpenStreetMap. Объединяет маршруты общественного 
 - `web/boot-loader.js`, `web/boot-loader.css` - заставка с настоящими магистралями.
 - `major_roads.py` - извлечение основных магистралей из локального OSM PBF,
   соединение общих узлов и экспорт упрощенных линий для заставки.
+- `boot_svg.py` - отбор и упрощение дорог для маленького SVG первого кадра;
+  весь исходный CSS и JS при этом остаются в каталоге `web/`.
 - `assets/` - исходные favicon и иконка для домашнего экрана.
 - `tests/` - самостоятельные регрессионные тесты JavaScript.
 
 **Что генерируется и служит для проверки результата:**
 
-- `site-osmlab/routes.html`, `routes.js`, `routes.css`, `boot-loader.js`,
-  `boot-loader.css` и `routes-data-worker.js` - копии или результат сборки;
-- `site-osmlab/routes-config.json` - параметры конкретной сборки;
-- `site-osmlab/routes-maplibre-worker.js` - внешний воркер MapLibre;
-- `site-osmlab/routes.json.gz` - сжатые данные для браузера.
-- `site-osmlab/moscow-major-roads.json` - автоматически созданная геометрия
-  МКАД, транспортных колец и крупных магистралей для заставки.
+- `dist/routes.html` - сгенерированная страница с компактным SVG
+  основных дорог и критическими стилями заставки непосредственно в HTML;
+- `dist/routes.js`, `routes.css`, `boot-loader.js` и
+  `routes-data-worker.js` - копии самостоятельных исходников;
+- `dist/routes-config.json` - параметры конкретной сборки;
+- `dist/routes-maplibre-worker.js` - внешний воркер MapLibre;
+- `dist/routes.json.gz` - сжатые данные для браузера.
+- `dist/moscow-major-roads.json` - полная геометрия основных дорог;
+  `boot_svg.py` превращает ее в компактный SVG в HTML при публикации.
 
-Не редактируйте сгенерированные файлы в `site-osmlab/`: следующая сборка
-перезапишет их. Каталог `cache/` также создаётся генератором.
+Для быстрого первого кадра стили `web/boot-loader.css` встраиваются
+в `routes.html`. Остальные таблицы стилей загружаются без блокировки
+заставки, а основной `routes.js` стартует после первого кадра. Изменения
+геометрии заставки требуют повторного `--refresh-web-assets` после
+обновления `moscow-major-roads.json`; OSM-граф перестраивать не нужно.
+
+Не редактируйте сгенерированные файлы в `dist/`: следующая сборка
+перезапишет их. Каталог `build/` также создаётся генератором.
 
 **Проверка изменений:** Изменение формата данных требует согласовать
 `build-transport-map.py` с `web/routes-data-worker.js` и `web/routes.js`.
-После правок проверьте `python3 build-transport-map.py --help`, тесты,
+После правок проверьте `./build-transport-map.py --help`, тесты,
 генерацию и работу карты в браузере. Кеш не является источником логики.
 
 **Типовые изменения:**
@@ -143,8 +153,13 @@ python3 -m pip install -U osmium
 Запустите генератор `build-transport-map.py` из каталога проекта:
 
 ```bash
-python3 build-transport-map.py --cache-dir cache -o site-osmlab/routes.html
+./build-transport-map.py
 ```
+
+Каталог `build/` хранит скачанные исходники OSM и промежуточные кеши,
+а `dist/` содержит только файлы для публикации. Оба создаются автоматически.
+При обновлении с предыдущих версий перенесите уже созданные данные в эти
+каталоги, чтобы избежать повторного скачивания и пересборки.
 
 При первом запуске генератор загрузит региональные PBF, выделит крупные
 автомагистрали для заставки, подготовит транспортные
@@ -154,8 +169,7 @@ python3 build-transport-map.py --cache-dir cache -o site-osmlab/routes.html
 Для локального просмотра раздайте сгенерированный каталог через HTTP-сервер:
 
 ```bash
-cd site-osmlab
-python3 -m http.server 8000
+python3 -m http.server 8000 --directory dist
 ```
 
 После запуска откройте `http://localhost:8000/routes.html`.
@@ -167,8 +181,8 @@ python3 -m http.server 8000
 
 ```bash
 python3 major_roads.py \
-    --input cache/moscow-regions-osmlab.osm.pbf \
-    --output site-osmlab/moscow-major-roads.json
+    --input build/moscow-regions-osmlab.osm.pbf \
+    --output dist/moscow-major-roads.json
 ```
 
 Файл `moscow-major-roads.json` генерируется, его не нужно редактировать или
@@ -198,8 +212,8 @@ python3 major_roads.py \
 
 | Параметр | Назначение |
 | --- | --- |
-| `-o`, `--output` | Путь к HTML (`routes.html` по умолчанию). |
-| `--cache-dir` | Каталог кеша (`cache`). |
+| `-o`, `--output` | Путь к HTML (`dist/routes.html` по умолчанию). |
+| `--cache-dir` | Каталог исходных данных и кешей (`build`). |
 | `--update` | Заново скачать региональные исходники и обновить зависимые данные. |
 | `--rebuild` | Пересобрать транспортный extract без принудительной загрузки PBF. |
 | `--rebuild-walking` | Пересобрать пешеходный граф. |
@@ -215,9 +229,9 @@ python3 major_roads.py \
 | `--self-test` | Встроенные регрессионные тесты. |
 
 Кеш транспортного экстракта создаётся под именем
-`cache/moscow-transport-osmlab-v1.osm.pbf`. Пешеходный граф и пешие
+`build/moscow-transport-osmlab-v1.osm.pbf`. Пешеходный граф и пешие
 пересадки также используют суффикс `-v1`. Для полной пересборки можно
-удалить каталог `cache/` и повторно запустить генератор.
+удалить каталог `build/` и повторно запустить генератор.
 
 **Тестовые GeoJSON-фикстуры:** `--input-geojson` читает нормализованные
 маршруты и остановки вместо OSM PBF. Для построения пешеходных маршрутов
@@ -237,18 +251,18 @@ python3 major_roads.py \
 Полный список флагов, включая диагностику станций и тестовые фикстуры:
 
 ```bash
-python3 build-transport-map.py --help
+./build-transport-map.py --help
 ```
 
 Чтобы обновить только интерфейс после изменения файлов `web/` или `assets/`,
 используйте из корня проекта:
 
 ```bash
-python3 build-transport-map.py --refresh-web-assets -o site-osmlab/routes.html
+./build-transport-map.py --refresh-web-assets
 ```
 
 Для этого предварительно должна существовать полная генерация сайта.
-Код из `web/` и исходные иконки из `assets/` копируются в `site-osmlab/`,
+Код из `web/` и исходные иконки из `assets/` копируются в `dist/`,
 а `routes.json.gz` остаётся без изменений.
 
 ## Возможности
@@ -281,7 +295,9 @@ python3 build-transport-map.py --refresh-web-assets -o site-osmlab/routes.html
 и распаковки транспортного графа. Если тайлы или WebGL недоступны более
 30 секунд, показываются ошибка и кнопка повторной загрузки.
 
-Анимация в `web/boot-loader.js` рисует настоящую дорожную геометрию OSM:
+Сначала браузер показывает встроенный в HTML SVG реальных магистралей,
+без ожидания JavaScript, CSS или отдельного запроса геометрии. Затем
+`web/boot-loader.js` запускает необязательную Canvas-анимацию:
 все магистрали и кольца имеют одинаковую толщину и цвет. Соседние
 проезжие части сводятся в общую маску отрисовки, чтобы наложение линий
 не делало участки светлее. Подсветка распространяется радиальной волной
@@ -319,7 +335,7 @@ Chrome продолжает использовать `scheduler.yield()`. Пер
 Размер буфера можно изменить:
 
 ```bash
-python3 build-transport-map.py --mkad-buffer-km 20 -o site-osmlab/routes.html
+./build-transport-map.py --mkad-buffer-km 20
 ```
 
 Также доступны `--mkad-geojson` для локального GeoJSON и `--no-mkad-clip`
@@ -369,24 +385,20 @@ node tests/yield.test.cjs
 node tests/web-assets.test.cjs
 ```
 
-Тест `web-assets.test.cjs` требует предварительно созданного `site-osmlab/`.
+Тест `web-assets.test.cjs` требует предварительно созданного `dist/`.
 
 Сохранение отчёта вместе с генерацией HTML:
 
 ```bash
-python3 build-transport-map.py \
-  --cache-dir cache \
-  --report-json report.json \
-  -o site-osmlab/routes.html
+./build-transport-map.py --report-json report.json
 ```
 
 Исследование конкретной железнодорожной станции:
 
 ```bash
-python3 build-transport-map.py \
-  --cache-dir cache \
-  --diagnose-station 'Москворечье' \
-  --diagnose-only
+./build-transport-map.py \
+    --diagnose-station 'Москворечье' \
+    --diagnose-only
 ```
 
 Диагностика формирует JSON и GeoJSON с подробностями привязки станций к

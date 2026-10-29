@@ -1,0 +1,740 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+        <meta name="application-version" content="0.15.14" />
+        <title>Moscow transport reachability</title>
+        <meta name="theme-color" content="#0d1534" />
+        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.15.14" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.15.14" />
+        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.15.14" />
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.15.14" />
+        <!-- First paint is entirely self-contained: no CSS or road asset request. -->
+        <style>
+            #boot-overlay {
+                position: fixed;
+                inset: 0;
+                z-index: 100000;
+                display: grid;
+                place-items: center;
+                padding: clamp(12px, 3vh, 28px);
+                background: radial-gradient(ellipse at 50% 35%, #1b203d 0%, #080c17 68%);
+                color: #e8eafa;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                box-sizing: border-box;
+            }
+            #boot-overlay[hidden] {
+                display: none;
+            }
+            #boot-card {
+                width: min(880px, 100%);
+                padding: clamp(14px, 2.8vw, 30px);
+                box-sizing: border-box;
+                overflow: hidden;
+                border: 1px solid #49415b;
+                border-radius: 13px;
+                background: linear-gradient(150deg, rgba(13, 16, 34, 0.97), rgba(17, 15, 29, 0.96));
+                box-shadow:
+                    0 38px 110px #000a,
+                    0 0 95px #4b295c18;
+                text-align: center;
+            }
+            .boot-eyebrow {
+                color: #c3a2cd;
+                font-size: 11px;
+                letter-spacing: 0.23em;
+                text-transform: uppercase;
+            }
+            #boot-card h1 {
+                color: #f6e5ec;
+                font-size: clamp(18px, 3.3vw, 27px);
+                font-weight: 500;
+                letter-spacing: 0.08em;
+                margin: 12px auto 20px;
+                position: relative;
+                width: max-content;
+                max-width: 100%;
+                text-align: center;
+            }
+            .boot-blink {
+                position: absolute;
+                left: 100%;
+                top: 0;
+                color: #f59a78;
+                animation: boot-blink 1s steps(1) infinite;
+            }
+            @keyframes boot-blink {
+                50% {
+                    opacity: 0;
+                }
+            }
+            #boot-network-shell {
+                width: 100%;
+                aspect-ratio: 2 / 1;
+                max-height: min(52vh, 410px);
+                position: relative;
+                overflow: hidden;
+                background: #0b1020;
+                border: 1px solid #36374c;
+            }
+            #boot-roads {
+                display: block;
+                width: 100%;
+                height: 100%;
+            }
+            #boot-network {
+                position: absolute;
+                inset: 0;
+                display: block;
+                width: 100%;
+                height: 100%;
+                pointer-events: none;
+            }
+            .boot-network-caption {
+                pointer-events: none;
+                position: absolute;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                display: flex;
+                justify-content: space-between;
+                padding: 16px 16px 10px;
+                background: linear-gradient(0deg, #0c0c1dbb, transparent);
+                font-size: 10px;
+                color: #c9a9be;
+                letter-spacing: 0.1em;
+            }
+            .boot-network-caption a {
+                pointer-events: auto;
+                color: inherit;
+                text-decoration: underline;
+            }
+            .boot-network-live {
+                color: #f3ac80;
+            }
+            .boot-network-live::before {
+                content: '';
+                display: inline-block;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                margin-right: 8px;
+                background: #f6b76b;
+                box-shadow: 0 0 8px #f48b5a;
+            }
+            #boot-stage {
+                margin-top: clamp(12px, 2vh, 20px);
+                color: #f4bc9f;
+                font-size: 12px;
+                font-weight: 650;
+                letter-spacing: 0.16em;
+            }
+            .boot-progress-line {
+                position: relative;
+                box-sizing: border-box;
+                width: calc(100% - clamp(100px, 16vw, 136px));
+                margin-inline: auto;
+                padding: 14px 0 8px;
+                color: #c08b9f;
+            }
+            .boot-meter {
+                position: relative;
+                min-width: 0;
+                height: 9px;
+                overflow: hidden;
+                border: 1px solid #7c546e;
+                border-radius: 999px;
+                background: #221b30;
+                box-shadow: inset 0 1px 4px #0008;
+            }
+            #boot-meter-fill {
+                display: block;
+                height: 100%;
+                width: 0;
+                border-radius: inherit;
+                background: linear-gradient(90deg, #bf677d, #f3a27f);
+                box-shadow: 0 0 12px #f3a27f80;
+                transition: width 100ms linear;
+            }
+            .boot-meter.is-indeterminate #boot-meter-fill {
+                width: 32% !important;
+                animation: boot-meter-sweep 1.65s ease-in-out infinite;
+            }
+            @keyframes boot-meter-sweep {
+                0% {
+                    transform: translateX(-105%);
+                }
+                100% {
+                    transform: translateX(325%);
+                }
+            }
+            #boot-percent {
+                position: absolute;
+                left: calc(100% + 12px);
+                top: 19px;
+                transform: translateY(-50%);
+                color: #ffccab;
+                font-size: 15px;
+                font-variant-numeric: tabular-nums;
+                white-space: nowrap;
+                text-align: left;
+            }
+            #boot-percent[hidden] {
+                display: none;
+            }
+            #boot-details {
+                color: #a9a4b9;
+                font-size: 12px;
+                overflow-wrap: anywhere;
+                min-height: 19px;
+            }
+            /* Match the exact center axis of the progress bar in all viewport sizes. */
+            .boot-eyebrow,
+            #boot-stage,
+            #boot-details,
+            #boot-error {
+                box-sizing: border-box;
+                width: 100%;
+                margin-inline: auto;
+                text-align: center;
+            }
+            #boot-error {
+                margin-top: 14px;
+                color: #ffb1ae;
+                overflow-wrap: anywhere;
+            }
+            #boot-retry {
+                cursor: pointer;
+                padding: 9px 18px;
+                border: 1px solid #f3ad96;
+                border-radius: 6px;
+                background: #402632;
+                color: #fff0e6;
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .boot-blink {
+                    animation: none;
+                }
+            }
+            @media (max-height: 680px) {
+                #boot-card h1 {
+                    margin: 8px 0 12px;
+                }
+            }
+            @media (max-width: 520px) {
+                #boot-network-shell {
+                    aspect-ratio: 1.6 / 1;
+                }
+                .boot-network-caption {
+                    font-size: 8px;
+                    padding: 10px;
+                }
+            }
+        </style>
+        <!-- Noncritical app styles cannot block first paint of the loader. -->
+        <link
+            rel="preload"
+            as="style"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            onload="
+                this.onload = null;
+                this.rel = 'stylesheet';
+            "
+        />
+        <link
+            rel="preload"
+            as="style"
+            href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+            onload="
+                this.onload = null;
+                this.rel = 'stylesheet';
+            "
+        />
+        <link
+            rel="preload"
+            as="style"
+            href="routes.css?v=0.15.14"
+            onload="
+                this.onload = null;
+                this.rel = 'stylesheet';
+            "
+        />
+        <noscript><link rel="stylesheet" href="routes.css?v=0.15.14" /></noscript>
+        <meta name="transport-config" content="routes-config.json" />
+    </head>
+    <body>
+        <input id="info-collapse" type="checkbox" checked aria-hidden="true" />
+        <div id="map" aria-label="Transport reachability map"></div>
+        <div id="boot-overlay" role="status" aria-live="polite" aria-atomic="true">
+            <div id="boot-card">
+                <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
+                <h1>Building your map<span class="boot-blink">_</span></h1>
+                <div id="boot-network-shell" aria-hidden="true">
+                    <svg
+                        id="boot-roads"
+                        viewBox="0 0 800 400"
+                        preserveAspectRatio="xMidYMid meet"
+                        aria-hidden="true"
+                    >
+                        <path
+                            id="boot-road-path"
+                            d="
+        M478 308 501 280 497 252 497 243 501 232 503 184 501 145 499 139 452 95 439 85 435
+        83 403 79 385 70 358 74 341 87 331 92 321 93 302 104 297 112 295 120 296 138 293 154
+        285 171 284 205 294 236 303 247 315 277 347 325 350 328 387 344 424 348 446 335 474
+        311 M472 313 461 323 427 347 387 344 350 328 315 277 303 248 294 236 284 201 285 172
+        293 156 297 132 295 120 300 107 305 102 321 93 329 93 341 87 358 74 384 70 400 78
+        439 85 496 136 501 145 503 184 501 230 496 248 501 279 478 307 M429 181 432 185 430
+        195 434 198 437 205 436 213 442 223 424 233 417 240 399 238 395 242 385 237 380 230
+        369 224 361 210 359 200 361 191 365 183 369 182 370 180 M370 181 367 182 362 188 359
+        200 361 210 369 224 377 228 383 236 394 242 400 238 417 240 431 229 443 223 436 213
+        437 204 434 197 433 185 429 181 M400 182 396 182 388 186 384 194 M405 167 415 166
+        419 172 M419 171 415 166 405 167 M410 215 407 205 403 205 M384 194 386 189 391 184
+        M417 190 414 186 408 183 M390 185 400 182 M551 196 541 193 M547 44 538 43 M227 261
+        230 263 232 268 M478 307 472 313 M478 307 472 313 M184 120 177 116 M330 354 328 357
+        330 354 M522 241 517 236 M408 183 414 186 M573 103 567 100 M403 203 408 206 M413 186
+        417 190 M474 311 478 308 M474 311 478 308 M363 38 359 40 M416 263 413 260 M384 167
+        388 167 M388 167 384 167 M491 53 491 57 M401 218 397 218 M397 218 401 218 M401 182
+        404 183 M361 192 360 195 M404 182 401 182 M416 263 417 265 M396 370 401 371 414 380
+        423 381 432 378 439 379 449 375 461 379 482 377 496 370 500 370 511 380 520 382 527
+        373 528 360 535 357 543 345 543 338 536 327 538 319 540 316 555 309 558 303 558 289
+        563 284 560 265 558 262 558 246 561 242 560 235 562 232 561 226 561 242 557 249 563
+        285 558 288 558 303 555 309 540 316 537 320 536 328 541 335 543 345 535 357 528 360
+        528 369 522 381 516 382 511 380 501 370 496 370 480 377 459 378 449 375 439 379 430
+        378 424 381 413 379 400 370 397 370 M386 359 384 358 384 362 393 362 396 358 399 332
+        410 314 413 294 417 293 430 295 434 287 448 269 453 253 451 248 449 233 450 224 448
+        217 451 208 458 201 459 163 M414 186 415 182 433 166 442 165 474 153 503 149 514 143
+        549 133 552 127 571 108 574 99 584 83 597 80 M207 348 210 347 210 339 213 335 226
+        327 229 319 234 315 240 306 245 306 258 302 262 299 273 297 287 282 292 282 303 275
+        315 274 351 237 361 230 361 221 367 219 M367 219 360 222 361 230 332 256 324 266 320
+        267 317 272 303 275 292 282 287 282 273 297 262 299 245 306 240 306 234 315 229 319
+        226 327 212 335 209 341 209 347 M454 205 451 208 448 217 452 252 448 269 442 275 441
+        279 436 284 430 295 413 293 410 314 399 332 396 358 394 361 390 362 386 362 384 361
+        385 360 M497 253 528 278 543 297 556 304 579 322 583 337 589 347 605 361 630 388
+        M323 295 263 324 204 349 172 366 149 375 M631 388 609 367 602 358 589 347 578 321
+        556 303 542 296 528 278 499 255 M149 375 172 366 204 349 242 334 322 296 M149 315
+        158 311 180 306 205 303 230 285 250 278 253 276 271 245 285 233 293 232 M290 232 281
+        235 271 245 253 276 249 279 230 285 205 303 180 306 149 314 M415 210 417 209 437 213
+        449 218 459 218 474 227 500 236 530 263 536 275 545 285 547 295 549 297 M651 219 644
+        221 640 225 628 230 607 229 584 237 579 237 570 233 557 234 547 229 539 230 537 234
+        528 235 525 237 520 235 507 236 504 234 M504 234 507 236 520 235 525 237 528 235 535
+        235 542 229 547 229 558 235 572 233 579 237 585 237 607 229 628 230 651 219 M364 116
+        368 120 413 123 453 145 458 150 459 154 457 170 459 197 456 203 M651 145 552 165 532
+        166 522 172 502 180 M502 180 522 172 532 166 552 165 651 145 M551 301 548 297 545
+        285 536 275 529 261 521 256 504 239 460 219 445 217 436 213 M149 95 160 96 172 101
+        189 110 202 122 213 127 229 128 239 134 250 131 263 145 274 146 277 148 281 142 M279
+        146 263 145 249 130 239 134 229 128 213 127 202 122 189 110 172 101 161 96 149 95
+        M189 305 195 305 197 302 196 288 199 283 204 281 213 281 215 279 218 270 218 263 231
+        250 249 245 255 240 264 225 277 218 283 218 M284 218 277 218 272 222 267 223 264 225
+        255 240 249 245 231 250 220 260 217 266 218 270 216 278 212 281 202 281 199 283 196
+        288 195 302 189 305 M495 36 479 28 472 29 467 33 459 35 448 34 442 30 431 27 402 35
+        385 34 381 30 370 37 363 38 M279 166 272 161 257 157 249 158 237 164 231 171 216 181
+        204 181 176 171 149 173 M149 173 175 171 209 182 220 180 238 164 249 158 258 158 279
+        166 M363 38 370 37 379 31 385 34 405 35 431 28 440 29 448 34 459 35 477 28 494 35
+        M396 200 398 196 384 180 359 160 348 154 327 104 320 94 M271 245 271 247 252 255 240
+        265 221 275 202 275 186 281 182 281 174 277 165 277 158 279 149 285 M402 218 400 244
+        405 273 437 296 441 301 450 331 M389 343 400 298 400 272 403 267 400 243 404 225 402
+        220 403 218 401 218 M258 12 268 22 275 25 288 35 293 34 294 31 297 30 312 34 321 44
+        325 64 338 78 337 86 M338 86 338 77 325 64 321 44 313 35 301 30 296 30 289 35 266 20
+        259 12 M529 138 513 143 502 149 474 153 461 159 433 166 415 181 M395 182 393 183 392
+        178 384 165 383 156 378 142 376 120 366 105 365 74 M630 12 625 18 619 18 608 31 601
+        34 591 45 576 56 572 72 566 82 577 94 M459 163 459 152 454 146 418 125 413 123 369
+        120 365 116 M339 318 353 300 358 287 379 252 382 236 395 220 M396 200 379 200 356
+        212 289 232 M286 169 294 172 297 179 301 183 315 183 323 178 383 194 M381 193 323
+        178 315 183 301 183 293 171 286 169 M513 12 504 21 496 34 490 40 488 49 484 54 480
+        65 466 73 456 87 450 92 M227 74 232 74 237 79 251 85 267 101 276 113 290 125 294 134
+        304 137 M452 90 467 73 474 70 481 64 491 39 502 24 514 12 M474 309 469 309 461 301
+        456 276 451 232 448 229 438 225 M446 96 441 104 428 116 409 145 406 183 M549 297 561
+        297 580 304 591 305 597 312 618 318 625 322 632 338 M499 255 479 241 451 235 426 219
+        416 208 M381 236 379 252 358 286 347 309 338 321 M415 209 420 220 422 238 419 269
+        415 281 417 283 416 294 419 300 M420 300 416 294 417 282 415 280 420 267 422 238 420
+        221 415 210 M416 209 426 219 451 235 479 241 497 253 M336 283 335 280 338 270 362
+        248 383 219 387 217 389 212 388 213 M407 167 409 144 430 114 442 103 452 90 M387 215
+        387 217 383 219 361 248 338 270 335 285 333 286 M568 277 575 273 579 273 587 276 602
+        279 614 279 619 281 625 278 641 288 651 291 M283 218 324 220 343 215 348 213 352 206
+        359 202 360 195 M360 195 358 202 343 215 324 220 284 218 M450 331 439 298 406 273
+        403 263 M384 234 366 252 345 277 323 295 M291 388 296 376 312 366 318 360 318 357
+        332 337 339 320 M425 211 428 204 437 203 502 180 M403 263 403 267 400 272 400 298
+        389 346 M322 296 345 277 382 236 M338 321 331 337 322 349 316 362 296 376 291 388
+        M200 276 224 274 240 265 252 255 272 247 273 243 M451 237 454 253 455 276 461 301
+        464 306 475 310 M319 94 326 103 348 155 356 159 M493 388 481 368 473 360 464 344 450
+        331 M450 331 462 342 473 360 488 378 493 388 M297 63 260 18 249 12 M577 94 566 81
+        572 73 576 56 591 46 596 40 M286 233 318 225 353 213 M248 12 260 19 294 61 M223 72
+        217 70 206 62 199 49 195 48 195 38 200 32 198 21 M356 158 296 134 M365 72 364 91 367
+        100 366 105 367 109 375 118 378 132 M194 48 189 46 179 47 174 42 172 36 163 29 156
+        16 149 12 M365 72 367 52 360 30 360 23 356 16 357 12 M597 351 601 346 614 342 625
+        347 627 347 632 341 639 340 644 340 651 344 M589 347 581 338 579 333 574 331 566 322
+        564 315 552 301 M336 90 338 96 368 119 378 132 M378 132 378 142 383 156 383 165 392
+        178 393 183 389 185 M553 304 564 315 568 325 574 331 579 333 581 338 589 347 M457
+        204 460 205 474 219 493 230 504 234 M304 137 356 159 M296 134 293 133 293 128 276
+        113 260 93 M284 185 319 215 321 225 M356 159 384 180 398 196 M322 224 319 215 284
+        185 M386 69 383 107 384 123 M606 78 619 74 635 62 639 57 651 55 M504 234 495 231 474
+        219 461 206 M460 340 472 360 466 388 M149 285 158 279 166 277 173 277 182 281 197
+        277 M384 123 383 107 385 99 385 72 M357 12 356 18 360 23 360 30 367 54 366 59 M296
+        134 294 133 284 138 279 146 260 159 263 159 M431 344 425 333 423 322 418 312 417 302
+        420 300 M419 301 417 302 417 310 423 322 424 331 431 344 M353 213 379 200 391 199
+        395 202 M636 341 633 341 626 347 618 342 613 342 603 345 597 351 M365 116 337 94 336
+        91 338 86 M389 346 390 352 385 360 381 388 M502 180 462 195 M461 195 428 204 424 211
+        M263 159 278 148 284 138 295 134 M439 388 436 373 429 365 434 350 M433 350 429 365
+        435 371 439 388 M381 388 385 360 391 349 M162 28 168 22 199 21 M545 165 545 158 555
+        149 555 138 550 132 M320 94 297 63 M198 21 167 22 162 27 M297 63 319 94 M299 13 292
+        15 273 34 275 37 M401 218 409 217 416 208 417 190 M395 202 398 207 396 219 384 234
+        M471 369 472 361 464 348 463 341 459 339 M274 35 274 33 294 14 299 13 M392 354 396
+        379 395 388 M395 388 396 379 392 354 M537 277 556 273 568 277 M397 218 384 211 384
+        194 M323 12 323 18 315 24 305 27 305 32 M548 156 529 159 527 169 525 169 M305 32 305
+        29 308 26 315 25 323 19 323 12 M199 21 200 32 195 38 195 48 M564 276 556 273 537 277
+        M417 190 416 208 414 211 M297 58 305 38 M383 204 384 210 397 218 M378 132 365 116
+        M540 166 560 163 M388 167 399 166 407 168 M305 38 298 55 M415 210 413 213 410 204
+        406 201 M396 218 399 209 395 202 M405 167 388 167 M437 226 448 220 449 216 M651 344
+        644 340 636 341 M367 206 383 205 M414 211 409 217 401 218 M383 204 368 205 M406 183
+        407 168 M448 218 448 220 437 226 M429 181 419 171 M413 213 410 204 406 202 M348 325
+        340 314 M442 338 453 330 M419 172 429 181 M183 16 192 15 195 12 M195 12 191 15 183
+        16 M406 202 396 203 396 200 M398 196 403 194 406 201 M198 12 210 12 M461 206 455 201
+        454 205 M384 167 379 167 375 172 M436 213 425 211 M408 183 397 182 M397 182 408 183
+        M366 59 365 70 M209 12 198 12 M461 206 458 200 459 196 M597 351 593 352 589 347 M392
+        354 389 344 M366 59 365 69 M383 194 383 204 M375 173 371 177 370 181 M298 55 295 61
+        297 63 M597 80 606 78 M606 78 597 80 M550 165 541 166 M396 357 393 361 393 365 M525
+        170 533 166 M294 61 298 64 296 61 M370 180 375 173 M286 169 279 166 M279 166 286 169
+        M422 242 423 235 M434 350 431 344 M533 166 527 169 M415 181 415 184 412 186 M436 213
+        435 212 438 216 M336 309 340 314 M459 163 460 159 462 158 M431 344 433 350 M298 135
+        304 137 M417 202 416 208 M378 168 384 167 M305 32 305 38 M305 38 305 32 M183 21 183
+        15 M340 314 343 319 M450 92 446 96 M415 181 411 185 M433 228 438 226 M391 349 389
+        344 M459 196 464 194 M501 180 496 182 M397 219 402 218 M441 224 436 225 M375 172 378
+        168 M401 218 396 218 M183 16 183 21 M636 341 632 338 M389 346 391 350 M223 72 227 74
+        M337 323 339 319 M394 363 396 359 M227 74 223 72 M456 203 455 202 457 204 M454 205
+        456 203 457 204 M391 350 392 354 M362 35 363 39 M337 86 336 90 M312 274 308 275 M364
+        42 363 38 M498 149 494 150 M349 213 353 213 M399 346 403 346 M416 208 414 211 M395
+        220 398 218 M294 61 297 63 M299 13 302 12 M437 226 434 227 M296 61 297 58 M632 338
+        633 341 M362 35 363 38 M363 39 364 42 M552 301 553 304 M633 341 636 341 M365 69 365
+        72 M395 220 398 220 M398 220 395 220 M382 236 384 234 M384 234 382 236 M453 330 455
+        328 M456 203 454 205 M551 302 553 304 M398 220 397 218 M436 203 437 205 M365 216 364
+        214 M447 94 446 96 M292 231 290 232 M365 74 366 72 M496 182 494 183 M340 314 339 312
+        M343 319 344 321 M297 63 296 61 M416 209 416 207 M437 205 437 203 M365 74 365 72
+        M501 232 501 230 M633 341 633 339 M457 196 459 196 M339 320 339 318 M390 348 390 346
+        M295 134 297 134
+    "
+                            fill="none"
+                            stroke="#39465f"
+                            stroke-width="1.55"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        />
+                    </svg>
+                    <canvas id="boot-network" width="800" height="400"></canvas>
+                    <div class="boot-network-caption">
+                        <span>
+                            MAJOR ROADS / &copy;
+                            <a
+                                href="https://www.openstreetmap.org/copyright"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            >
+                                OpenStreetMap contributors
+                            </a>
+                        </span>
+                        <span class="boot-network-live">NETWORK ACTIVE</span>
+                    </div>
+                </div>
+                <div id="boot-stage">INITIALIZING</div>
+                <div class="boot-progress-line">
+                    <div
+                        id="boot-meter"
+                        class="boot-meter is-indeterminate"
+                        role="progressbar"
+                        aria-label="Map loading progress"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                    >
+                        <span id="boot-meter-fill"></span>
+                    </div>
+                    <b id="boot-percent" hidden></b>
+                </div>
+                <div id="boot-details">Connecting to the data source...</div>
+                <div id="boot-error" hidden>
+                    <p id="boot-error-message"></p>
+                    <button type="button" id="boot-retry">Reload page</button>
+                </div>
+            </div>
+        </div>
+        <aside id="info" aria-label="Transport reachability controls">
+            <label id="info-handle" for="info-collapse" aria-label="Expand or collapse settings">
+                <span id="info-handle-left">
+                    <span id="info-handle-title"> Transport reachability </span>
+                    <span id="info-handle-hint"> Tap to expand or collapse </span>
+                </span>
+                <span id="info-arrow" aria-hidden="true">
+                    <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <path d="m6 15 6-6 6 6"></path>
+                    </svg>
+                </span>
+            </label>
+            <div id="info-content">
+                <div class="info-intro">
+                    <div class="info-heading-row">
+                        <div id="info-title">Transport reachability</div>
+                        <button
+                            id="reset-origin"
+                            type="button"
+                            title="Clear the selected start point and route"
+                            aria-label="Clear selected start point and route"
+                            disabled
+                        >
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <circle cx="12" cy="12" r="9"></circle>
+                                <path d="M9 9l6 6m0-6-6 6"></path>
+                            </svg>
+                            <span>Reset</span>
+                        </button>
+                    </div>
+                    <div class="info-row">
+                        Click once for a start point. Double-click anywhere for route to any point
+                        while keeping reachability mode.
+                    </div>
+                    <div class="project-version">v0.15.14</div>
+                    <div
+                        id="timing-status"
+                        role="status"
+                        style="font-size: 12px; color: #64748b; margin-top: 5px"
+                    >
+                        Ready
+                    </div>
+                </div>
+                <div class="control" id="transport-modes">
+                    <div class="control-label">
+                        <span id="transport-modes-heading">Transport modes</span>
+                    </div>
+                    <div class="mode-grid" role="group" aria-label="Transport modes">
+                        <label class="mode-option" title="19.2 km/h">
+                            <input class="mode-input" type="checkbox" value="bus" checked />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="3" width="16" height="16" rx="3" />
+                                    <path d="M4 11h16" />
+                                    <path d="M8 19v2m8-2v2" />
+                                    <path d="M8 15h.01" />
+                                    <path d="M16 15h.01" />
+                                    <path d="M8 7h8" />
+                                </svg>
+                                <span data-mode-name="bus">Bus</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="18 km/h">
+                            <input class="mode-input" type="checkbox" value="tram" checked />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="5" y="5" width="14" height="14" rx="3" />
+                                    <path d="M5 12h14" />
+                                    <path d="M9 5V2m6 3V2" />
+                                    <path d="M8 22l3-3m5 3-3-3" />
+                                    <path d="M8 15h.01" />
+                                    <path d="M16 15h.01" />
+                                </svg>
+                                <span data-mode-name="tram">Tram</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="16.8 km/h">
+                            <input class="mode-input" type="checkbox" value="trolleybus" checked />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="6" width="16" height="13" rx="3" />
+                                    <path d="M4 13h16" />
+                                    <path d="M8 6l-2-4m9 4 3-4" />
+                                    <path d="M7 19v2m10-2v2" />
+                                    <path d="M8 16h.01" />
+                                    <path d="M16 16h.01" />
+                                </svg>
+                                <span data-mode-name="trolleybus">Trolleybus</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="37.8 km/h">
+                            <input class="mode-input" type="checkbox" value="metro" />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M4 20V5l8 10 8-10v15M2 21h20" />
+                                </svg>
+                                <span data-mode-name="metro">Metro</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="46.8 km/h">
+                            <input class="mode-input" type="checkbox" value="mcc" />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="4" width="16" height="15" rx="4" />
+                                    <path d="M4 12h16" />
+                                    <path d="M8 19l-2 3m10-3 2 3" />
+                                    <path d="M8 8h8" />
+                                    <path d="M8 15h.01" />
+                                    <path d="M16 15h.01" />
+                                    <circle cx="12" cy="12" r="8" stroke-dasharray="2 6" />
+                                </svg>
+                                <span data-mode-name="mcc">MCC</span>
+                            </span>
+                        </label>
+                        <label
+                            class="mode-option"
+                            title="MCD and suburban rail; separate train services"
+                        >
+                            <input class="mode-input" type="checkbox" value="rail" />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="4" width="16" height="15" rx="4" />
+                                    <path d="M4 12h16M7 7h10M8 19l-2 3m10-3 2 3" />
+                                    <path d="M8 15h.01M16 15h.01" />
+                                </svg>
+                                <span data-mode-name="rail">MCD + Electric Trains</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="mode-hint" id="transport-modes-hint">
+                        Surface transport is on by default. Speeds are estimates.
+                    </div>
+                </div>
+                <div class="control">
+                    <div class="control-label">
+                        <label for="walk-time">Max walking time</label>
+                        <b id="walk-time-value"></b>
+                    </div>
+                    <input id="walk-time" type="range" min="1" max="15" step="1" value="5" />
+                    <div class="range-scale range-scale-walk">
+                        <span>1 min</span>
+                        <span>5</span>
+                        <span>10</span>
+                        <span>15 min</span>
+                    </div>
+                </div>
+                <div class="control">
+                    <div class="control-label">
+                        <label id="transfer-label" for="transfer-count"> Transfers </label>
+                        <b id="transfer-mode-value">No transfers</b>
+                    </div>
+                    <input
+                        id="transfer-count"
+                        type="range"
+                        min="0"
+                        max="2"
+                        step="1"
+                        value="0"
+                        aria-label="Maximum number of transfers"
+                    />
+                    <div class="range-scale range-scale-transfer">
+                        <span>0</span>
+                        <span>1</span>
+                        <span>2</span>
+                    </div>
+                </div>
+                <div class="control">
+                    <div class="control-label">
+                        <label for="travel-time-limit">Travel time limit</label>
+                        <b id="travel-time-limit-value">60 min</b>
+                    </div>
+                    <input
+                        id="travel-time-limit"
+                        type="range"
+                        min="0"
+                        max="185"
+                        step="5"
+                        value="60"
+                        aria-label="Maximum total travel time"
+                    />
+                    <div class="range-scale range-scale-time">
+                        <span>0</span>
+                        <span>60</span>
+                        <span>120</span>
+                        <span>No limit</span>
+                    </div>
+                </div>
+                <div class="control">
+                    <div class="control-label">
+                        <label for="circle-opacity">Walking paths opacity</label>
+                        <b id="circle-opacity-value"></b>
+                    </div>
+                    <input id="circle-opacity" type="range" min="0" max="100" step="1" value="50" />
+                    <div class="range-scale range-scale-opacity">
+                        <span>0%</span>
+                        <span>50%</span>
+                        <span>100%</span>
+                    </div>
+                </div>
+                <div class="note">
+                    Walking access uses OSM pedestrian paths, with estimated speed 80 m/min.
+                    Unmapped connections are excluded.
+                </div>
+                <div id="analysis-summary">
+                    <div class="analysis-title">Reachability</div>
+                    <div class="info-row">
+                        <span>Nearby stops</span>
+                        <b id="nearby-count">0</b>
+                    </div>
+                    <div class="info-row">
+                        <span>Direct routes</span>
+                        <b id="direct-route-count">0</b>
+                    </div>
+                    <div class="info-row">
+                        <span>Without transfers</span>
+                        <span class="analysis-value"> <b id="direct-stop-count">0</b> stops </span>
+                    </div>
+                    <div class="info-row">
+                        <span>One-transfer routes</span>
+                        <b id="transfer-route-count">0</b>
+                    </div>
+                    <div class="info-row">
+                        <span>With one transfer only</span>
+                        <span class="analysis-value">
+                            <b id="transfer-stop-count">0</b> stops
+                        </span>
+                    </div>
+                    <div class="info-row">
+                        <span>Two-transfer routes</span>
+                        <b id="two-transfer-route-count">0</b>
+                    </div>
+                    <div class="info-row">
+                        <span>With two transfers only</span>
+                        <span class="analysis-value">
+                            <b id="two-transfer-stop-count">0</b> stops
+                        </span>
+                    </div>
+                    <div id="routes"></div>
+                </div>
+                <div id="trip-panel" hidden>
+                    <div id="trip-title" class="trip-title">Trip</div>
+                    <button id="trip-back-top" type="button">Back</button>
+                    <div id="trip-alternatives"></div>
+                    <div id="trip-steps"></div>
+                    <button id="trip-back" type="button">Back</button>
+                </div>
+            </div>
+        </aside>
+        <div id="legend" aria-label="Map legend">
+            <div class="legend-title">Map</div>
+            <div class="legend-row">
+                <span class="legend-origin" aria-hidden="true">x</span>
+                <span id="legend-origin-text"></span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-coverage-direct" aria-hidden="true">x</span>
+                <span>without transfers</span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-coverage-transfer" aria-hidden="true">x</span>
+                <span>with one transfer</span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-coverage-two-transfer" aria-hidden="true">x</span>
+                <span>with two transfers</span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-route" aria-hidden="true">x</span>
+                <span>reachable routes</span>
+            </div>
+        </div>
+        <script src="boot-loader.js?v=0.15.14" data-map-script="routes.js?v=0.15.14" defer></script>
+    </body>
+</html>

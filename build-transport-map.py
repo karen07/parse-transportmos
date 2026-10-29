@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.15.12"
+PROJECT_VERSION = "0.15.14"
 
 
 # OSM extraction and normalization
@@ -6004,8 +6004,12 @@ def build_html(
     maplibre_worker_filename = base + "-maplibre-worker.js"
     config_filename = base + "-config.json"
     html = (WEB_SOURCE_DIR / "page.html").read_text(encoding="ascii")
+    from boot_svg import render_inline_svg
 
-    # Only build-specific values are emitted; CSS and JavaScript remain static.
+    boot_svg = render_inline_svg(output_path.with_name("moscow-major-roads.json"))
+    boot_css = (WEB_SOURCE_DIR / "boot-loader.css").read_text(encoding="ascii")
+
+    # Python injects static road DATA and critical CSS, not source JS code.
     config = {
         "version": PROJECT_VERSION,
         "data_file": data_filename,
@@ -6026,6 +6030,8 @@ def build_html(
         "@@PAGE_JS@@": quote(js_filename),
         "@@PAGE_CSS@@": quote(css_filename),
         "@@CONFIG_JSON@@": quote(config_filename),
+        "@@BOOT_ROADS_SVG@@": boot_svg,
+        "@@BOOT_CSS@@": boot_css,
         "@@INITIAL_WALK_MINUTES@@": f"{initial_walk_minutes:.0f}",
         "@@INITIAL_OPACITY@@": f"{initial_circle_opacity:.0f}",
         "@@WALK_SPEED@@": f"{walk_speed:.0f}",
@@ -6065,11 +6071,12 @@ def build_html(
         css_filename: "routes.css",
         data_worker_filename: "routes-data-worker.js",
         "boot-loader.js": "boot-loader.js",
-        "boot-loader.css": "boot-loader.css",
     }
     for destination, source in static_assets.items():
         content = (WEB_SOURCE_DIR / source).read_bytes()
         write_atomic_bytes(output_path.with_name(destination), content)
+    # Older releases copied this stylesheet, but it is now inlined for FCP.
+    output_path.with_name("boot-loader.css").unlink(missing_ok=True)
     # Prefer to vendor the official matching CSP worker once at build time.
     # If unavailable, fall back to a same-origin shim importing from the
     # same unpkg origin that already serves MapLibre's main JS bundle.
@@ -6889,13 +6896,22 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Build the Moscow transport reachability map."
     )
-    parser.add_argument("-o", "--output", default="routes.html")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="dist/routes.html",
+        help="Output HTML path (default: dist/routes.html)",
+    )
     parser.add_argument(
         "--self-test",
         action="store_true",
         help="Run standalone station/transfer regression tests",
     )
-    parser.add_argument("--cache-dir", default="cache")
+    parser.add_argument(
+        "--cache-dir",
+        default="build",
+        help="Directory for downloads and intermediate files (default: build)",
+    )
     parser.add_argument(
         "--through-service-policy",
         choices=("estimated", "strict"),
@@ -7350,20 +7366,6 @@ def main():
             json.dumps(report, ensure_ascii=True, indent=4) + "\n", encoding="ascii"
         )
     step_done("statistics and audit", phase_started)
-    phase_started = time.monotonic()
-    print("[build] START HTML encode + gzip", flush=True)
-    html = build_html(
-        index,
-        args.walk_minutes,
-        args.walk_speed,
-        args.circle_opacity,
-        Path(args.output),
-    )
-    step_done("HTML encode + gzip", phase_started)
-    phase_started = time.monotonic()
-    print("[build] START HTML file write", flush=True)
-    write_atomic_bytes(Path(args.output), html.encode("ascii"))
-    step_done("HTML file write", phase_started)
     if not args.input_geojson:
         from major_roads import generate as generate_major_roads
 
@@ -7381,6 +7383,20 @@ def main():
             print("[build] START major road illustration", flush=True)
             generate_major_roads(raw_source, roads_path)
             step_done("major road illustration", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START HTML encode + gzip", flush=True)
+    html = build_html(
+        index,
+        args.walk_minutes,
+        args.walk_speed,
+        args.circle_opacity,
+        Path(args.output),
+    )
+    step_done("HTML encode + gzip", phase_started)
+    phase_started = time.monotonic()
+    print("[build] START HTML file write", flush=True)
+    write_atomic_bytes(Path(args.output), html.encode("ascii"))
+    step_done("HTML file write", phase_started)
     print(f"wrote: {Path(args.output).resolve()}")
     print("[build] FINAL TIMINGS (seconds)", flush=True)
     for name, duration in build_phases:
