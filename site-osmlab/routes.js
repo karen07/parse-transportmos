@@ -1,475 +1,4 @@
-/* Night Highway-inspired Canvas loading scene. Runs independently from the
- * transport data Worker; no third-party scripts or network calls. */
-const bootUI = {
-    overlay: document.getElementById('boot-overlay'),
-    canvas: document.getElementById('boot-highway'),
-    stage: document.getElementById('boot-stage'),
-    percent: document.getElementById('boot-percent'),
-    meter: document.getElementById('boot-meter'),
-    fill: document.getElementById('boot-meter-fill'),
-    details: document.getElementById('boot-details'),
-    error: document.getElementById('boot-error'),
-    errorMessage: document.getElementById('boot-error-message'),
-};
-const bootReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-let bootAnimationId = null;
-const roadContext = bootUI.canvas.getContext('2d', { alpha: false });
-const ROAD_W = 800,
-    ROAD_H = 400,
-    HORIZON = 206,
-    MID = 400;
-const roadStars = Array.from({ length: 75 }, (_, i) => ({
-    x: (i * 263.819 + 47) % ROAD_W,
-    y: (i * 79.117 + 17) % 164,
-    size: 0.5 + (i % 4) * 0.3,
-    glow: (i % 13) / 13,
-}));
-const roadNoise = (x) => {
-    const n = Math.sin(x * 78.233 + 12.983) * 43758.5453;
-    return n - Math.floor(n);
-};
-function polygon(ctx, points, fill) {
-    ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-}
-function luminousDot(ctx, x, y, radius, color, halo) {
-    if (halo) {
-        const glow = ctx.createRadialGradient(x, y, 0, x, y, radius * 7);
-        glow.addColorStop(0, halo);
-        glow.addColorStop(1, '#0000');
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(x, y, radius * 7, 0, Math.PI * 2);
-        ctx.fill();
-    }
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-}
-function mountainRidge(ctx, base, height, frequency, fill, seed) {
-    const pts = [
-        [0, ROAD_H],
-        [0, base],
-    ];
-    for (let x = 0; x <= ROAD_W; x += 5) {
-        const slow = Math.sin(x * frequency + seed) * 0.65;
-        const broad = Math.sin(x * frequency * 0.43 + seed * 3.2) * 0.32;
-        const jagged = (roadNoise(Math.floor(x / 13) + seed) - 0.5) * 0.12;
-        pts.push([x, base - height * Math.max(0, slow + broad + jagged + 0.4)]);
-    }
-    pts.push([ROAD_W, ROAD_H]);
-    polygon(ctx, pts, fill);
-}
-function drawHighwayScene(ms) {
-    if (!roadContext) return;
-    const ctx = roadContext;
-    const t = ms * 0.001;
-    const w = ROAD_W,
-        h = ROAD_H;
-    // Dusk sky, final warm band behind the mountain range.
-    let sky = ctx.createLinearGradient(0, 0, 0, HORIZON + 42);
-    sky.addColorStop(0, '#060b1f');
-    sky.addColorStop(0.39, '#262447');
-    sky.addColorStop(0.71, '#6c3b69');
-    sky.addColorStop(0.89, '#b85a70');
-    sky.addColorStop(1, '#f1a36a');
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, w, h);
-    const sun = ctx.createRadialGradient(420, 215, 10, 420, 215, 260);
-    sun.addColorStop(0, '#ffb36a42');
-    sun.addColorStop(1, '#ffb36a00');
-    ctx.fillStyle = sun;
-    ctx.fillRect(70, 25, 680, 260);
-    // Fine sky texture, blinking stars, moon crescent.
-    for (let i = 0; i < roadStars.length; i++) {
-        const star = roadStars[i];
-        ctx.globalAlpha = 0.22 + (0.3 * (1 + Math.sin(t * 0.9 + i * 2.5))) / 2;
-        ctx.fillStyle = '#e7e5ff';
-        ctx.fillRect(star.x, star.y, star.size, star.size);
-    }
-    ctx.globalAlpha = 1;
-    luminousDot(ctx, 608, 53, 8, '#ffe9d2', '#f3d7c72e');
-    luminousDot(ctx, 612, 49, 7.4, '#0b1229', null);
-    // Wispy coloured cloud shelves.
-    ctx.globalAlpha = 0.2;
-    for (let i = 0; i < 9; i++) {
-        const y = 145 + i * 6 + Math.sin(i * 3.1) * 8;
-        ctx.strokeStyle = i % 2 ? '#f7b086' : '#392746';
-        ctx.lineWidth = 1.4 + (i % 4) * 0.5;
-        ctx.beginPath();
-        ctx.ellipse(160 + i * 51, y, 93, 2.2 + (i % 3), -0.045, 0, Math.PI * 2);
-        ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-    mountainRidge(ctx, 237, 43, 0.011, '#30233d', 2.3);
-    mountainRidge(ctx, 244, 31, 0.018, '#1b1b34', 4.7);
-    mountainRidge(ctx, 255, 19, 0.027, '#11172b', 6.7);
-    // Foreground desert silhouettes.
-    polygon(
-        ctx,
-        [
-            [0, 260],
-            [110, 257],
-            [251, 275],
-            [0, 400],
-        ],
-        '#121523',
-    );
-    polygon(
-        ctx,
-        [
-            [800, 256],
-            [702, 260],
-            [548, 285],
-            [800, 400],
-        ],
-        '#151522',
-    );
-    const farLeft = MID - 10,
-        farRight = MID + 10;
-    const nearLeft = MID - 360,
-        nearRight = MID + 360;
-    // Soft road shoulder glow and dark asphalt.
-    polygon(
-        ctx,
-        [
-            [farLeft - 3, HORIZON],
-            [farRight + 3, HORIZON],
-            [nearRight + 24, h],
-            [nearLeft - 24, h],
-        ],
-        '#b85b6532',
-    );
-    const asphalt = ctx.createLinearGradient(0, HORIZON, 0, h);
-    asphalt.addColorStop(0, '#19182a');
-    asphalt.addColorStop(0.65, '#10131e');
-    asphalt.addColorStop(1, '#080c16');
-    polygon(
-        ctx,
-        [
-            [farLeft, HORIZON],
-            [farRight, HORIZON],
-            [nearRight, h],
-            [nearLeft, h],
-        ],
-        asphalt,
-    );
-    // Perspective edge: y is quadratic in depth, width grows with distance.
-    const project = (z, side) => {
-        const q = Math.max(0, Math.min(1, z));
-        const p = q * q;
-        const y = HORIZON + (h - HORIZON) * p;
-        const edge = 10 + 350 * p;
-        return { x: MID + side * edge, y, p };
-    };
-    for (const side of [-1, 1]) {
-        ctx.strokeStyle = side === -1 ? '#db786a' : '#e7ad7e';
-        ctx.lineWidth = 1.6;
-        ctx.shadowColor = '#ffa46c';
-        ctx.shadowBlur = 8;
-        ctx.beginPath();
-        ctx.moveTo(project(0, side).x, HORIZON);
-        ctx.lineTo(project(1, side).x, h);
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-    }
-    // Dashed central lane markers moving towards the viewer.
-    const shift = (t * 0.25) % 1;
-    for (let i = 0; i < 15; i++) {
-        const z = (i / 15 + shift) % 1;
-        const z2 = Math.min(1, z + 0.018 + z * 0.036);
-        const a = project(z, 0),
-            b = project(z2, 0);
-        if (b.y - a.y < 0.2) continue;
-        const wa = 0.6 + 2.4 * a.p,
-            wb = 0.6 + 2.4 * b.p;
-        polygon(
-            ctx,
-            [
-                [MID - wa, a.y],
-                [MID + wa, a.y],
-                [MID + wb, b.y],
-                [MID - wb, b.y],
-            ],
-            z > 0.65 ? '#f2d6b3' : '#d2a5a2',
-        );
-    }
-    // Roadside reflective posts, telephone poles, and warm roadside lights.
-    for (let i = 0; i < 18; i++) {
-        const z = (i / 18 + t * 0.125) % 1;
-        if (z < 0.08) continue;
-        const o = project(z, 1);
-        const half = o.x - MID;
-        const size = 1.4 + 17 * o.p;
-        for (const side of [-1, 1]) {
-            const x = MID + side * (half + size * 1.2);
-            const y = o.y;
-            ctx.strokeStyle = '#707084';
-            ctx.lineWidth = 0.6 + 3.4 * o.p;
-            ctx.beginPath();
-            ctx.moveTo(x, y);
-            ctx.lineTo(x, y - size * 1.55);
-            ctx.stroke();
-            luminousDot(
-                ctx,
-                x,
-                y - size * 1.5,
-                0.7 + 2 * o.p,
-                side === -1 ? '#ff6957' : '#ffd7a6',
-                z > 0.45 ? '#ee92663a' : null,
-            );
-        }
-        if (i % 3 === 0 && z > 0.15) {
-            const x = MID - (half + size * 3.5);
-            const poleHeight = 13 + 73 * o.p;
-            ctx.strokeStyle = '#242437';
-            ctx.lineWidth = 1 + 3 * o.p;
-            ctx.beginPath();
-            ctx.moveTo(x, o.y);
-            ctx.lineTo(x, o.y - poleHeight);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x - 9 * o.p, o.y - poleHeight * 0.8);
-            ctx.lineTo(x + 9 * o.p, o.y - poleHeight * 0.8);
-            ctx.stroke();
-        }
-    }
-    // Ahead: persistent tail lamps, with a subtle body silhouette.
-    const sway = Math.sin(t * 0.7) * 3;
-    const carY = 267 + Math.sin(t * 0.5) * 1.4;
-    polygon(
-        ctx,
-        [
-            [MID - 23 + sway, carY + 2],
-            [MID - 17 + sway, carY - 10],
-            [MID + 17 + sway, carY - 10],
-            [MID + 23 + sway, carY + 2],
-            [MID + 20 + sway, carY + 11],
-            [MID - 20 + sway, carY + 11],
-        ],
-        '#1a1a28',
-    );
-    polygon(
-        ctx,
-        [
-            [MID - 14 + sway, carY - 9],
-            [MID - 10 + sway, carY - 16],
-            [MID + 10 + sway, carY - 16],
-            [MID + 14 + sway, carY - 9],
-        ],
-        '#383348',
-    );
-    luminousDot(ctx, MID - 18 + sway, carY + 1, 3, '#ff584f', '#fa354849');
-    luminousDot(ctx, MID + 18 + sway, carY + 1, 3, '#ff584f', '#fa354849');
-    // Periodic approaching oncoming headlights, left-hand side of divider.
-    const approach = (t * 0.16) % 1;
-    const p = approach * approach;
-    const ax = MID - 8 - 126 * p,
-        ay = HORIZON + 195 * p;
-    const spread = 2 + 16 * p;
-    if (approach < 0.94) {
-        luminousDot(ctx, ax - spread / 2, ay, 1 + 4 * p, '#fff0c9', '#ffd49065');
-        luminousDot(ctx, ax + spread / 2, ay, 1 + 4 * p, '#fff0c9', '#ffd49065');
-    }
-    // Optical grain as stippled halftone cells, original ascii.rest-style feel.
-    ctx.globalAlpha = 0.17;
-    ctx.fillStyle = '#b8a4ba';
-    for (let yi = 0; yi < h; yi += 5) {
-        for (let xi = yi % 10 ? 3 : 0; xi < w; xi += 10) {
-            if (roadNoise(xi * 0.02 + yi * 0.09) > 0.53) ctx.fillRect(xi, yi, 1, 1);
-        }
-    }
-    ctx.globalAlpha = 1;
-    const vignette = ctx.createRadialGradient(MID, 205, 115, MID, 205, 490);
-    vignette.addColorStop(0, '#0000');
-    vignette.addColorStop(1, '#030614b8');
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, w, h);
-}
-let roadLastFrame = 0;
-function updateBootFrame(timestamp) {
-    if (bootUI.overlay.hidden) return;
-    if (!document.hidden && (timestamp - roadLastFrame >= 66 || !roadLastFrame)) {
-        roadLastFrame = timestamp;
-        drawHighwayScene(bootReducedMotion ? 0 : timestamp);
-    }
-    if (!bootReducedMotion) bootAnimationId = requestAnimationFrame(updateBootFrame);
-}
-if (roadContext) {
-    if (bootReducedMotion) drawHighwayScene(0);
-    else bootAnimationId = requestAnimationFrame(updateBootFrame);
-}
-function bootPhase(stage, detail) {
-    bootUI.stage.textContent = stage;
-    // Non-download phases have no measurable percentage. Do not fake progress.
-    bootUI.meter.classList.add('is-indeterminate');
-    bootUI.meter.removeAttribute('aria-valuenow');
-    bootUI.percent.hidden = true;
-    bootUI.percent.textContent = '';
-    if (detail) bootUI.details.textContent = detail;
-}
-function bootProgress(received, total) {
-    if (bootUI.stage.textContent !== 'FETCHING DATA') return;
-    if (total > 0) {
-        const percent = Math.max(0, Math.min(100, Math.floor((received * 100) / total)));
-        bootUI.meter.classList.remove('is-indeterminate');
-        bootUI.fill.style.width = percent + '%';
-        bootUI.meter.setAttribute('aria-valuenow', String(percent));
-        bootUI.percent.hidden = false;
-        bootUI.percent.textContent = percent + '%';
-        bootUI.details.textContent =
-            (received / 1048576).toFixed(1) +
-            ' / ' +
-            (total / 1048576).toFixed(1) +
-            ' MiB downloaded';
-    } else {
-        bootUI.meter.classList.add('is-indeterminate');
-        bootUI.meter.removeAttribute('aria-valuenow');
-        bootUI.percent.hidden = true;
-        bootUI.percent.textContent = '';
-        bootUI.details.textContent = (received / 1048576).toFixed(1) + ' MiB downloaded';
-    }
-}
-function bootComplete() {
-    bootUI.overlay.hidden = true;
-    if (bootAnimationId !== null) cancelAnimationFrame(bootAnimationId);
-}
-function bootFailed(error) {
-    // Keep the scene animated so a failed request cannot freeze the page.
-    bootUI.overlay.hidden = false;
-    bootUI.stage.textContent = 'BOOT FAILED';
-    bootUI.percent.hidden = true;
-    bootUI.error.hidden = false;
-    bootUI.errorMessage.textContent = String((error && error.message) || error);
-}
-document.getElementById('boot-retry').addEventListener('click', () => location.reload());
-// Transport data decoding alone does not mean the visual base map is ready.
-// Wait for *visible* vector features rather than an idle event: a single failed
-// tile, a style transition, or a missed sourcedata callback can prevent idle
-// indefinitely, even when the actual map has been painted. A bounded fallback
-// accepts a visible (possibly partially loaded) base map without hiding the
-// overlay on a still-empty WebGL canvas.
-function waitForBaseMapReady(layer, timeoutMs = 30000) {
-    const gl = layer.getMaplibreMap();
-    if (!gl) return Promise.reject(new Error('MapLibre map was not initialized'));
-    return new Promise((resolve, reject) => {
-        let finished = false;
-        let firstVisibleAt = null;
-        let lastCheckAt = 0;
-        let lastError = '';
-        const timeout = setTimeout(() => {
-            const detail = lastError ? ' Last map error: ' + lastError : '';
-            fail(
-                new Error(
-                    'Map tiles were not visible after ' +
-                        timeoutMs / 1000 +
-                        's.' +
-                        detail +
-                        ' Check the tile server, network and WebGL support.',
-                ),
-            );
-        }, timeoutMs);
-        // Poll as well as listening to render: MapLibre can stop emitting idle
-        // when one tile fails or the style keeps repainting.
-        const poll = setInterval(check, 200);
-        function cleanup() {
-            clearTimeout(timeout);
-            clearInterval(poll);
-            gl.off('load', check);
-            gl.off('render', check);
-            gl.off('idle', check);
-            gl.off('error', onError);
-        }
-        function fail(error) {
-            if (finished) return;
-            finished = true;
-            cleanup();
-            reject(error);
-        }
-        function onError(event) {
-            lastError = String(event.error?.message || event.error || 'unknown error');
-            console.warn('[map] BASE MAP RESOURCE ERROR:', lastError);
-        }
-        function check() {
-            if (finished) return;
-            const now = Date.now();
-            if (now - lastCheckAt < 180) return; // queryRenderedFeatures is costly.
-            lastCheckAt = now;
-            const canvas = gl.getCanvas();
-            if (!canvas || !canvas.width || !canvas.height) return;
-            let features;
-            try {
-                // Unlike 'load', 'idle' and areTilesLoaded(), this proves that
-                // a real vector layer has made it into a rendered frame.
-                features = gl.queryRenderedFeatures();
-            } catch (_) {
-                return;
-            } // Style is not ready for querying yet.
-            if (!features || features.length === 0) {
-                firstVisibleAt = null;
-                return;
-            }
-            if (firstVisibleAt === null) firstVisibleAt = now;
-            const tilesLoaded = typeof gl.areTilesLoaded === 'function' && gl.areTilesLoaded();
-            const visibleFor = now - firstVisibleAt;
-            // Prefer fully loaded tiles, but don't block forever on an idle
-            // event or an unrelated tile that never finishes. Allow the map
-            // some time to fill the viewport before accepting partial tiles.
-            if (!(tilesLoaded && visibleFor >= 400) && visibleFor < 2500) return;
-            finished = true;
-            cleanup();
-            console.info(
-                '[map] BASE MAP PAINTED',
-                tilesLoaded ? 'tiles loaded' : 'visible tiles; other tiles pending',
-            );
-            // Let the compositing frame hit the screen before removing overlay.
-            let settled = false;
-            const done = () => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(frameFallback);
-                resolve();
-            };
-            // A hidden Safari tab may suspend requestAnimationFrame entirely.
-            const frameFallback = setTimeout(done, 500);
-            requestAnimationFrame(() => requestAnimationFrame(done));
-        }
-        gl.on('load', check);
-        gl.on('render', check);
-        gl.on('idle', check);
-        gl.on('error', onError);
-        check(); // Cached map may be rendered already.
-    });
-}
-function loadTransportData() {
-    bootPhase('FETCHING DATA', 'Starting download...');
-    return new Promise((resolve, reject) => {
-        const worker = new Worker(new URL('routes-data-worker.js', document.baseURI));
-        worker.onmessage = (event) => {
-            const message = event.data;
-            if (message.type === 'progress') bootProgress(message.received, message.total);
-            else if (message.type === 'phase') bootPhase(message.stage, message.detail);
-            else if (message.type === 'ready') {
-                console.info('[map] WORKER decode', message.decodeMs, 'ms');
-                worker.terminate();
-                resolve(message.data);
-            } else if (message.type === 'error') {
-                worker.terminate();
-                reject(new Error(message.message));
-            }
-        };
-        worker.onerror = (event) => {
-            worker.terminate();
-            reject(new Error(event.message || 'Data Worker could not start'));
-        };
-        worker.postMessage({ url: new URL('routes.json.gz', document.baseURI).href });
-    });
-}
+let transportConfig = null;
 
 function loadExternalScript(url, isLoaded) {
     return new Promise((resolve, reject) => {
@@ -501,7 +30,9 @@ async function loadMapLibraries() {
         () => !!window.maplibregl,
     );
     // v4 CSP bundle with a same-origin classic Worker: no blob: exception.
-    window.maplibregl.setWorkerUrl(new URL('routes-maplibre-worker.js', document.baseURI).href);
+    window.maplibregl.setWorkerUrl(
+        new URL(transportConfig.maplibre_worker_file, document.baseURI).href,
+    );
     await loadExternalScript(
         'https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/' + 'leaflet-maplibre-gl.js',
         () => !!window.L.maplibreGL,
@@ -511,13 +42,20 @@ async function loadMapLibraries() {
 (async () => {
     const bootStarted = performance.now();
     console.info('[map] BOOT START');
+    // Read the tiny generated configuration before starting the expensive work.
+    const configUrl = document.querySelector('meta[name="transport-config"]').content;
+    const configResponse = await fetch(new URL(configUrl, document.baseURI));
+    if (!configResponse.ok) {
+        throw new Error('Failed to load site config: HTTP ' + configResponse.status);
+    }
+    transportConfig = await configResponse.json();
     // Library scripts and large compressed network payload load concurrently.
     const [data] = await Promise.all([loadTransportData(), loadMapLibraries()]);
     bootPhase('RENDERING MAP', 'Preparing controls and map layers...');
     console.info('[map] BOOT libraries', Math.round(performance.now() - bootStarted), 'ms');
     console.info('[map] BOOT data decoded', Math.round(performance.now() - bootStarted), 'ms');
 
-    const WALK_SPEED_M_PER_MIN = 80.0;
+    const WALK_SPEED_M_PER_MIN = transportConfig.walk_speed;
     const BUS_SPEED_M_PER_MIN = 320.0;
     const TRAM_SPEED_M_PER_MIN = 300.0;
     const TROLLEYBUS_SPEED_M_PER_MIN = 280.0;
@@ -556,11 +94,11 @@ async function loadMapLibraries() {
     const MAX_RAPTOR_TRANSFER_LABELS_PER_STOP = 24;
     const REASONABLE_TIME_FACTOR = 1.5;
     const REASONABLE_TIME_EXTRA_MIN = 10.0;
-    const GRID_SIZE = 400.0;
+    const GRID_SIZE = transportConfig.grid_size;
     const EARTH_RADIUS_M = 6371000.0;
 
-    const ORIGIN_LON = 37.607174;
-    const ORIGIN_LAT = 55.74465;
+    const ORIGIN_LON = transportConfig.origin_lon;
+    const ORIGIN_LAT = transportConfig.origin_lat;
     const ORIGIN_LAT_RAD = (ORIGIN_LAT * Math.PI) / 180.0;
 
     const stops = data.stops;
@@ -909,15 +447,15 @@ async function loadMapLibraries() {
     createMapPane('originPane', 700, 'none');
 
     const MODE_NAMES = {
-        heading: 'Transport modes',
-        bus: 'Bus',
-        tram: 'Tram',
-        trolleybus: 'Trolleybus',
-        metro: 'Metro',
-        mcc: 'MCC',
-        rail: 'MCD + Trains',
+        heading: transportConfig.mode_names.heading,
+        bus: transportConfig.mode_names.bus,
+        tram: transportConfig.mode_names.tram,
+        trolleybus: transportConfig.mode_names.trolleybus,
+        metro: transportConfig.mode_names.metro,
+        mcc: transportConfig.mode_names.mcc,
+        rail: transportConfig.mode_names.rail,
     };
-    const MODE_HINT = 'Surface transport on by default. Travel times are estimates.';
+    const MODE_HINT = transportConfig.mode_hint;
 
     const modeHeading = document.getElementById('transport-modes-heading');
     modeHeading.textContent = MODE_NAMES.heading;
@@ -4833,7 +4371,7 @@ async function loadMapLibraries() {
     // Explicit roundtrip=yes with coincident endpoints is also a loop. None of
     // these static inferences establishes a scheduled in-seat GTFS block transfer.
     const routeContinuationCache = new WeakMap();
-    const ALLOW_INFERRED_THROUGH_SERVICE = true;
+    const ALLOW_INFERRED_THROUGH_SERVICE = transportConfig.infer_through_service;
     const LOOP_TERMINAL_RADIUS_M = 180.0;
     const LOOP_CORRIDOR_RADIUS_M = 130.0;
     const LOOP_TURNAROUND_MIN = 3.0;

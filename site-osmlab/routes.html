@@ -3,16 +3,18 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <meta name="application-version" content="0.15.9" />
+        <meta name="application-version" content="0.15.10" />
         <title>Moscow transport reachability</title>
         <meta name="theme-color" content="#0d1534" />
-        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.15.9" />
-        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.15.9" />
-        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.15.9" />
-        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.15.9" />
+        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.15.10" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.15.10" />
+        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.15.10" />
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.15.10" />
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
         <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
         <link rel="stylesheet" href="routes.css" />
+        <link rel="stylesheet" href="boot-loader.css" />
+        <meta name="transport-config" content="routes-config.json" />
     </head>
     <body>
         <input id="info-collapse" type="checkbox" checked aria-hidden="true" />
@@ -21,11 +23,11 @@
             <div id="boot-card">
                 <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
                 <h1>Building your map<span class="boot-blink">_</span></h1>
-                <div id="boot-road" aria-hidden="true">
-                    <canvas id="boot-highway" width="800" height="400"></canvas>
-                    <div class="boot-road-caption">
-                        <span>ROUTE // MOSCOW NETWORK</span>
-                        <span class="boot-road-live">LIVE DATA</span>
+                <div id="boot-network-shell" aria-hidden="true">
+                    <canvas id="boot-network" width="800" height="400"></canvas>
+                    <div class="boot-network-caption">
+                        <span>SCHEMATIC / NOT TO SCALE</span>
+                        <span class="boot-network-live">NETWORK ACTIVE</span>
                     </div>
                 </div>
                 <div id="boot-stage">INITIALIZING</div>
@@ -46,15 +48,6 @@
                 <div id="boot-error" hidden>
                     <p id="boot-error-message"></p>
                     <button type="button" id="boot-retry">Reload page</button>
-                </div>
-                <div class="boot-credit">
-                    Night Highway visual theme inspired by
-                    <a
-                        href="https://ascii.rest/night-highway/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        >ascii.rest</a
-                    >. Local Canvas animation; no external animation files.
                 </div>
             </div>
         </div>
@@ -99,7 +92,7 @@
                         Click once for a start point. Double-click anywhere for route to any point
                         while keeping reachability mode.
                     </div>
-                    <div class="project-version">v0.16.0</div>
+                    <div class="project-version">v0.15.10</div>
                     <div
                         id="timing-status"
                         role="status"
@@ -336,6 +329,7 @@
                 <span>reachable routes</span>
             </div>
         </div>
+        <script src="boot-loader.js" defer></script>
         <script src="routes.js" defer></script>
     </body>
 </html>

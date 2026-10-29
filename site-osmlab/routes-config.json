@@ -1,0 +1,23 @@
+{
+    "version": "0.15.10",
+    "data_file": "routes.json.gz",
+    "data_worker_file": "routes-data-worker.js",
+    "maplibre_worker_file": "routes-maplibre-worker.js",
+    "walk_speed": 80.0,
+    "grid_size": 400.0,
+    "origin_lon": 37.607149,
+    "origin_lat": 55.744645,
+    "mode_names": {
+        "heading": "Transport modes",
+        "bus": "Bus",
+        "tram": "Tram",
+        "trolleybus": "Trolleybus",
+        "metro": "Metro",
+        "mcc": "MCC",
+        "rail": "MCD + Trains"
+    },
+    "mode_hint": "Surface transport on by default. Travel times are estimates.",
+    "infer_through_service": true,
+    "initial_walk_minutes": 5.0,
+    "initial_opacity": 50.0
+}

@@ -1,0 +1,373 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+        <meta name="application-version" content="@@VERSION@@" />
+        <title>Moscow transport reachability</title>
+        <meta name="theme-color" content="#0d1534" />
+        <link rel="icon" type="image/x-icon" href="favicon.ico?v=@@VERSION@@" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=@@VERSION@@" />
+        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=@@VERSION@@" />
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=@@VERSION@@" />
+
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+
+        <link rel="stylesheet" href="@@PAGE_CSS@@" />
+        <link rel="stylesheet" href="boot-loader.css" />
+        <meta name="transport-config" content="@@CONFIG_JSON@@" />
+    </head>
+
+    <body>
+        <input id="info-collapse" type="checkbox" checked aria-hidden="true" />
+
+        <div id="map" aria-label="Transport reachability map"></div>
+        <div id="boot-overlay" role="status" aria-live="polite" aria-atomic="true">
+            <div id="boot-card">
+                <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
+                <h1>Building your map<span class="boot-blink">_</span></h1>
+                <div id="boot-network-shell" aria-hidden="true">
+                    <canvas id="boot-network" width="800" height="400"></canvas>
+                    <div class="boot-network-caption">
+                        <span>SCHEMATIC / NOT TO SCALE</span>
+                        <span class="boot-network-live">NETWORK ACTIVE</span>
+                    </div>
+                </div>
+                <div id="boot-stage">INITIALIZING</div>
+                <div class="boot-progress-line">
+                    <div
+                        id="boot-meter"
+                        class="boot-meter is-indeterminate"
+                        role="progressbar"
+                        aria-label="Map loading progress"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                    >
+                        <span id="boot-meter-fill"></span>
+                    </div>
+                    <b id="boot-percent" hidden></b>
+                </div>
+                <div id="boot-details">Connecting to the data source...</div>
+                <div id="boot-error" hidden>
+                    <p id="boot-error-message"></p>
+                    <button type="button" id="boot-retry">Reload page</button>
+                </div>
+            </div>
+        </div>
+
+        <aside id="info" aria-label="Transport reachability controls">
+            <label id="info-handle" for="info-collapse" aria-label="Expand or collapse settings">
+                <span id="info-handle-left">
+                    <span id="info-handle-title"> Transport reachability </span>
+                    <span id="info-handle-hint"> Tap to expand or collapse </span>
+                </span>
+                <span id="info-arrow" aria-hidden="true">
+                    <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <path d="m6 15 6-6 6 6"></path>
+                    </svg>
+                </span>
+            </label>
+
+            <div id="info-content">
+                <div class="info-intro">
+                    <div class="info-heading-row">
+                        <div id="info-title">Transport reachability</div>
+                        <button
+                            id="reset-origin"
+                            type="button"
+                            title="Clear the selected start point and route"
+                            aria-label="Clear selected start point and route"
+                            disabled
+                        >
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <circle cx="12" cy="12" r="9"></circle>
+                                <path d="M9 9l6 6m0-6-6 6"></path>
+                            </svg>
+                            <span>Reset</span>
+                        </button>
+                    </div>
+                    <div class="info-row">
+                        Click once for a start point. Double-click anywhere for route to any point
+                        while keeping reachability mode.
+                    </div>
+                    <div class="project-version">v@@VERSION@@</div>
+                    <div
+                        id="timing-status"
+                        role="status"
+                        style="font-size: 12px; color: #64748b; margin-top: 5px"
+                    >
+                        Ready
+                    </div>
+                </div>
+
+                <div class="control" id="transport-modes">
+                    <div class="control-label">
+                        <span id="transport-modes-heading">Transport modes</span>
+                    </div>
+                    <div class="mode-grid" role="group" aria-label="Transport modes">
+                        <label class="mode-option" title="19.2 km/h">
+                            <input class="mode-input" type="checkbox" value="bus" checked />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="3" width="16" height="16" rx="3" />
+                                    <path d="M4 11h16" />
+                                    <path d="M8 19v2m8-2v2" />
+                                    <path d="M8 15h.01" />
+                                    <path d="M16 15h.01" />
+                                    <path d="M8 7h8" />
+                                </svg>
+                                <span data-mode-name="bus">Bus</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="18 km/h">
+                            <input class="mode-input" type="checkbox" value="tram" checked />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="5" y="5" width="14" height="14" rx="3" />
+                                    <path d="M5 12h14" />
+                                    <path d="M9 5V2m6 3V2" />
+                                    <path d="M8 22l3-3m5 3-3-3" />
+                                    <path d="M8 15h.01" />
+                                    <path d="M16 15h.01" />
+                                </svg>
+                                <span data-mode-name="tram">Tram</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="16.8 km/h">
+                            <input class="mode-input" type="checkbox" value="trolleybus" checked />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="6" width="16" height="13" rx="3" />
+                                    <path d="M4 13h16" />
+                                    <path d="M8 6l-2-4m9 4 3-4" />
+                                    <path d="M7 19v2m10-2v2" />
+                                    <path d="M8 16h.01" />
+                                    <path d="M16 16h.01" />
+                                </svg>
+                                <span data-mode-name="trolleybus">Trolleybus</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="37.8 km/h">
+                            <input class="mode-input" type="checkbox" value="metro" />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M4 20V5l8 10 8-10v15M2 21h20" />
+                                </svg>
+                                <span data-mode-name="metro">Metro</span>
+                            </span>
+                        </label>
+                        <label class="mode-option" title="46.8 km/h">
+                            <input class="mode-input" type="checkbox" value="mcc" />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="4" width="16" height="15" rx="4" />
+                                    <path d="M4 12h16" />
+                                    <path d="M8 19l-2 3m10-3 2 3" />
+                                    <path d="M8 8h8" />
+                                    <path d="M8 15h.01" />
+                                    <path d="M16 15h.01" />
+                                    <circle cx="12" cy="12" r="8" stroke-dasharray="2 6" />
+                                </svg>
+                                <span data-mode-name="mcc">MCC</span>
+                            </span>
+                        </label>
+                        <label
+                            class="mode-option"
+                            title="MCD and suburban rail; separate train services"
+                        >
+                            <input class="mode-input" type="checkbox" value="rail" />
+                            <span class="mode-pill">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <rect x="4" y="4" width="16" height="15" rx="4" />
+                                    <path d="M4 12h16M7 7h10M8 19l-2 3m10-3 2 3" />
+                                    <path d="M8 15h.01M16 15h.01" />
+                                </svg>
+                                <span data-mode-name="rail">MCD + Electric Trains</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="mode-hint" id="transport-modes-hint">
+                        Surface transport is on by default. Speeds are estimates.
+                    </div>
+                </div>
+
+                <div class="control">
+                    <div class="control-label">
+                        <label for="walk-time">Max walking time</label>
+                        <b id="walk-time-value"></b>
+                    </div>
+                    <input
+                        id="walk-time"
+                        type="range"
+                        min="1"
+                        max="15"
+                        step="1"
+                        value="@@INITIAL_WALK_MINUTES@@"
+                    />
+                    <div class="range-scale range-scale-walk">
+                        <span>1 min</span>
+                        <span>5</span>
+                        <span>10</span>
+                        <span>15 min</span>
+                    </div>
+                </div>
+
+                <div class="control">
+                    <div class="control-label">
+                        <label id="transfer-label" for="transfer-count"> Transfers </label>
+                        <b id="transfer-mode-value">No transfers</b>
+                    </div>
+                    <input
+                        id="transfer-count"
+                        type="range"
+                        min="0"
+                        max="2"
+                        step="1"
+                        value="0"
+                        aria-label="Maximum number of transfers"
+                    />
+                    <div class="range-scale range-scale-transfer">
+                        <span>0</span>
+                        <span>1</span>
+                        <span>2</span>
+                    </div>
+                </div>
+
+                <div class="control">
+                    <div class="control-label">
+                        <label for="travel-time-limit">Travel time limit</label>
+                        <b id="travel-time-limit-value">60 min</b>
+                    </div>
+                    <input
+                        id="travel-time-limit"
+                        type="range"
+                        min="0"
+                        max="185"
+                        step="5"
+                        value="60"
+                        aria-label="Maximum total travel time"
+                    />
+                    <div class="range-scale range-scale-time">
+                        <span>0</span>
+                        <span>60</span>
+                        <span>120</span>
+                        <span>No limit</span>
+                    </div>
+                </div>
+
+                <div class="control">
+                    <div class="control-label">
+                        <label for="circle-opacity">Walking paths opacity</label>
+                        <b id="circle-opacity-value"></b>
+                    </div>
+                    <input
+                        id="circle-opacity"
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value="@@INITIAL_OPACITY@@"
+                    />
+                    <div class="range-scale range-scale-opacity">
+                        <span>0%</span>
+                        <span>50%</span>
+                        <span>100%</span>
+                    </div>
+                </div>
+
+                <div class="note">
+                    Walking access uses OSM pedestrian paths, with estimated speed @@WALK_SPEED@@
+                    m/min. Unmapped connections are excluded.
+                </div>
+
+                <div id="analysis-summary">
+                    <div class="analysis-title">Reachability</div>
+
+                    <div class="info-row">
+                        <span>Nearby stops</span>
+                        <b id="nearby-count">0</b>
+                    </div>
+
+                    <div class="info-row">
+                        <span>Direct routes</span>
+                        <b id="direct-route-count">0</b>
+                    </div>
+
+                    <div class="info-row">
+                        <span>Without transfers</span>
+                        <span class="analysis-value"> <b id="direct-stop-count">0</b> stops </span>
+                    </div>
+
+                    <div class="info-row">
+                        <span>One-transfer routes</span>
+                        <b id="transfer-route-count">0</b>
+                    </div>
+
+                    <div class="info-row">
+                        <span>With one transfer only</span>
+                        <span class="analysis-value">
+                            <b id="transfer-stop-count">0</b> stops
+                        </span>
+                    </div>
+
+                    <div class="info-row">
+                        <span>Two-transfer routes</span>
+                        <b id="two-transfer-route-count">0</b>
+                    </div>
+
+                    <div class="info-row">
+                        <span>With two transfers only</span>
+                        <span class="analysis-value">
+                            <b id="two-transfer-stop-count">0</b> stops
+                        </span>
+                    </div>
+
+                    <div id="routes"></div>
+                </div>
+
+                <div id="trip-panel" hidden>
+                    <div id="trip-title" class="trip-title">Trip</div>
+                    <button id="trip-back-top" type="button">Back</button>
+                    <div id="trip-alternatives"></div>
+                    <div id="trip-steps"></div>
+                    <button id="trip-back" type="button">Back</button>
+                </div>
+            </div>
+        </aside>
+
+        <div id="legend" aria-label="Map legend">
+            <div class="legend-title">Map</div>
+            <div class="legend-row">
+                <span class="legend-origin" aria-hidden="true">x</span>
+                <span id="legend-origin-text"></span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-coverage-direct" aria-hidden="true">x</span>
+                <span>without transfers</span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-coverage-transfer" aria-hidden="true">x</span>
+                <span>with one transfer</span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-coverage-two-transfer" aria-hidden="true">x</span>
+                <span>with two transfers</span>
+            </div>
+            <div class="legend-row">
+                <span class="legend-route" aria-hidden="true">x</span>
+                <span>reachable routes</span>
+            </div>
+        </div>
+
+        <script src="boot-loader.js" defer></script>
+        <script src="@@PAGE_JS@@" defer></script>
+    </body>
+</html>
