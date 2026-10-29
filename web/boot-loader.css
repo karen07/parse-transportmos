@@ -76,6 +76,11 @@
     color: #c9a9be;
     letter-spacing: .1em;
 }
+.boot-network-caption a {
+    pointer-events: auto;
+    color: inherit;
+    text-decoration: underline;
+}
 .boot-network-live { color: #f3ac80; }
 .boot-network-live::before {
     content: '';

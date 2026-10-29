@@ -1,4 +1,4 @@
-/* Local schematic graph visualization. Animation does not imply a progress percentage. */
+/* OSM major roads illustration. Animation is not a loading percentage. */
 const bootUI = {
     overlay: document.getElementById('boot-overlay'),
     canvas: document.getElementById('boot-network'),
@@ -15,202 +15,153 @@ let bootStopAnimation = () => {};
 
 (() => {
     'use strict';
+    // Real OSM road geometry, exported once by major_roads.py.
+    // Animation is decorative, never a proxy for actual loading progress.
     const canvas = bootUI.canvas;
     const ctx = canvas.getContext('2d');
-    const spokes = 10;
-    const radii = [0.26, 0.53, 0.81];
-    const nodes = [{ radius: 0, angle: 0, ring: -1, spoke: -1 }];
-    const edges = [];
-    const nodeId = (ring, spoke) => 1 + ring * spokes + spoke;
-    for (let ring = 0; ring < radii.length; ring++) {
-        for (let spoke = 0; spoke < spokes; spoke++) {
-            nodes.push({
-                radius: radii[ring],
-                angle: -Math.PI / 2 + (spoke * Math.PI * 2) / spokes,
-                ring,
-                spoke,
-            });
-        }
-    }
-    const addEdge = (a, b, weight, ring = false) => edges.push({ a, b, weight, ring });
-    for (let spoke = 0; spoke < spokes; spoke++) {
-        addEdge(0, nodeId(0, spoke), 1.8);
-        for (let ring = 0; ring < radii.length; ring++) {
-            if (ring < radii.length - 1)
-                addEdge(nodeId(ring, spoke), nodeId(ring + 1, spoke), 2.25 + ring * 0.4);
-            addEdge(
-                nodeId(ring, spoke),
-                nodeId(ring, (spoke + 1) % spokes),
-                1.18 + ring * 1.0,
-                true,
-            );
-        }
-    }
-    let source = nodeId(1, 7);
-    let distances = [];
-    function shortestPaths() {
-        distances = Array(nodes.length).fill(Infinity);
-        const visited = new Set();
-        distances[source] = 0;
-        for (let i = 0; i < nodes.length; i++) {
-            let best = -1;
-            for (let n = 0; n < nodes.length; n++) {
-                if (!visited.has(n) && (best === -1 || distances[n] < distances[best])) best = n;
-            }
-            if (best === -1 || !isFinite(distances[best])) break;
-            visited.add(best);
-            for (const edge of edges) {
-                const other = edge.a === best ? edge.b : edge.b === best ? edge.a : -1;
-                if (other >= 0 && distances[other] > distances[best] + edge.weight) {
-                    distances[other] = distances[best] + edge.weight;
-                }
-            }
-        }
-    }
-    shortestPaths();
-    let w = 0,
-        h = 0,
-        dpr = 1,
-        scale = 0,
-        cx = 0,
-        cy = 0;
-    let start = performance.now();
-    let animationFrame = null;
+    const reducedMotion = bootReducedMotion;
+    let w = 0;
+    let h = 0;
+    let dpr = 1;
+    let network = null;
+    let background = null;
+    let roadMask = null;
+    let highlight = null;
+    let raf = null;
     let stopped = false;
     let lastDraw = 0;
-    const duration = 8700;
-    // Wave reaches only part of the network, then fades and starts again.
-    // This is decorative animation, not a measure of actual loading.
-    const farthestDistance = () => Math.max(...distances.filter(Number.isFinite));
-    const waveLimit = () => farthestDistance() * 0.62;
-    const smoothstep = (a, b, x) => {
-        const t = clamp((x - a) / (b - a), 0, 1);
-        return t * t * (3 - 2 * t);
-    };
-    const clamp = (value, a, b) => Math.max(a, Math.min(b, value));
-    function resize() {
-        const rect = canvas.getBoundingClientRect();
-        w = rect.width;
-        h = rect.height;
+    let waveStart = 0;
+    // The road map is uniform regardless of OSM highway classification.
+    const roadWidth = 1.55;
+    const roadColor = '#39465f';
+    const waveDuration = 6800;
+
+    function makeCanvas() {
+        const surface = document.createElement('canvas');
+        surface.width = canvas.width;
+        surface.height = canvas.height;
+        return surface;
+    }
+
+    function updateSize() {
+        const bounds = canvas.getBoundingClientRect();
+        w = Math.max(1, bounds.width);
+        h = Math.max(1, bounds.height);
         dpr = Math.min(window.devicePixelRatio || 1, 2);
         canvas.width = Math.round(w * dpr);
         canvas.height = Math.round(h * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        cx = w / 2;
-        cy = h / 2;
-        scale = Math.min(h * 0.525, w * 0.395);
+        if (network) prepare();
     }
-    window.addEventListener('resize', resize, { passive: true });
-    resize();
-    function coord(n) {
-        if (n.radius === 0) return { x: cx, y: cy };
-        return {
-            x: cx + Math.cos(n.angle) * n.radius * scale,
-            y: cy + Math.sin(n.angle) * n.radius * scale,
-        };
-    }
-    function edgePath(e, from, to) {
-        ctx.beginPath();
-        if (e.ring) {
-            const a = nodes[e.a],
-                b = nodes[e.b];
-            const radius = a.radius * scale;
-            const first = a.angle;
-            const delta = (Math.PI * 2) / spokes;
-            ctx.arc(cx, cy, radius, first + from * delta, first + to * delta);
-        } else {
-            const a = coord(nodes[e.a]),
-                b = coord(nodes[e.b]);
-            ctx.moveTo(a.x + (b.x - a.x) * from, a.y + (b.y - a.y) * from);
-            ctx.lineTo(a.x + (b.x - a.x) * to, a.y + (b.y - a.y) * to);
+
+    function prepare() {
+        if (!network || !w || !h) return;
+        const [mx, my] = network.extent;
+        const scale = Math.min((w - 28) / (2 * mx), (h - 24) / (2 * my));
+        roadMask = makeCanvas();
+        highlight = makeCanvas();
+        background = makeCanvas();
+        const mask = roadMask.getContext('2d');
+        mask.setTransform(dpr, 0, 0, dpr, 0, 0);
+        mask.lineWidth = roadWidth;
+        mask.lineCap = 'round';
+        mask.lineJoin = 'round';
+        mask.strokeStyle = '#fff';
+
+        // Draw every way into one opaque mask. Where two carriageways or OSM
+        // fragments overlap, they cannot become brighter or thicker through
+        // alpha blending. Every named ring uses exactly the same stroke.
+        for (const [, coords] of network.paths) {
+            if (!Array.isArray(coords) || coords.length < 4) continue;
+            mask.beginPath();
+            mask.moveTo(w / 2 + coords[0] * scale, h / 2 + coords[1] * scale);
+            for (let i = 2; i < coords.length; i += 2) {
+                mask.lineTo(w / 2 + coords[i] * scale, h / 2 + coords[i + 1] * scale);
+            }
+            mask.stroke();
         }
+        mask.globalCompositeOperation = 'source-in';
+        mask.fillStyle = roadColor;
+        mask.fillRect(0, 0, w, h);
+        mask.globalCompositeOperation = 'source-over';
+
+        const back = background.getContext('2d');
+        back.setTransform(dpr, 0, 0, dpr, 0, 0);
+        back.fillStyle = '#0b1020';
+        back.fillRect(0, 0, w, h);
+        back.drawImage(roadMask, 0, 0, w, h);
+        waveStart = performance.now();
     }
-    function strokeEdge(edge, from, to, color, width) {
-        if (to <= from) return;
-        edgePath(edge, from, to);
-        ctx.lineWidth = width;
-        ctx.strokeStyle = color;
-        ctx.stroke();
+
+    function drawWave(now) {
+        // Animate a radial front from geographic central Moscow, not a random
+        // road fragment. The cycle is decorative and never reaches every road.
+        const phase = ((now - waveStart) % waveDuration) / waveDuration;
+        const radius = 4 + phase * Math.hypot(w, h) * 0.43;
+        const fade = Math.min(1, phase * 9, (1 - phase) * 7);
+        if (radius < 2 || fade <= 0) return;
+
+        const front = highlight.getContext('2d');
+        front.setTransform(dpr, 0, 0, dpr, 0, 0);
+        front.clearRect(0, 0, w, h);
+        front.drawImage(roadMask, 0, 0, w, h);
+        front.globalCompositeOperation = 'source-in';
+        const gradient = front.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, radius);
+        gradient.addColorStop(0, 'rgba(237, 139, 125, 0.2)');
+        gradient.addColorStop(0.48, 'rgba(237, 139, 125, 0.06)');
+        gradient.addColorStop(0.73, 'rgba(239, 150, 128, 0.28)');
+        gradient.addColorStop(0.91, 'rgba(253, 180, 143, 0.96)');
+        gradient.addColorStop(1, 'rgba(253, 180, 143, 0)');
+        front.fillStyle = gradient;
+        front.fillRect(0, 0, w, h);
+        front.globalCompositeOperation = 'source-over';
+
+        ctx.globalAlpha = fade;
+        ctx.drawImage(highlight, 0, 0, w, h);
+        ctx.globalAlpha = 1;
     }
-    function drawFrame(now) {
+
+    function animate(now) {
         if (stopped || bootUI.overlay.hidden) return;
-        if (!bootReducedMotion && now - lastDraw < 66) {
-            animationFrame = requestAnimationFrame(drawFrame);
+        if (!reducedMotion && now - lastDraw < 50) {
+            raf = requestAnimationFrame(animate);
             return;
         }
         lastDraw = now;
-        const time = bootReducedMotion ? start + 4600 : now;
-        const elapsed = (((time - start) % duration) + duration) % duration;
-        const cycle = elapsed / duration;
-        const fraction = smoothstep(0.02, 0.85, cycle);
-        const distance = waveLimit() * fraction;
-        const trail = waveLimit() * 0.34;
-        const opacity = 1 - smoothstep(0.86, 0.99, cycle);
         ctx.clearRect(0, 0, w, h);
-        // The only background decoration is a faint baseline through the schematic.
-        ctx.beginPath();
-        ctx.moveTo(cx - scale, cy);
-        ctx.lineTo(cx + scale, cy);
-        ctx.strokeStyle = '#151e31';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        for (const edge of edges) strokeEdge(edge, 0, 1, '#29334b', 1.7);
-        ctx.lineCap = 'round';
-        ctx.globalAlpha = opacity;
-        // A moving band illuminates edges, then they become dark again.
-        // At no time does the diagram imply that 100% of the map was processed.
-        for (const edge of edges) {
-            for (const [arrival, reverse] of [
-                [distances[edge.a], false],
-                [distances[edge.b], true],
-            ]) {
-                const from = clamp((distance - trail - arrival) / edge.weight, 0, 1);
-                const to = clamp((distance - arrival) / edge.weight, 0, 1);
-                if (reverse) {
-                    strokeEdge(edge, 1 - to, 1 - from, '#bd8290', 2.4);
-                } else {
-                    strokeEdge(edge, from, to, '#bd8290', 2.4);
-                }
-                const brightFrom = clamp((distance - 0.75 - arrival) / edge.weight, 0, 1);
-                if (reverse) {
-                    strokeEdge(edge, 1 - to, 1 - brightFrom, '#ffe5c9', 3.3);
-                } else {
-                    strokeEdge(edge, brightFrom, to, '#ffe5c9', 3.3);
-                }
-            }
-        }
-        ctx.globalAlpha = 1;
-        for (let i = 0; i < nodes.length; i++) {
-            const p = coord(nodes[i]);
-            const isActive = distances[i] <= distance && distances[i] >= distance - trail;
-            const isSource = i === source;
-            const size = isSource ? 6.2 : isActive ? 3.5 : 2.6;
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-            ctx.fillStyle = isSource
-                ? '#fff2e4'
-                : isActive && opacity > 0.2
-                  ? '#f4b99b'
-                  : '#596680';
-            ctx.fill();
-            if (isSource) {
-                ctx.strokeStyle = '#e9a38e';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                const pulse = (elapsed % 1700) / 1700;
-                ctx.arc(p.x, p.y, 11 + pulse * 15, 0, 2 * Math.PI);
-                ctx.globalAlpha = 0.45 * (1 - pulse);
-                ctx.stroke();
-                ctx.globalAlpha = 1;
-            }
-        }
-        if (!bootReducedMotion) animationFrame = requestAnimationFrame(drawFrame);
+        if (background) ctx.drawImage(background, 0, 0, w, h);
+        if (roadMask && highlight && !reducedMotion) drawWave(now);
+        if (!reducedMotion) raf = requestAnimationFrame(animate);
     }
+
+    window.addEventListener('resize', updateSize, { passive: true });
+    updateSize();
     bootStopAnimation = () => {
         stopped = true;
-        if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+        if (raf != null) cancelAnimationFrame(raf);
     };
-    animationFrame = requestAnimationFrame(drawFrame);
+    raf = requestAnimationFrame(animate);
+    fetch('moscow-major-roads.json', { cache: 'no-cache' })
+        .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+        })
+        .then((data) => {
+            if (
+                data.format !== 'moscow-major-roads-v1' ||
+                !Array.isArray(data.paths) ||
+                !Array.isArray(data.extent)
+            ) {
+                throw new Error('Unexpected OSM road asset format');
+            }
+            network = data;
+            if (!stopped) prepare();
+            if (reducedMotion && !stopped) animate(performance.now());
+        })
+        .catch((error) => {
+            // The basemap loader remains independent of this decorative asset.
+            console.warn('[boot] OSM road illustration not available:', error);
+        });
 })();
 
 function bootPhase(stage, detail) {

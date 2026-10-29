@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.15.10"
+PROJECT_VERSION = "0.15.12"
 
 
 # OSM extraction and normalization
@@ -7364,6 +7364,23 @@ def main():
     print("[build] START HTML file write", flush=True)
     write_atomic_bytes(Path(args.output), html.encode("ascii"))
     step_done("HTML file write", phase_started)
+    if not args.input_geojson:
+        from major_roads import generate as generate_major_roads
+
+        roads_path = Path(args.output).with_name("moscow-major-roads.json")
+        outdated = (
+            not roads_path.is_file()
+            or roads_path.stat().st_mtime_ns < Path(raw_source).stat().st_mtime_ns
+            or roads_path.stat().st_mtime_ns
+            < (Path(__file__).parent / "major_roads.py").stat().st_mtime_ns
+            or args.update
+            or args.rebuild
+        )
+        if outdated:
+            phase_started = time.monotonic()
+            print("[build] START major road illustration", flush=True)
+            generate_major_roads(raw_source, roads_path)
+            step_done("major road illustration", phase_started)
     print(f"wrote: {Path(args.output).resolve()}")
     print("[build] FINAL TIMINGS (seconds)", flush=True)
     for name, duration in build_phases:
