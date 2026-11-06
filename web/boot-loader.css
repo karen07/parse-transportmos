@@ -10,7 +10,9 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     box-sizing: border-box;
 }
-#boot-overlay[hidden] { display: none; }
+#boot-overlay[hidden] {
+    display: none;
+}
 #boot-card {
     width: min(880px, 100%);
     padding: clamp(14px, 2.8vw, 30px);
@@ -18,21 +20,23 @@
     overflow: hidden;
     border: 1px solid #49415b;
     border-radius: 13px;
-    background: linear-gradient(150deg, rgba(13,16,34,.97), rgba(17,15,29,.96));
-    box-shadow: 0 38px 110px #000a, 0 0 95px #4b295c18;
+    background: linear-gradient(150deg, rgba(13, 16, 34, 0.97), rgba(17, 15, 29, 0.96));
+    box-shadow:
+        0 38px 110px #000a,
+        0 0 95px #4b295c18;
     text-align: center;
 }
 .boot-eyebrow {
     color: #c3a2cd;
     font-size: 11px;
-    letter-spacing: .23em;
+    letter-spacing: 0.23em;
     text-transform: uppercase;
 }
 #boot-card h1 {
     color: #f6e5ec;
     font-size: clamp(18px, 3.3vw, 27px);
     font-weight: 500;
-    letter-spacing: .08em;
+    letter-spacing: 0.08em;
     margin: 12px auto 20px;
     position: relative;
     width: max-content;
@@ -46,7 +50,11 @@
     color: #f59a78;
     animation: boot-blink 1s steps(1) infinite;
 }
-@keyframes boot-blink { 50% { opacity: 0; } }
+@keyframes boot-blink {
+    50% {
+        opacity: 0;
+    }
+}
 #boot-network-shell {
     width: 100%;
     aspect-ratio: 2 / 1;
@@ -81,14 +89,16 @@
     background: linear-gradient(0deg, #0c0c1dbb, transparent);
     font-size: 10px;
     color: #c9a9be;
-    letter-spacing: .1em;
+    letter-spacing: 0.1em;
 }
 .boot-network-caption a {
     pointer-events: auto;
     color: inherit;
     text-decoration: underline;
 }
-.boot-network-live { color: #f3ac80; }
+.boot-network-live {
+    color: #f3ac80;
+}
 .boot-network-live::before {
     content: '';
     display: inline-block;
@@ -104,7 +114,7 @@
     color: #f4bc9f;
     font-size: 12px;
     font-weight: 650;
-    letter-spacing: .16em;
+    letter-spacing: 0.16em;
 }
 .boot-progress-line {
     position: relative;
@@ -138,8 +148,12 @@
     animation: boot-meter-sweep 1.65s ease-in-out infinite;
 }
 @keyframes boot-meter-sweep {
-    0% { transform: translateX(-105%); }
-    100% { transform: translateX(325%); }
+    0% {
+        transform: translateX(-105%);
+    }
+    100% {
+        transform: translateX(325%);
+    }
 }
 #boot-percent {
     position: absolute;
@@ -152,7 +166,9 @@
     white-space: nowrap;
     text-align: left;
 }
-#boot-percent[hidden] { display: none; }
+#boot-percent[hidden] {
+    display: none;
+}
 #boot-details {
     color: #a9a4b9;
     font-size: 12px;
@@ -160,13 +176,20 @@
     min-height: 19px;
 }
 /* Match the exact center axis of the progress bar in all viewport sizes. */
-.boot-eyebrow, #boot-stage, #boot-details, #boot-error {
+.boot-eyebrow,
+#boot-stage,
+#boot-details,
+#boot-error {
     box-sizing: border-box;
     width: 100%;
     margin-inline: auto;
     text-align: center;
 }
-#boot-error { margin-top: 14px; color: #ffb1ae; overflow-wrap: anywhere; }
+#boot-error {
+    margin-top: 14px;
+    color: #ffb1ae;
+    overflow-wrap: anywhere;
+}
 #boot-retry {
     cursor: pointer;
     padding: 9px 18px;
@@ -175,10 +198,23 @@
     background: #402632;
     color: #fff0e6;
 }
-@media (prefers-reduced-motion: reduce) { .boot-blink { animation: none; } }
-@media (max-height: 680px) { #boot-card h1 { margin: 8px 0 12px; } }
+@media (prefers-reduced-motion: reduce) {
+    .boot-blink {
+        animation: none;
+    }
+}
+@media (max-height: 680px) {
+    #boot-card h1 {
+        margin: 8px 0 12px;
+    }
+}
 
 @media (max-width: 520px) {
-    #boot-network-shell { aspect-ratio: 1.6 / 1; }
-    .boot-network-caption { font-size: 8px; padding: 10px; }
+    #boot-network-shell {
+        aspect-ratio: 1.6 / 1;
+    }
+    .boot-network-caption {
+        font-size: 8px;
+        padding: 10px;
+    }
 }
