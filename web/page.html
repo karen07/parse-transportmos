@@ -20,30 +20,23 @@
             rel="preload"
             as="style"
             href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-            onload="
-                this.onload = null;
-                this.rel = 'stylesheet';
-            "
+            data-activate-stylesheet
         />
         <link
             rel="preload"
             as="style"
             href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
-            onload="
-                this.onload = null;
-                this.rel = 'stylesheet';
-            "
+            data-activate-stylesheet
         />
-        <link
-            rel="preload"
-            as="style"
-            href="@@PAGE_CSS@@?v=@@VERSION@@"
-            onload="
-                this.onload = null;
-                this.rel = 'stylesheet';
-            "
-        />
-        <noscript><link rel="stylesheet" href="@@PAGE_CSS@@?v=@@VERSION@@" /></noscript>
+        <link rel="preload" as="style" href="@@PAGE_CSS@@?v=@@VERSION@@" data-activate-stylesheet />
+        <noscript>
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+            <link
+                rel="stylesheet"
+                href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+            />
+            <link rel="stylesheet" href="@@PAGE_CSS@@?v=@@VERSION@@" />
+        </noscript>
         <meta name="transport-config" content="@@CONFIG_JSON@@" />
     </head>
 

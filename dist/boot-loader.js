@@ -14,6 +14,15 @@ const bootReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').
 const bootMainScript = document.currentScript.dataset.mapScript;
 let bootStopAnimation = () => {};
 
+// Enable preloaded styles without inline HTML handlers (CSP script-src-attr 'none').
+// Switching rel works even when preload finished before this deferred script runs.
+for (const link of document.querySelectorAll(
+    'link[rel="preload"][as="style"][data-activate-stylesheet]',
+)) {
+    link.rel = 'stylesheet';
+    link.removeAttribute('as');
+}
+
 (() => {
     'use strict';
     const canvas = bootUI.canvas;

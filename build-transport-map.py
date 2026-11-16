@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.15.14"
+PROJECT_VERSION = "0.16.0"
 
 
 # OSM extraction and normalization
@@ -42,7 +42,7 @@ SOURCE_REGIONS = (
     ("RU-MOS", "https://www.osmlab.ru/regions/RU-MOS.pbf"),
 )
 MKAD_GEOJSON_URL = (
-    "https://raw.githubusercontent.com/karen07/moscow-geo/main/mkad.geojson"
+    "https://raw.githubusercontent.com/karen07/moscow-geo/main/geojson/mkad.geojson"
 )
 MKAD_GEOJSON_CACHE_NAME = "mkad.geojson"
 MERGED_SOURCE_NAME = "moscow-regions-osmlab.osm.pbf"
@@ -6042,6 +6042,9 @@ def build_html(
         raise ValueError("Unresolved HTML template placeholder")
     if not html.isascii():
         raise ValueError("Generated HTML must contain ASCII only")
+    # Site CSP has script-src-attr 'none': keep inline event handlers out of HTML.
+    if re.search(r"\son[a-z]+\s*=", html, flags=re.IGNORECASE):
+        raise ValueError("Generated HTML contains CSP-blocked inline event handlers")
     result = (
         "\n".join(line.rstrip() for line in html.splitlines() if line.strip()) + "\n"
     )
@@ -6199,8 +6202,8 @@ def run_self_tests():
     assert '<b id="transfer-mode-value">No transfers</b>' in page_html
     assert page_html.index('id="trip-back-top"') < page_html.index('id="trip-steps"')
     assert page_html.index('id="trip-back"') > page_html.index('id="trip-steps"')
-    assert 'tripBackTop.addEventListener("click", backToReachability)' in routes_js
-    assert 'tripBack.addEventListener("click", backToReachability)' in routes_js
+    assert "tripBackTop.addEventListener('click', backToReachability)" in routes_js
+    assert "tripBack.addEventListener('click', backToReachability)" in routes_js
     assert not re.search(r"\\u[0-9A-Fa-f]{4}", routes_js)
     assert "bus: transportConfig.mode_names.bus" in routes_js
     assert "metro: transportConfig.mode_names.metro" in routes_js

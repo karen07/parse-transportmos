@@ -1,12 +1,12 @@
 {
-    "version": "0.15.14",
+    "version": "0.16.0",
     "data_file": "routes.json.gz",
     "data_worker_file": "routes-data-worker.js",
     "maplibre_worker_file": "routes-maplibre-worker.js",
     "walk_speed": 80.0,
     "grid_size": 400.0,
-    "origin_lon": 37.607149,
-    "origin_lat": 55.744645,
+    "origin_lon": 37.608244,
+    "origin_lat": 55.744252,
     "mode_names": {
         "heading": "Transport modes",
         "bus": "Bus",
