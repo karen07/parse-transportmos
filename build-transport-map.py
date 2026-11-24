@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.16.1"
+PROJECT_VERSION = "0.16.2"
 
 
 # OSM extraction and normalization

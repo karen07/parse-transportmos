@@ -47,6 +47,7 @@ for (const link of document.querySelectorAll(
     let paused = false;
     const start = performance.now();
     const duration = 6800;
+    const waveInterval = 3400;
 
     function surface() {
         const offscreen = document.createElement('canvas');
@@ -86,7 +87,19 @@ for (const link of document.querySelectorAll(
         if (now - lastFrame < 50) return; // At most 20 FPS.
         lastFrame = now;
         ctx.clearRect(0, 0, width, height);
-        const phase = ((now - start) % duration) / duration;
+        const elapsed = Math.max(0, now - start);
+        const youngestAge = elapsed % waveInterval;
+        // Draw the older wave first. Never launch a wave before the animation starts.
+        const oldestAge =
+            Math.min(Math.floor(elapsed / waveInterval), Math.ceil(duration / waveInterval) - 1) *
+                waveInterval +
+            youngestAge;
+        for (let age = oldestAge; age >= 0; age -= waveInterval) {
+            if (age < duration) drawWave(age / duration);
+        }
+    }
+
+    function drawWave(phase) {
         const radius = 4 + phase * Math.hypot(width, height) * 0.43;
         const fade = Math.max(0, Math.min(1, phase * 9, (1 - phase) * 7));
         if (!fade) return;
