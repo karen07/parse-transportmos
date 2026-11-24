@@ -39,6 +39,7 @@ for (const link of document.querySelectorAll(
         raf = null,
         lastFrame = 0;
     let paused = false;
+    let observer = null;
     let start = 0;
     const duration = 6800;
     const waveInterval = 3400;
@@ -52,9 +53,13 @@ for (const link of document.querySelectorAll(
 
     function resize() {
         const bounds = canvas.getBoundingClientRect();
-        width = Math.max(1, bounds.width);
-        height = Math.max(1, bounds.height);
-        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const nextWidth = Math.max(1, bounds.width);
+        const nextHeight = Math.max(1, bounds.height);
+        const nextDpr = Math.min(window.devicePixelRatio || 1, 2);
+        if (mask && width === nextWidth && height === nextHeight && dpr === nextDpr) return;
+        width = nextWidth;
+        height = nextHeight;
+        dpr = nextDpr;
         canvas.width = Math.round(width * dpr);
         canvas.height = Math.round(height * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -132,6 +137,10 @@ for (const link of document.querySelectorAll(
         resize();
         raf = requestAnimationFrame(frame);
         window.addEventListener('resize', resize, { passive: true });
+        if (typeof ResizeObserver !== 'undefined') {
+            observer = new ResizeObserver(resize);
+            observer.observe(canvas);
+        }
         document.addEventListener('visibilitychange', onVisibility);
     }
     bootStopAnimation = () => {
@@ -139,6 +148,7 @@ for (const link of document.querySelectorAll(
         if (raf !== null) cancelAnimationFrame(raf);
         image.removeEventListener('load', begin);
         window.removeEventListener('resize', resize);
+        if (observer) observer.disconnect();
         document.removeEventListener('visibilitychange', onVisibility);
     };
     if (image.complete) begin();

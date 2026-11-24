@@ -2,10 +2,7 @@
     position: fixed;
     inset: 0;
     z-index: 100000;
-    display: grid;
-    place-items: center;
-    padding: clamp(12px, 3vh, 28px);
-    background: radial-gradient(ellipse at 50% 35%, #1b203d 0%, #080c17 68%);
+    background: #0b1020;
     color: #e8eafa;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     box-sizing: border-box;
@@ -14,16 +11,15 @@
     display: none;
 }
 #boot-card {
-    width: min(880px, 100%);
-    padding: clamp(14px, 2.8vw, 30px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    height: 100%;
+    padding: max(8px, env(safe-area-inset-top)) max(0px, env(safe-area-inset-right))
+        max(8px, env(safe-area-inset-bottom)) max(0px, env(safe-area-inset-left));
     box-sizing: border-box;
     overflow: hidden;
-    border: 1px solid #49415b;
-    border-radius: 13px;
-    background: linear-gradient(150deg, rgba(13, 16, 34, 0.97), rgba(17, 15, 29, 0.96));
-    box-shadow:
-        0 38px 110px #000a,
-        0 0 95px #4b295c18;
     text-align: center;
 }
 .boot-eyebrow {
@@ -37,7 +33,7 @@
     font-size: clamp(18px, 3.3vw, 27px);
     font-weight: 500;
     letter-spacing: 0.08em;
-    margin: 12px auto 20px;
+    margin: 8px auto 12px;
     position: relative;
     width: max-content;
     max-width: 100%;
@@ -55,14 +51,20 @@
         opacity: 0;
     }
 }
-#boot-network-shell {
+/* Fit the largest undistorted 3:2 map into the available space. */
+.boot-network-space {
+    flex: 1 1 0;
+    min-height: 0;
     width: 100%;
+    display: grid;
+    place-items: center;
+    container-type: size;
+}
+#boot-network-shell {
+    width: min(100cqw, 150cqh);
     aspect-ratio: 3 / 2;
-    max-height: min(58vh, 540px);
     position: relative;
     overflow: hidden;
-    background: #0b1020;
-    border: 1px solid #36374c;
 }
 #boot-roads {
     display: block;
@@ -111,7 +113,7 @@
     box-shadow: 0 0 8px #f48b5a;
 }
 #boot-stage {
-    margin-top: clamp(12px, 2vh, 20px);
+    margin-top: clamp(4px, 1vh, 10px);
     color: #f4bc9f;
     font-size: 12px;
     font-weight: 650;
@@ -120,9 +122,9 @@
 .boot-progress-line {
     position: relative;
     box-sizing: border-box;
-    width: calc(100% - clamp(100px, 16vw, 136px));
+    width: min(1000px, calc(100% - clamp(100px, 16vw, 136px)));
     margin-inline: auto;
-    padding: 14px 0 8px;
+    padding: 8px 0 5px;
     color: #c08b9f;
 }
 .boot-meter {
@@ -159,7 +161,7 @@
 #boot-percent {
     position: absolute;
     left: calc(100% + 12px);
-    top: 19px;
+    top: 13px;
     transform: translateY(-50%);
     color: #ffccab;
     font-size: 15px;
@@ -206,16 +208,27 @@
 }
 @media (max-height: 680px) {
     #boot-card h1 {
-        margin: 8px 0 12px;
+        margin: 4px auto 6px;
     }
 }
 
 @media (max-width: 520px) {
-    #boot-network-shell {
-        aspect-ratio: 3 / 2;
-    }
     .boot-network-caption {
         font-size: 8px;
         padding: 10px;
+    }
+}
+
+@media (max-height: 400px) {
+    .boot-eyebrow,
+    #boot-details {
+        font-size: 10px;
+    }
+    #boot-card h1 {
+        font-size: 18px;
+    }
+    .boot-network-caption {
+        font-size: 8px;
+        padding: 4px;
     }
 }

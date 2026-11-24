@@ -1,5 +1,5 @@
 {
-    "version": "0.16.3",
+    "version": "0.16.4",
     "data_file": "routes.json.gz",
     "data_worker_file": "routes-data-worker.js",
     "maplibre_worker_file": "routes-maplibre-worker.js",

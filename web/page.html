@@ -48,26 +48,28 @@
             <div id="boot-card">
                 <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
                 <h1>Building your map<span class="boot-blink">_</span></h1>
-                <div id="boot-network-shell" aria-hidden="true">
-                    <img
-                        id="boot-roads"
-                        src="moscow-major-roads.svg?v=@@VERSION@@"
-                        alt=""
-                        fetchpriority="high"
-                    />
-                    <canvas id="boot-network" width="900" height="600"></canvas>
-                    <div class="boot-network-caption">
-                        <span>
-                            MAJOR ROADS / &copy;
-                            <a
-                                href="https://www.openstreetmap.org/copyright"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                            >
-                                OpenStreetMap contributors
-                            </a>
-                        </span>
-                        <span class="boot-network-live">NETWORK ACTIVE</span>
+                <div class="boot-network-space">
+                    <div id="boot-network-shell" aria-hidden="true">
+                        <img
+                            id="boot-roads"
+                            src="moscow-major-roads.svg?v=@@VERSION@@"
+                            alt=""
+                            fetchpriority="high"
+                        />
+                        <canvas id="boot-network" width="900" height="600"></canvas>
+                        <div class="boot-network-caption">
+                            <span>
+                                MAJOR ROADS / &copy;
+                                <a
+                                    href="https://www.openstreetmap.org/copyright"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >
+                                    OpenStreetMap contributors
+                                </a>
+                            </span>
+                            <span class="boot-network-live">NETWORK ACTIVE</span>
+                        </div>
                     </div>
                 </div>
                 <div id="boot-stage">INITIALIZING</div>

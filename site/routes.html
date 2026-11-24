@@ -3,23 +3,20 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <meta name="application-version" content="0.16.3" />
+        <meta name="application-version" content="0.16.4" />
         <title>Moscow transport reachability</title>
         <meta name="theme-color" content="#0d1534" />
-        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.16.3" />
-        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.16.3" />
-        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.16.3" />
-        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.16.3" />
+        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.16.4" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.16.4" />
+        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.16.4" />
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.16.4" />
         <!-- First paint uses inline critical CSS and a local SVG. -->
         <style>
             #boot-overlay {
                 position: fixed;
                 inset: 0;
                 z-index: 100000;
-                display: grid;
-                place-items: center;
-                padding: clamp(12px, 3vh, 28px);
-                background: radial-gradient(ellipse at 50% 35%, #1b203d 0%, #080c17 68%);
+                background: #0b1020;
                 color: #e8eafa;
                 font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                 box-sizing: border-box;
@@ -28,16 +25,15 @@
                 display: none;
             }
             #boot-card {
-                width: min(880px, 100%);
-                padding: clamp(14px, 2.8vw, 30px);
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                width: 100%;
+                height: 100%;
+                padding: max(8px, env(safe-area-inset-top)) max(0px, env(safe-area-inset-right))
+                    max(8px, env(safe-area-inset-bottom)) max(0px, env(safe-area-inset-left));
                 box-sizing: border-box;
                 overflow: hidden;
-                border: 1px solid #49415b;
-                border-radius: 13px;
-                background: linear-gradient(150deg, rgba(13, 16, 34, 0.97), rgba(17, 15, 29, 0.96));
-                box-shadow:
-                    0 38px 110px #000a,
-                    0 0 95px #4b295c18;
                 text-align: center;
             }
             .boot-eyebrow {
@@ -51,7 +47,7 @@
                 font-size: clamp(18px, 3.3vw, 27px);
                 font-weight: 500;
                 letter-spacing: 0.08em;
-                margin: 12px auto 20px;
+                margin: 8px auto 12px;
                 position: relative;
                 width: max-content;
                 max-width: 100%;
@@ -69,14 +65,20 @@
                     opacity: 0;
                 }
             }
-            #boot-network-shell {
+            /* Fit the largest undistorted 3:2 map into the available space. */
+            .boot-network-space {
+                flex: 1 1 0;
+                min-height: 0;
                 width: 100%;
+                display: grid;
+                place-items: center;
+                container-type: size;
+            }
+            #boot-network-shell {
+                width: min(100cqw, 150cqh);
                 aspect-ratio: 3 / 2;
-                max-height: min(58vh, 540px);
                 position: relative;
                 overflow: hidden;
-                background: #0b1020;
-                border: 1px solid #36374c;
             }
             #boot-roads {
                 display: block;
@@ -125,7 +127,7 @@
                 box-shadow: 0 0 8px #f48b5a;
             }
             #boot-stage {
-                margin-top: clamp(12px, 2vh, 20px);
+                margin-top: clamp(4px, 1vh, 10px);
                 color: #f4bc9f;
                 font-size: 12px;
                 font-weight: 650;
@@ -134,9 +136,9 @@
             .boot-progress-line {
                 position: relative;
                 box-sizing: border-box;
-                width: calc(100% - clamp(100px, 16vw, 136px));
+                width: min(1000px, calc(100% - clamp(100px, 16vw, 136px)));
                 margin-inline: auto;
-                padding: 14px 0 8px;
+                padding: 8px 0 5px;
                 color: #c08b9f;
             }
             .boot-meter {
@@ -173,7 +175,7 @@
             #boot-percent {
                 position: absolute;
                 left: calc(100% + 12px);
-                top: 19px;
+                top: 13px;
                 transform: translateY(-50%);
                 color: #ffccab;
                 font-size: 15px;
@@ -220,16 +222,26 @@
             }
             @media (max-height: 680px) {
                 #boot-card h1 {
-                    margin: 8px 0 12px;
+                    margin: 4px auto 6px;
                 }
             }
             @media (max-width: 520px) {
-                #boot-network-shell {
-                    aspect-ratio: 3 / 2;
-                }
                 .boot-network-caption {
                     font-size: 8px;
                     padding: 10px;
+                }
+            }
+            @media (max-height: 400px) {
+                .boot-eyebrow,
+                #boot-details {
+                    font-size: 10px;
+                }
+                #boot-card h1 {
+                    font-size: 18px;
+                }
+                .boot-network-caption {
+                    font-size: 8px;
+                    padding: 4px;
                 }
             }
         </style>
@@ -246,14 +258,14 @@
             href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
             data-activate-stylesheet
         />
-        <link rel="preload" as="style" href="routes.css?v=0.16.3" data-activate-stylesheet />
+        <link rel="preload" as="style" href="routes.css?v=0.16.4" data-activate-stylesheet />
         <noscript>
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
             <link
                 rel="stylesheet"
                 href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
             />
-            <link rel="stylesheet" href="routes.css?v=0.16.3" />
+            <link rel="stylesheet" href="routes.css?v=0.16.4" />
         </noscript>
         <meta name="transport-config" content="routes-config.json" />
     </head>
@@ -264,26 +276,28 @@
             <div id="boot-card">
                 <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
                 <h1>Building your map<span class="boot-blink">_</span></h1>
-                <div id="boot-network-shell" aria-hidden="true">
-                    <img
-                        id="boot-roads"
-                        src="moscow-major-roads.svg?v=0.16.3"
-                        alt=""
-                        fetchpriority="high"
-                    />
-                    <canvas id="boot-network" width="900" height="600"></canvas>
-                    <div class="boot-network-caption">
-                        <span>
-                            MAJOR ROADS / &copy;
-                            <a
-                                href="https://www.openstreetmap.org/copyright"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                            >
-                                OpenStreetMap contributors
-                            </a>
-                        </span>
-                        <span class="boot-network-live">NETWORK ACTIVE</span>
+                <div class="boot-network-space">
+                    <div id="boot-network-shell" aria-hidden="true">
+                        <img
+                            id="boot-roads"
+                            src="moscow-major-roads.svg?v=0.16.4"
+                            alt=""
+                            fetchpriority="high"
+                        />
+                        <canvas id="boot-network" width="900" height="600"></canvas>
+                        <div class="boot-network-caption">
+                            <span>
+                                MAJOR ROADS / &copy;
+                                <a
+                                    href="https://www.openstreetmap.org/copyright"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >
+                                    OpenStreetMap contributors
+                                </a>
+                            </span>
+                            <span class="boot-network-live">NETWORK ACTIVE</span>
+                        </div>
                     </div>
                 </div>
                 <div id="boot-stage">INITIALIZING</div>
@@ -348,7 +362,7 @@
                         Click once for a start point. Double-click anywhere for route to any point
                         while keeping reachability mode.
                     </div>
-                    <div class="project-version">v0.16.3</div>
+                    <div class="project-version">v0.16.4</div>
                     <div
                         id="timing-status"
                         role="status"
@@ -585,6 +599,6 @@
                 <span>reachable routes</span>
             </div>
         </div>
-        <script src="boot-loader.js?v=0.16.3" data-map-script="routes.js?v=0.16.3" defer></script>
+        <script src="boot-loader.js?v=0.16.4" data-map-script="routes.js?v=0.16.4" defer></script>
     </body>
 </html>
