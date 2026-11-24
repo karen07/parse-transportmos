@@ -28,7 +28,7 @@ except ImportError:
     osmium = None
 
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
-PROJECT_VERSION = "0.16.0"
+PROJECT_VERSION = "0.16.1"
 
 
 # OSM extraction and normalization
@@ -405,7 +405,7 @@ def build_transport_extract(source_path, transport_path):
     print(f"selected direct routes: {selector.selected_routes}")
 
 
-def build_cache(cache_dir, update=False, rebuild=False):
+def prepare_raw_source(cache_dir, update=False):
     cache_dir.mkdir(parents=True, exist_ok=True)
     sources = []
     for region, url in SOURCE_REGIONS:
@@ -417,7 +417,11 @@ def build_cache(cache_dir, update=False, rebuild=False):
             print(f"Using cached: {source}")
         sources.append(source)
 
-    source, source_changed = merge_regional_sources(cache_dir, sources)
+    return merge_regional_sources(cache_dir, sources)
+
+
+def build_cache(cache_dir, update=False, rebuild=False):
+    source, source_changed = prepare_raw_source(cache_dir, update)
     transport_pbf = cache_dir / TRANSPORT_CACHE_NAME
     if update or rebuild or source_changed or not transport_pbf.is_file():
         print("Selecting all bus/tram/trolleybus networks and urban rail routes...")
@@ -6031,7 +6035,7 @@ def build_html(
         "@@PAGE_CSS@@": quote(css_filename),
         "@@CONFIG_JSON@@": quote(config_filename),
         "@@BOOT_ROADS_SVG@@": boot_svg,
-        "@@BOOT_CSS@@": boot_css,
+        "/* @@BOOT_CSS@@ */": boot_css,
         "@@INITIAL_WALK_MINUTES@@": f"{initial_walk_minutes:.0f}",
         "@@INITIAL_OPACITY@@": f"{initial_circle_opacity:.0f}",
         "@@WALK_SPEED@@": f"{walk_speed:.0f}",
@@ -6067,7 +6071,7 @@ def build_html(
         write_atomic_bytes(output_path.with_name(data_filename), compressed_payload)
     write_atomic_bytes(
         output_path.with_name(config_filename),
-        (json.dumps(config, ensure_ascii=True, indent=2) + "\n").encode("ascii"),
+        (json.dumps(config, ensure_ascii=True, indent=4) + "\n").encode("ascii"),
     )
     static_assets = {
         js_filename: "routes.js",
@@ -6117,6 +6121,29 @@ def build_html(
             )
         ),
         flush=True,
+    )
+    # Reuse the exact rendered overlay for an offline, persistent animation preview.
+    overlay_match = re.search(
+        r'(<div\b[^>]*\bid="boot-overlay"[^>]*>.*?)(?=<aside\b[^>]*\bid="info")',
+        result,
+        flags=re.DOTALL,
+    )
+    if overlay_match is None:
+        raise ValueError("Missing loading screen in HTML template")
+    overlay = overlay_match.group(1).rstrip()
+    preview = (
+        '<!doctype html>\n<html><head><meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        "<title>Moscow loading screen preview</title>\n<style>\n"
+        + boot_css
+        + "\n</style></head><body>\n"
+        + overlay
+        + "\n"
+        + f'<script src="boot-loader.js?v={PROJECT_VERSION}" defer></script>\n'
+        "</body></html>\n"
+    )
+    write_atomic_bytes(
+        output_path.with_name("boot-preview.html"), preview.encode("ascii")
     )
     return result
 
@@ -6980,6 +7007,23 @@ def parse_args():
         action="store_true",
         help="Refresh HTML/config and copy web assets without processing OSM",
     )
+    parser.add_argument(
+        "--boot-roads-only",
+        action="store_true",
+        help="Regenerate road geometry and web assets, keeping existing transport data",
+    )
+    parser.add_argument(
+        "--boot-zoom",
+        type=int,
+        choices=(10, 11, 12),
+        default=11,
+        help="Loading screen road detail profile (default: 11)",
+    )
+    parser.add_argument(
+        "--boot-pbf",
+        type=Path,
+        help="Local full OSM PBF for --boot-roads-only; otherwise use regional cache",
+    )
     parser.add_argument("--walk-minutes", type=float, default=5.0)
     parser.add_argument("--walk-speed", type=float, default=80.0)
     parser.add_argument("--grid-size", type=float, default=400.0)
@@ -7070,6 +7114,29 @@ def main():
     if args.self_test:
         run_self_tests()
         return
+    if args.boot_pbf and not args.boot_roads_only:
+        raise ValueError("--boot-pbf requires --boot-roads-only")
+    if args.boot_roads_only:
+        from major_roads import generate as generate_major_roads
+
+        output = Path(args.output)
+        data_file = output.with_name(output.stem + ".json.gz")
+        if not data_file.is_file():
+            raise FileNotFoundError(f"Transport data missing: {data_file}")
+        if osmium is None:
+            raise RuntimeError("Install osmium: python3 -m pip install osmium")
+        if args.boot_pbf:
+            raw_source = args.boot_pbf
+        else:
+            cached = Path(args.cache_dir) / MERGED_SOURCE_NAME
+            if cached.is_file() and not args.update:
+                raw_source = cached
+            else:
+                raw_source, _ = prepare_raw_source(Path(args.cache_dir), args.update)
+        generate_major_roads(
+            raw_source, output.with_name("moscow-major-roads.json"), args.boot_zoom
+        )
+        args.refresh_web_assets = True
     if args.refresh_web_assets:
         output = Path(args.output)
         data_file = output.with_name(output.stem + ".json.gz")
@@ -7370,6 +7437,7 @@ def main():
         )
     step_done("statistics and audit", phase_started)
     if not args.input_geojson:
+        from major_roads import ROAD_FORMAT
         from major_roads import generate as generate_major_roads
 
         roads_path = Path(args.output).with_name("moscow-major-roads.json")
@@ -7381,10 +7449,19 @@ def main():
             or args.update
             or args.rebuild
         )
+        if not outdated:
+            try:
+                cached_roads = json.loads(roads_path.read_text(encoding="ascii"))
+                outdated = (
+                    cached_roads.get("format") != ROAD_FORMAT
+                    or cached_roads.get("zoom") != args.boot_zoom
+                )
+            except (OSError, ValueError):
+                outdated = True
         if outdated:
             phase_started = time.monotonic()
             print("[build] START major road illustration", flush=True)
-            generate_major_roads(raw_source, roads_path)
+            generate_major_roads(raw_source, roads_path, args.boot_zoom)
             step_done("major road illustration", phase_started)
     phase_started = time.monotonic()
     print("[build] START HTML encode + gzip", flush=True)

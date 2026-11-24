@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Prepare a tiny, static first-paint SVG from generated OSM major roads.
-
-This emits SVG geometry, not application HTML/CSS/JavaScript.  The browser
-can paint it before downloading any script, stylesheet or OSM dataset.
-"""
+"""Render grouped OSM road geometry for a self-contained first paint."""
 
 import json
 import math
 from pathlib import Path
 
-VIEW_WIDTH = 800
-VIEW_HEIGHT = 400
-MAX_PATH_CHARS = 12000
+VIEW_WIDTH = 900
+VIEW_HEIGHT = 600
+# Back-to-front order; the same stroke widths are used by the Canvas mask.
+STYLES = {
+    "tertiary": ("#29384f", 0.65),
+    "secondary": ("#3b4b65", 0.95),
+    "primary": ("#50647e", 1.35),
+    "trunk": ("#657b97", 1.85),
+    "motorway": ("#748ba5", 2.05),
+    "chord": ("#7187a2", 2.0),
+    "ring": ("#7e91aa", 1.95),
+    "mkad": ("#879bb4", 2.2),
+}
 
 
 def distance_to_line(point, start, end):
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
+    dx, dy = end[0] - start[0], end[1] - start[1]
     t = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / max(
         dx * dx + dy * dy, 1e-12
     )
@@ -24,7 +29,7 @@ def distance_to_line(point, start, end):
     return math.hypot(point[0] - start[0] - t * dx, point[1] - start[1] - t * dy)
 
 
-def simplify_screen(points, epsilon=1.2):
+def simplify_screen(points, epsilon=0.4):
     if len(points) <= 2:
         return points
     keep = {0, len(points) - 1}
@@ -38,22 +43,22 @@ def simplify_screen(points, epsilon=1.2):
                 best, chosen = dist, idx
         if best > epsilon:
             keep.add(chosen)
-            stack.append((first, chosen))
-            stack.append((chosen, last))
+            stack.extend(((first, chosen), (chosen, last)))
     return [points[idx] for idx in sorted(keep)]
 
 
-def svg_path(data, max_chars=MAX_PATH_CHARS):
-    """Bound HTML bytes while keeping full connected paths, never fake gaps."""
-    if data.get("format") != "moscow-major-roads-v1":
+def grouped_paths(data):
+    """Use equal x/y scale, no arbitrary byte cap or partial path truncation."""
+    if data.get("format") not in ("moscow-major-roads-v1", "moscow-major-roads-v2"):
         raise ValueError("Unsupported major road geometry")
     mx, my = data["extent"]
     if not all(math.isfinite(v) and v > 0 for v in (mx, my)):
         raise ValueError("Invalid road extents")
-    scale = min(760 / (2 * mx), 376 / (2 * my))
-    candidates = []
+    scale = min(VIEW_WIDTH / (2 * mx), VIEW_HEIGHT / (2 * my))
+    groups = {kind: [] for kind in STYLES}
     for kind, coords in data["paths"]:
-        if len(coords) < 4 or len(coords) % 2:
+        name = data["classes"][kind]
+        if name not in groups or len(coords) < 4 or len(coords) % 2:
             continue
         points = [
             (
@@ -62,36 +67,20 @@ def svg_path(data, max_chars=MAX_PATH_CHARS):
             )
             for i in range(0, len(coords), 2)
         ]
+        points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
         points = simplify_screen(points)
-        # Drawings below 2 screen pixels are not meaningful in a loader.
-        length = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
-        if length < 2:
+        if len(points) < 2 or not any(p != points[0] for p in points[1:]):
             continue
         tokens = [f"M{points[0][0]} {points[0][1]}"]
         tokens.extend(f"{x} {y}" for x, y in points[1:])
-        line = " ".join(tokens)
-        candidates.append((kind, length, line))
-
-    # Protect Moscow's rings and the longest radials under a strict byte cap.
-    # Never truncate coordinates halfway through a path.
-    candidates.sort(key=lambda item: (item[0] not in (0, 1), -item[1]))
-    accepted = []
-    size = 0
-    for _, _, line in candidates:
-        if size + len(line) + 1 > max_chars:
-            continue
-        accepted.append(line)
-        size += len(line) + 1
-    return " ".join(accepted)
+        groups[name].append(" ".join(tokens))
+    return {kind: " ".join(paths) for kind, paths in groups.items() if paths}
 
 
 def wrapped_svg_path(path):
-    """Whitespace-separated tokens on <= 100-column lines."""
-    # A line break in the middle of an SVG path attribute is whitespace.
-    words = path.split()
-    lines = []
-    current = "        "
-    for word in words:
+    """Keep generated HTML lines below the project's 100-character limit."""
+    lines, current = [], "        "
+    for word in path.split():
         if len(current) + len(word) + 1 > 92:
             lines.append(current.rstrip())
             current = "        " + word
@@ -104,16 +93,24 @@ def wrapped_svg_path(path):
 
 def render_inline_svg(road_json):
     road_json = Path(road_json)
-    geometry = ""
-    if road_json.is_file():
-        data = json.loads(road_json.read_text(encoding="ascii"))
-        geometry = wrapped_svg_path(svg_path(data))
-    return (
-        '<svg id="boot-roads" viewBox="0 0 800 400"\n'
-        '    preserveAspectRatio="xMidYMid meet" aria-hidden="true">\n'
-        '    <path id="boot-road-path" d="\n'
-        + geometry
-        + '\n    " fill="none" stroke="#39465f" stroke-width="1.55"\n'
-        '    stroke-linecap="round" stroke-linejoin="round"/>\n'
-        "</svg>"
+    groups = (
+        grouped_paths(json.loads(road_json.read_text(encoding="ascii")))
+        if road_json.is_file()
+        else {}
     )
+    lines = [
+        f'<svg id="boot-roads" viewBox="0 0 {VIEW_WIDTH} {VIEW_HEIGHT}"',
+        '    preserveAspectRatio="xMidYMid meet" aria-hidden="true">',
+        '    <g fill="none" stroke-linecap="round" stroke-linejoin="round">',
+    ]
+    for kind, geometry in groups.items():
+        color, width = STYLES[kind]
+        lines.extend(
+            [
+                f'    <path data-road-class="{kind}" d="',
+                wrapped_svg_path(geometry),
+                f'    " stroke="{color}" stroke-width="{width}"/>',
+            ]
+        )
+    lines.extend(["    </g>", "</svg>"])
+    return "\n".join(lines)

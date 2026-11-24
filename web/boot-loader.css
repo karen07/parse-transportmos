@@ -57,8 +57,8 @@
 }
 #boot-network-shell {
     width: 100%;
-    aspect-ratio: 2 / 1;
-    max-height: min(52vh, 410px);
+    aspect-ratio: 3 / 2;
+    max-height: min(58vh, 540px);
     position: relative;
     overflow: hidden;
     background: #0b1020;
@@ -211,7 +211,7 @@
 
 @media (max-width: 520px) {
     #boot-network-shell {
-        aspect-ratio: 1.6 / 1;
+        aspect-ratio: 3 / 2;
     }
     .boot-network-caption {
         font-size: 8px;

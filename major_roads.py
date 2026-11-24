@@ -2,7 +2,7 @@
 """Generate a compact, topologically joined road drawing from Moscow OSM PBF.
 
 This is a *visual* asset for the loading screen, not a routing graph.
-Only major ways and selected ring-road names are rendered. No guessed bridges.
+Road density is controlled by a display profile. No guessed bridges.
 """
 
 import argparse
@@ -25,36 +25,100 @@ CENTER_LAT = 55.752
 METERS_PER_DEGREE_LAT = 111195.0
 METERS_PER_DEGREE_LON = METERS_PER_DEGREE_LAT * math.cos(math.radians(CENTER_LAT))
 VIEW_X_METERS = 34000.0
-VIEW_Y_METERS = 25500.0
+VIEW_Y_METERS = 22666.666666666668
 COORD_UNIT_METERS = 20.0
 MAX_X = VIEW_X_METERS / COORD_UNIT_METERS
 MAX_Y = VIEW_Y_METERS / COORD_UNIT_METERS
-CLASS_NAMES = ("mkad", "ring", "motorway", "trunk", "primary")
+CLASS_NAMES = (
+    "mkad",
+    "ring",
+    "motorway",
+    "trunk",
+    "primary",
+    "secondary",
+    "tertiary",
+    "chord",
+)
 CLASS_INDEX = {key: index for index, key in enumerate(CLASS_NAMES)}
 MAIN_HIGHWAYS = {"motorway", "trunk", "primary"}
+PROFILES = (10, 11, 12)
+DEFAULT_ZOOM = 11
+ROAD_FORMAT = "moscow-major-roads-v2"
+# Named corridors may change OSM highway class along their length.
 RING_NAMES = (
-    "\u043c\u043a\u0430\u0434",
-    "\u0442\u0442\u043a",
-    "\u0442\u0440\u0435\u0442\u044c\u0435",
-    "\u0441\u0430\u0434\u043e\u0432",
-    "\u0431\u0443\u043b\u044c\u0432\u0430\u0440\u043d",
+    (
+        "\u0442\u0440\u0435\u0442\u044c\u0435 \u0442\u0440\u0430\u043d\u0441"
+        "\u043f\u043e\u0440\u0442\u043d\u043e\u0435 \u043a\u043e\u043b\u044c"
+        "\u0446\u043e"
+    ),
+    (
+        "\u0441\u0430\u0434\u043e\u0432\u043e\u0435 \u043a\u043e\u043b\u044c"
+        "\u0446\u043e"
+    ),
+    (
+        "\u0431\u0443\u043b\u044c\u0432\u0430\u0440\u043d\u043e\u0435 \u043a"
+        "\u043e\u043b\u044c\u0446\u043e"
+    ),
+    "third transport ring",
+    "garden ring",
+    "boulevard ring",
+)
+CHORD_NAMES = (
+    (
+        "\u043c\u043e\u0441\u043a\u043e\u0432\u0441\u043a\u0438\u0439 \u0441"
+        "\u043a\u043e\u0440\u043e\u0441\u0442\u043d\u043e\u0439 \u0434\u0438"
+        "\u0430\u043c\u0435\u0442\u0440"
+    ),
+    (
+        "\u0441\u0435\u0432\u0435\u0440\u043e-\u0432\u043e\u0441\u0442\u043e"
+        "\u0447\u043d\u0430\u044f \u0445\u043e\u0440\u0434\u0430"
+    ),
+    (
+        "\u0441\u0435\u0432\u0435\u0440\u043e-\u0437\u0430\u043f\u0430\u0434"
+        "\u043d\u0430\u044f \u0445\u043e\u0440\u0434\u0430"
+    ),
+    (
+        "\u044e\u0433\u043e-\u0432\u043e\u0441\u0442\u043e\u0447\u043d\u0430"
+        "\u044f \u0445\u043e\u0440\u0434\u0430"
+    ),
+    ("\u044e\u0436\u043d\u0430\u044f \u0440\u043e\u043a\u0430\u0434\u0430"),
+    (
+        "\u044e\u0436\u043d\u043e-\u043b\u044b\u0442\u043a\u0430\u0440\u0438"
+        "\u043d\u0441\u043a\u0430\u044f \u0430\u0432\u0442\u043e\u0434\u043e"
+        "\u0440\u043e\u0433\u0430"
+    ),
+    "moscow high-speed diameter",
 )
 
 
-def road_class(tags):
-    """Only trunk lines, with named ring segments kept across class changes."""
+def road_class(tags, zoom=DEFAULT_ZOOM):
+    """Select real carriageways, never ramps or residential/service streets."""
     highway = tags.get("highway") or ""
-    if not highway or highway.endswith("_link") or tags.get("area") == "yes":
+    if (
+        highway not in MAIN_HIGHWAYS | {"secondary", "tertiary"}
+        or tags.get("area") == "yes"
+    ):
         return None
-    if highway not in MAIN_HIGHWAYS | {"secondary", "tertiary"}:
-        return None
-    name = " ".join(tags.get(k) or "" for k in ("name", "name:ru", "name:en", "ref"))
-    name = name.casefold()
-    if "\u043c\u043a\u0430\u0434" in name or "moscow ring road" in name:
+    name = " ".join(
+        tags.get(k) or "" for k in ("name", "name:ru", "name:en", "ref")
+    ).casefold()
+    words = name.split()
+    if "\u043c\u043a\u0430\u0434" in words or "moscow ring road" in name:
         return "mkad"
-    if any(keyword in name for keyword in RING_NAMES[1:]):
+    if "\u0442\u0442\u043a" in words or any(keyword in name for keyword in RING_NAMES):
         return "ring"
-    return highway if highway in MAIN_HIGHWAYS else None
+    chord_refs = (
+        "\u043c\u0441\u0434",  # MSD
+        "\u0441\u0437\u0445",  # SZH
+        "\u044e\u043b\u0430",  # YLA
+    )
+    if any(keyword in name for keyword in CHORD_NAMES) or any(
+        w in words for w in chord_refs
+    ):
+        return "chord"
+    if highway in MAIN_HIGHWAYS or zoom >= 11:
+        return highway
+    return None
 
 
 def project(lon, lat):
@@ -215,13 +279,14 @@ def merge_chains(ways, positions=None):
 
 
 class WayCollector(SimpleHandler):
-    def __init__(self):
+    def __init__(self, zoom=DEFAULT_ZOOM):
         super().__init__()
+        self.zoom = zoom
         self.ways = []
         self.refs = set()
 
     def way(self, way):
-        kind = road_class(way.tags)
+        kind = road_class(way.tags, self.zoom)
         if kind is None:
             return
         refs = [node.ref for node in way.nodes]
@@ -242,7 +307,7 @@ class NodeCollector(SimpleHandler):
             self.positions[node.id] = project(node.location.lon, node.location.lat)
 
 
-def generate_from_ways(ways, positions):
+def generate_from_ways(ways, positions, zoom=DEFAULT_ZOOM):
     """Expose a pure-function core for unit testing without pyosmium."""
     output = []
     counts = defaultdict(int)
@@ -253,6 +318,16 @@ def generate_from_ways(ways, positions):
             if ref not in positions:
                 if len(contiguous) >= 2:
                     for line in clipped_paths(contiguous):
+                        # Balanced: retain long connected tertiary corridors, not every
+                        # neighborhood street. Measure the complete visible chain.
+                        if (
+                            kind == "tertiary"
+                            and zoom == 11
+                            and sum(math.dist(a, b) for a, b in zip(line, line[1:]))
+                            * COORD_UNIT_METERS
+                            < 1500
+                        ):
+                            continue
                         points = simplify(line)
                         rounded = []
                         for x, y in points:
@@ -269,7 +344,8 @@ def generate_from_ways(ways, positions):
             else:
                 contiguous.append(positions[ref])
     return {
-        "format": "moscow-major-roads-v1",
+        "format": ROAD_FORMAT,
+        "zoom": zoom,
         "unit_m": COORD_UNIT_METERS,
         "extent": [MAX_X, MAX_Y],
         "classes": list(CLASS_NAMES),
@@ -279,25 +355,23 @@ def generate_from_ways(ways, positions):
     }
 
 
-def generate(input_path, output_path):
+def generate(input_path, output_path, zoom=DEFAULT_ZOOM):
     if osmium is None:
         raise RuntimeError("Install pyosmium: python3 -m pip install osmium")
     print("[roads] scanning major ways:", input_path, flush=True)
-    collector = WayCollector()
+    collector = WayCollector(zoom)
     collector.apply_file(str(input_path))
     print("[roads] way count:", len(collector.ways), flush=True)
     nodes = NodeCollector(collector.refs)
     nodes.apply_file(str(input_path))
     print("[roads] selected nodes:", len(nodes.positions), flush=True)
-    data = generate_from_ways(collector.ways, nodes.positions)
+    data = generate_from_ways(collector.ways, nodes.positions, zoom)
     if not data["paths"]:
         raise RuntimeError("No major roads found inside the Moscow view")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pending = output_path.with_suffix(output_path.suffix + ".tmp")
-    pending.write_text(
-        json.dumps(data, ensure_ascii=True, separators=(",", ":")) + "\n"
-    )
+    pending.write_text(json.dumps(data, ensure_ascii=True, indent=4) + "\n")
     pending.replace(output_path)
     print("[roads] wrote:", output_path, "paths:", len(data["paths"]), flush=True)
     return data
@@ -307,5 +381,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--zoom", type=int, choices=PROFILES, default=DEFAULT_ZOOM)
     args = parser.parse_args()
-    generate(args.input, args.output)
+    generate(args.input, args.output, args.zoom)

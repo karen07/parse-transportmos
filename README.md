@@ -129,6 +129,49 @@ OpenStreetMap. Объединяет маршруты общественного 
   в `tests/map-ready.test.cjs`, `tests/yield.test.cjs` и
   `tests/web-assets.test.cjs`.
 
+## Заставка: отдельная генерация и просмотр
+
+С готовым `dist/routes.json.gz` не нужно перестраивать транспортные графы:
+
+```bash
+python3 build-transport-map.py --boot-roads-only --boot-zoom 11
+python3 -m http.server 8000 --directory dist
+```
+
+Откройте `http://localhost:8000/boot-preview.html` - постоянная анимация без
+загрузки карты и транспортных данных, или `http://localhost:8000/routes.html` -
+обычное приложение. Также работает `routes.html?boot-preview=1`.
+
+Профили (это собственные уровни детализации, не точная копия OpenFreeMap):
+
+- `10`: motorway, trunk, primary, именованные кольца и хорды.
+- `11` (по умолчанию): дополнительно secondary и цепочки tertiary от 1,5 км.
+- `12`: дополнительно все tertiary, без residential, service и съездов `_link`.
+
+Кадр 68 x 45,33 км, 900 x 600, центр 55.752 N, 37.620 E. Классы
+рисуются разными цветами и толщинами; Canvas использует тот же SVG viewBox
+и толщины, чтобы волна совпадала с дорогами. Геометрия извлекается только из OSM.
+
+Режим `--boot-roads-only` использует `build/moscow-regions-osmlab.osm.pbf`,
+а если его нет - исходные RU-MOW и RU-MOS в кеше (при необходимости скачивает
+и объединяет их). Для указания другого кеша есть `--cache-dir`, для готового
+полного PBF - `--boot-pbf /path/to/moscow.osm.pbf`. `--update` обновляет
+региональные исходники, если не задан `--boot-pbf`.
+
+Генератор отдельно можно вызвать так:
+
+```bash
+python3 major_roads.py --input build/moscow-regions-osmlab.osm.pbf \
+    --output dist/moscow-major-roads.json --zoom 11
+python3 build-transport-map.py --refresh-web-assets
+```
+
+`--refresh-web-assets` не меняет геометрию: он поддерживает и старый JSON v1.
+Если исходный PBF не приложен, готовый preview в архиве может использовать
+старую, более редкую сеть; для полной новой геометрии обязательно запустите
+`--boot-roads-only`. Новый JSON v2 сохраняет выбранный профиль; при полной сборке
+он автоматически пересоздается при смене профиля или исходных данных.
+
 ## Требования
 
 - Python 3.

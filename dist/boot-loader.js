@@ -26,13 +26,17 @@ for (const link of document.querySelectorAll(
 (() => {
     'use strict';
     const canvas = bootUI.canvas;
-    const svgPath = document.getElementById('boot-road-path');
-    const geometry = svgPath.getAttribute('d').trim();
+    const svg = document.getElementById('boot-roads');
+    const paths = svg ? Array.from(svg.querySelectorAll('path[data-road-class]')) : [];
+    const view = svg ? svg.viewBox.baseVal : null;
     // The separate Canvas is decorative only. The SVG paints without JS.
-    if (!geometry || bootReducedMotion) return;
+    if (!paths.length || !view || bootReducedMotion) return;
     const ctx = canvas.getContext('2d', { alpha: true });
     if (!ctx || typeof Path2D !== 'function') return;
-    const road = new Path2D(geometry);
+    const roads = paths.map((path) => ({
+        geometry: new Path2D(path.getAttribute('d')),
+        width: Number(path.getAttribute('stroke-width')),
+    }));
     let width = 1,
         height = 1,
         dpr = 1;
@@ -61,16 +65,18 @@ for (const link of document.querySelectorAll(
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         mask = surface();
         front = surface();
-        const scale = Math.min(width / 800, height / 400);
-        const x = (width - scale * 800) / 2;
-        const y = (height - scale * 400) / 2;
+        const scale = Math.min(width / view.width, height / view.height);
+        const x = (width - scale * view.width) / 2;
+        const y = (height - scale * view.height) / 2;
         const painter = mask.getContext('2d');
         painter.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
-        painter.lineWidth = 1.55;
         painter.lineCap = 'round';
         painter.lineJoin = 'round';
         painter.strokeStyle = '#fff';
-        painter.stroke(road);
+        for (const road of roads) {
+            painter.lineWidth = road.width;
+            painter.stroke(road.geometry);
+        }
     }
 
     function frame(now) {
@@ -297,6 +303,10 @@ function loadTransportData() {
 // Begin the expensive application only after the initial loader has painted.
 // A timer prevents a permanently backgrounded tab from being stuck forever.
 (() => {
+    if (new URLSearchParams(location.search).get('boot-preview') === '1' || !bootMainScript) {
+        bootPhase('PREVIEW', 'Loading screen preview / no transport data requested');
+        return;
+    }
     let started = false;
     function startMap() {
         if (started) return;
