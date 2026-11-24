@@ -11,7 +11,7 @@
         <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=@@VERSION@@" />
         <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=@@VERSION@@" />
 
-        <!-- First paint is entirely self-contained: no CSS or road asset request. -->
+        <!-- First paint uses inline critical CSS and a local SVG. -->
         <style>
             /* @@BOOT_CSS@@ */
         </style>
@@ -49,7 +49,12 @@
                 <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
                 <h1>Building your map<span class="boot-blink">_</span></h1>
                 <div id="boot-network-shell" aria-hidden="true">
-                    @@BOOT_ROADS_SVG@@
+                    <img
+                        id="boot-roads"
+                        src="moscow-major-roads.svg?v=@@VERSION@@"
+                        alt=""
+                        fetchpriority="high"
+                    />
                     <canvas id="boot-network" width="900" height="600"></canvas>
                     <div class="boot-network-caption">
                         <span>

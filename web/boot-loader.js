@@ -1,4 +1,4 @@
-/* Static OSM SVG is already visible when this deferred script executes. */
+/* The standalone SVG provides the static scene and the Canvas alpha mask. */
 const bootUI = {
     overlay: document.getElementById('boot-overlay'),
     canvas: document.getElementById('boot-network'),
@@ -26,17 +26,11 @@ for (const link of document.querySelectorAll(
 (() => {
     'use strict';
     const canvas = bootUI.canvas;
-    const svg = document.getElementById('boot-roads');
-    const paths = svg ? Array.from(svg.querySelectorAll('path[data-road-class]')) : [];
-    const view = svg ? svg.viewBox.baseVal : null;
-    // The separate Canvas is decorative only. The SVG paints without JS.
-    if (!paths.length || !view || bootReducedMotion) return;
+    const image = document.getElementById('boot-roads');
+    // The separate Canvas is decorative only. The image paints without JS.
+    if (!image || !canvas || bootReducedMotion) return;
     const ctx = canvas.getContext('2d', { alpha: true });
-    if (!ctx || typeof Path2D !== 'function') return;
-    const roads = paths.map((path) => ({
-        geometry: new Path2D(path.getAttribute('d')),
-        width: Number(path.getAttribute('stroke-width')),
-    }));
+    if (!ctx) return;
     let width = 1,
         height = 1,
         dpr = 1;
@@ -45,7 +39,7 @@ for (const link of document.querySelectorAll(
         raf = null,
         lastFrame = 0;
     let paused = false;
-    const start = performance.now();
+    let start = 0;
     const duration = 6800;
     const waveInterval = 3400;
 
@@ -66,18 +60,14 @@ for (const link of document.querySelectorAll(
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         mask = surface();
         front = surface();
-        const scale = Math.min(width / view.width, height / view.height);
-        const x = (width - scale * view.width) / 2;
-        const y = (height - scale * view.height) / 2;
+        const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight);
+        const imageWidth = scale * image.naturalWidth;
+        const imageHeight = scale * image.naturalHeight;
+        const x = (width - imageWidth) / 2;
+        const y = (height - imageHeight) / 2;
         const painter = mask.getContext('2d');
-        painter.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
-        painter.lineCap = 'round';
-        painter.lineJoin = 'round';
-        painter.strokeStyle = '#fff';
-        for (const road of roads) {
-            painter.lineWidth = road.width;
-            painter.stroke(road.geometry);
-        }
+        painter.setTransform(dpr, 0, 0, dpr, 0, 0);
+        painter.drawImage(image, x, y, imageWidth, imageHeight);
     }
 
     function frame(now) {
@@ -129,21 +119,30 @@ for (const link of document.querySelectorAll(
         ctx.globalAlpha = 1;
     }
 
-    resize();
-    raf = requestAnimationFrame(frame);
-    window.addEventListener('resize', resize, { passive: true });
     function onVisibility() {
         if (!document.hidden && !paused && raf === null) {
             raf = requestAnimationFrame(frame);
         }
     }
-    document.addEventListener('visibilitychange', onVisibility);
+    function begin() {
+        if (paused || bootUI.overlay.hidden || !image.naturalWidth || !image.naturalHeight) {
+            return;
+        }
+        start = performance.now();
+        resize();
+        raf = requestAnimationFrame(frame);
+        window.addEventListener('resize', resize, { passive: true });
+        document.addEventListener('visibilitychange', onVisibility);
+    }
     bootStopAnimation = () => {
         paused = true;
         if (raf !== null) cancelAnimationFrame(raf);
+        image.removeEventListener('load', begin);
         window.removeEventListener('resize', resize);
         document.removeEventListener('visibilitychange', onVisibility);
     };
+    if (image.complete) begin();
+    else image.addEventListener('load', begin, { once: true });
 })();
 
 function bootPhase(stage, detail) {

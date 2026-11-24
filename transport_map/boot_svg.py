@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render grouped OSM road geometry for a self-contained first paint."""
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -91,7 +92,7 @@ def wrapped_svg_path(path):
     return "\n".join(lines)
 
 
-def render_inline_svg(road_json):
+def render_svg(road_json):
     road_json = Path(road_json)
     groups = (
         grouped_paths(json.loads(road_json.read_text(encoding="ascii")))
@@ -99,8 +100,12 @@ def render_inline_svg(road_json):
         else {}
     )
     lines = [
-        f'<svg id="boot-roads" viewBox="0 0 {VIEW_WIDTH} {VIEW_HEIGHT}"',
-        '    preserveAspectRatio="xMidYMid meet" aria-hidden="true">',
+        '<svg xmlns="http://www.w3.org/2000/svg"',
+        f'    viewBox="0 0 {VIEW_WIDTH} {VIEW_HEIGHT}"',
+        f'    width="{VIEW_WIDTH}" height="{VIEW_HEIGHT}"',
+        '    preserveAspectRatio="xMidYMid meet">',
+        "    <title>Moscow road network</title>",
+        "    <desc>Road data: OpenStreetMap contributors</desc>",
         '    <g fill="none" stroke-linecap="round" stroke-linejoin="round">',
     ]
     for kind, geometry in groups.items():
@@ -113,4 +118,25 @@ def render_inline_svg(road_json):
             ]
         )
     lines.extend(["    </g>", "</svg>"])
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--input", type=Path, default=Path("build/moscow-major-roads.json")
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("site/moscow-major-roads.svg")
+    )
+    args = parser.parse_args()
+    if not args.input.is_file():
+        parser.error(f"Road geometry missing: {args.input}")
+    from .site_builder import write_atomic_bytes
+
+    write_atomic_bytes(args.output, render_svg(args.input).encode("ascii"))
+    print(f"[boot] wrote: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
