@@ -1,11 +1,91 @@
+/* Critical palette, also used by the empty map before external CSS loads. */
+:root {
+    color-scheme: light;
+    --boot-bg: #ffffff;
+    --map-bg: #f5f3ef;
+    --boot-text: #292c36;
+    --boot-eyebrow: #67556d;
+    --boot-title: #302a35;
+    --boot-cursor: #ba4d17;
+    --boot-caption-bg: #ffffffdd;
+    --boot-caption: #55434e;
+    --boot-live: #a84b18;
+    --boot-dot: #e9852b;
+    --boot-dot-glow: #ef914d;
+    --boot-stage: #9e451a;
+    --boot-progress: #886275;
+    --boot-meter-border: #d7b4a0;
+    --boot-meter: #f4e8e0;
+    --boot-meter-shadow: #44251420;
+    --boot-fill-start: #e16b2e;
+    --boot-fill-end: #f5a44e;
+    --boot-fill-glow: #f3a27f55;
+    --boot-percent: #9e451a;
+    --boot-details: #514b59;
+    --boot-error: #ab2626;
+    --boot-retry-border: #cd754d;
+    --boot-retry-bg: #fff0e6;
+    --boot-retry-text: #8a381b;
+    --boot-road-filter: grayscale(1) opacity(0.29);
+}
+:root[data-boot-theme='dark'] {
+    color-scheme: dark;
+    --map-bg: #303640;
+}
+:root[data-boot-theme='dark'] #boot-overlay {
+    color-scheme: dark;
+    --boot-bg: #0b1020;
+    --boot-text: #e8eafa;
+    --boot-eyebrow: #c3a2cd;
+    --boot-title: #f6e5ec;
+    --boot-cursor: #f59a78;
+    --boot-caption-bg: #0c0c1dbb;
+    --boot-caption: #c9a9be;
+    --boot-live: #f3ac80;
+    --boot-dot: #f6b76b;
+    --boot-dot-glow: #f48b5a;
+    --boot-stage: #f4bc9f;
+    --boot-progress: #c08b9f;
+    --boot-meter-border: #7c546e;
+    --boot-meter: #221b30;
+    --boot-meter-shadow: #0008;
+    --boot-fill-start: #bf677d;
+    --boot-fill-end: #f3a27f;
+    --boot-fill-glow: #f3a27f80;
+    --boot-percent: #ffccab;
+    --boot-details: #a9a4b9;
+    --boot-error: #ffb1ae;
+    --boot-retry-border: #f3ad96;
+    --boot-retry-bg: #402632;
+    --boot-retry-text: #fff0e6;
+    --boot-road-filter: none;
+}
+html,
+body,
+#map {
+    background: var(--boot-bg);
+    color: var(--boot-text);
+    margin: 0;
+}
+#map {
+    background: var(--map-bg);
+}
+#boot-roads {
+    filter: var(--boot-road-filter);
+}
 #boot-overlay {
     position: fixed;
     inset: 0;
     z-index: 100000;
-    background: #0b1020;
-    color: #e8eafa;
+    background: var(--boot-bg);
+    color: var(--boot-text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     box-sizing: border-box;
+    transition: opacity 350ms ease;
+}
+#boot-overlay.is-complete {
+    opacity: 0;
+    pointer-events: none;
 }
 #boot-overlay[hidden] {
     display: none;
@@ -23,13 +103,13 @@
     text-align: center;
 }
 .boot-eyebrow {
-    color: #c3a2cd;
+    color: var(--boot-eyebrow);
     font-size: 11px;
     letter-spacing: 0.23em;
     text-transform: uppercase;
 }
 #boot-card h1 {
-    color: #f6e5ec;
+    color: var(--boot-title);
     font-size: clamp(18px, 3.3vw, 27px);
     font-weight: 500;
     letter-spacing: 0.08em;
@@ -43,7 +123,7 @@
     position: absolute;
     left: 100%;
     top: 0;
-    color: #f59a78;
+    color: var(--boot-cursor);
     animation: boot-blink 1s steps(1) infinite;
 }
 @keyframes boot-blink {
@@ -89,9 +169,9 @@
     display: flex;
     justify-content: space-between;
     padding: 16px 16px 10px;
-    background: linear-gradient(0deg, #0c0c1dbb, transparent);
+    background: linear-gradient(0deg, var(--boot-caption-bg), transparent);
     font-size: 10px;
-    color: #c9a9be;
+    color: var(--boot-caption);
     letter-spacing: 0.1em;
 }
 .boot-network-caption a {
@@ -100,7 +180,7 @@
     text-decoration: underline;
 }
 .boot-network-live {
-    color: #f3ac80;
+    color: var(--boot-live);
 }
 .boot-network-live::before {
     content: '';
@@ -109,12 +189,12 @@
     height: 6px;
     border-radius: 50%;
     margin-right: 8px;
-    background: #f6b76b;
-    box-shadow: 0 0 8px #f48b5a;
+    background: var(--boot-dot);
+    box-shadow: 0 0 8px var(--boot-dot-glow);
 }
 #boot-stage {
     margin-top: clamp(4px, 1vh, 10px);
-    color: #f4bc9f;
+    color: var(--boot-stage);
     font-size: 12px;
     font-weight: 650;
     letter-spacing: 0.16em;
@@ -125,25 +205,25 @@
     width: min(1000px, calc(100% - clamp(100px, 16vw, 136px)));
     margin-inline: auto;
     padding: 8px 0 5px;
-    color: #c08b9f;
+    color: var(--boot-progress);
 }
 .boot-meter {
     position: relative;
     min-width: 0;
     height: 9px;
     overflow: hidden;
-    border: 1px solid #7c546e;
+    border: 1px solid var(--boot-meter-border);
     border-radius: 999px;
-    background: #221b30;
-    box-shadow: inset 0 1px 4px #0008;
+    background: var(--boot-meter);
+    box-shadow: inset 0 1px 4px var(--boot-meter-shadow);
 }
 #boot-meter-fill {
     display: block;
     height: 100%;
     width: 0;
     border-radius: inherit;
-    background: linear-gradient(90deg, #bf677d, #f3a27f);
-    box-shadow: 0 0 12px #f3a27f80;
+    background: linear-gradient(90deg, var(--boot-fill-start), var(--boot-fill-end));
+    box-shadow: 0 0 12px var(--boot-fill-glow);
     transition: width 100ms linear;
 }
 .boot-meter.is-indeterminate #boot-meter-fill {
@@ -163,7 +243,7 @@
     left: calc(100% + 12px);
     top: 13px;
     transform: translateY(-50%);
-    color: #ffccab;
+    color: var(--boot-percent);
     font-size: 15px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -173,7 +253,7 @@
     display: none;
 }
 #boot-details {
-    color: #a9a4b9;
+    color: var(--boot-details);
     font-size: 12px;
     overflow-wrap: anywhere;
     min-height: 19px;
@@ -190,16 +270,16 @@
 }
 #boot-error {
     margin-top: 14px;
-    color: #ffb1ae;
+    color: var(--boot-error);
     overflow-wrap: anywhere;
 }
 #boot-retry {
     cursor: pointer;
     padding: 9px 18px;
-    border: 1px solid #f3ad96;
+    border: 1px solid var(--boot-retry-border);
     border-radius: 6px;
-    background: #402632;
-    color: #fff0e6;
+    background: var(--boot-retry-bg);
+    color: var(--boot-retry-text);
 }
 @media (prefers-reduced-motion: reduce) {
     .boot-blink {
@@ -231,4 +311,78 @@
         font-size: 8px;
         padding: 4px;
     }
+}
+
+/* Language switch is available even in the standalone loader preview. */
+[data-language-switch],
+[data-boot-theme-switch] {
+    display: inline-flex;
+    gap: 3px;
+}
+[data-language-switch] button,
+[data-boot-theme-switch] button {
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 7px;
+    color: inherit;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+[data-language-switch] button[aria-pressed='true'],
+[data-boot-theme-switch] button[aria-pressed='true'] {
+    color: var(--boot-live);
+    border-color: var(--boot-meter-border);
+    background: var(--boot-retry-bg);
+}
+[data-language-switch] button:focus-visible,
+[data-boot-theme-switch] button:focus-visible {
+    outline: 2px solid var(--boot-live);
+}
+.boot-toolbar {
+    position: absolute;
+    top: max(8px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--boot-text);
+}
+:root[data-locale-pending] #boot-card [data-i18n],
+:root[data-locale-pending] #boot-card [data-language-switch],
+:root[data-locale-pending] #boot-card [data-boot-theme-switch] {
+    visibility: hidden;
+}
+@media (max-width: 1050px) {
+    .boot-toolbar {
+        position: static;
+        align-self: flex-end;
+        margin-right: 12px;
+    }
+}
+
+#boot-preview-toggle {
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 7px;
+    border: 1px solid var(--boot-meter-border);
+    border-radius: 4px;
+    color: var(--boot-live);
+    background: var(--boot-retry-bg);
+}
+#boot-preview-toggle[hidden] {
+    display: none;
+}
+#boot-preview-toggle:focus-visible {
+    outline: 2px solid var(--boot-live);
+}
+.boot-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: calc(100% - 24px);
 }

@@ -13,6 +13,32 @@ const bootUI = {
 const bootReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const bootMainScript = document.currentScript.dataset.mapScript;
 let bootStopAnimation = () => {};
+let bootPreview = new URLSearchParams(location.search).get('boot-preview') === '1';
+const bootPreviewButton = document.getElementById('boot-preview-toggle');
+let bootMapStarted = false;
+let bootMapReady = false;
+let bootLeaving = false;
+
+function updateBootPreviewButton() {
+    bootPreviewButton.dataset.i18n = bootPreview ? 'bootOpenMap' : 'bootStay';
+    bootPreviewButton.textContent = transportI18n.t(bootPreviewButton.dataset.i18n);
+    bootPreviewButton.hidden = bootLeaving || !bootMainScript;
+}
+function setBootPreview(value) {
+    const url = new URL(location.href);
+    if (value) url.searchParams.set('boot-preview', '1');
+    else url.searchParams.delete('boot-preview');
+    history.replaceState(history.state, '', url.href);
+    bootPreview = value;
+    updateBootPreviewButton();
+    if (bootPreview) {
+        if (bootMapReady) bootPhase('PREVIEW', 'Map is ready');
+        return;
+    }
+    if (bootMapReady) bootComplete();
+    else if (!bootMapStarted) startMap();
+}
+bootPreviewButton.addEventListener('click', () => setBootPreview(!bootPreview));
 
 // Enable preloaded styles without inline HTML handlers (CSP script-src-attr 'none').
 // Switching rel works even when preload finished before this deferred script runs.
@@ -41,6 +67,7 @@ for (const link of document.querySelectorAll(
     let paused = false;
     let observer = null;
     let start = 0;
+    let ready = false;
     const duration = 6800;
     const waveInterval = 3400;
 
@@ -81,8 +108,11 @@ for (const link of document.querySelectorAll(
         raf = requestAnimationFrame(frame);
         if (now - lastFrame < 50) return; // At most 20 FPS.
         lastFrame = now;
+        render(Math.max(0, now - start));
+    }
+
+    function render(elapsed) {
         ctx.clearRect(0, 0, width, height);
-        const elapsed = Math.max(0, now - start);
         const youngestAge = elapsed % waveInterval;
         // Draw the older wave first. Never launch a wave before the animation starts.
         const oldestAge =
@@ -111,11 +141,13 @@ for (const link of document.querySelectorAll(
             height / 2,
             radius,
         );
-        gradient.addColorStop(0, 'rgba(237,139,125,.2)');
-        gradient.addColorStop(0.48, 'rgba(237,139,125,.06)');
-        gradient.addColorStop(0.73, 'rgba(239,150,128,.28)');
-        gradient.addColorStop(0.91, 'rgba(253,180,143,.96)');
-        gradient.addColorStop(1, 'rgba(253,180,143,0)');
+        const waveColor = transportBootTheme.dark ? '253,180,143' : '213,77,12';
+        const trailColor = transportBootTheme.dark ? '237,139,125' : '225,99,23';
+        gradient.addColorStop(0, `rgba(${trailColor},.2)`);
+        gradient.addColorStop(0.48, `rgba(${trailColor},.06)`);
+        gradient.addColorStop(0.73, `rgba(${trailColor},.28)`);
+        gradient.addColorStop(0.91, `rgba(${waveColor},.96)`);
+        gradient.addColorStop(1, `rgba(${waveColor},0)`);
         f.fillStyle = gradient;
         f.fillRect(0, 0, width, height);
         f.globalCompositeOperation = 'source-over';
@@ -125,7 +157,7 @@ for (const link of document.querySelectorAll(
     }
 
     function onVisibility() {
-        if (!document.hidden && !paused && raf === null) {
+        if (!document.hidden && !paused && ready && raf === null) {
             raf = requestAnimationFrame(frame);
         }
     }
@@ -134,6 +166,7 @@ for (const link of document.querySelectorAll(
             return;
         }
         start = performance.now();
+        ready = true;
         resize();
         raf = requestAnimationFrame(frame);
         window.addEventListener('resize', resize, { passive: true });
@@ -155,17 +188,34 @@ for (const link of document.querySelectorAll(
     else image.addEventListener('load', begin, { once: true });
 })();
 
+let bootStage = 'INITIALIZING';
+let bootDetail = 'Connecting to the data source...';
+let bootDownload = null;
+let bootHasFailed = false;
+bootUI.stage.dataset.i18nDynamic = 'true';
+bootUI.details.dataset.i18nDynamic = 'true';
+document.addEventListener('transport-language-change', () => {
+    bootUI.stage.textContent = bootHasFailed
+        ? transportI18n.t('bootFailed')
+        : transportI18n.label(bootStage);
+    if (bootDownload) bootProgress(...bootDownload);
+    else bootUI.details.textContent = transportI18n.label(bootDetail);
+});
 function bootPhase(stage, detail) {
-    bootUI.stage.textContent = stage;
+    bootStage = stage;
+    bootDownload = null;
+    if (detail) bootDetail = detail;
+    bootUI.stage.textContent = transportI18n.label(stage);
     // Non-download phases have no measurable percentage. Do not fake progress.
     bootUI.meter.classList.add('is-indeterminate');
     bootUI.meter.removeAttribute('aria-valuenow');
     bootUI.percent.hidden = true;
     bootUI.percent.textContent = '';
-    if (detail) bootUI.details.textContent = detail;
+    if (detail) bootUI.details.textContent = transportI18n.label(detail);
 }
 function bootProgress(received, total) {
-    if (bootUI.stage.textContent !== 'FETCHING DATA') return;
+    if (bootStage !== 'FETCHING DATA') return;
+    bootDownload = [received, total];
     if (total > 0) {
         const percent = Math.max(0, Math.min(100, Math.floor((received * 100) / total)));
         bootUI.meter.classList.remove('is-indeterminate');
@@ -173,27 +223,44 @@ function bootProgress(received, total) {
         bootUI.meter.setAttribute('aria-valuenow', String(percent));
         bootUI.percent.hidden = false;
         bootUI.percent.textContent = percent + '%';
-        bootUI.details.textContent =
-            (received / 1048576).toFixed(1) +
-            ' / ' +
-            (total / 1048576).toFixed(1) +
-            ' MiB downloaded';
+        bootUI.details.textContent = transportI18n.t('downloadedTotal', {
+            received: (received / 1048576).toFixed(1),
+            total: (total / 1048576).toFixed(1),
+        });
     } else {
         bootUI.meter.classList.add('is-indeterminate');
         bootUI.meter.removeAttribute('aria-valuenow');
         bootUI.percent.hidden = true;
         bootUI.percent.textContent = '';
-        bootUI.details.textContent = (received / 1048576).toFixed(1) + ' MiB downloaded';
+        bootUI.details.textContent = transportI18n.t('downloaded', {
+            received: (received / 1048576).toFixed(1),
+        });
     }
 }
 function bootComplete() {
-    bootUI.overlay.hidden = true;
+    bootMapReady = true;
+    if (bootPreview) {
+        bootPhase('PREVIEW', 'Map is ready');
+        return;
+    }
+    if (bootLeaving) return;
+    bootLeaving = true;
+    updateBootPreviewButton();
     bootStopAnimation();
+    if (bootReducedMotion) {
+        bootUI.overlay.hidden = true;
+        return;
+    }
+    bootUI.overlay.classList.add('is-complete');
+    setTimeout(() => {
+        bootUI.overlay.hidden = true;
+    }, 350);
 }
 function bootFailed(error) {
     // Keep the scene animated so a failed request cannot freeze the page.
+    bootHasFailed = true;
     bootUI.overlay.hidden = false;
-    bootUI.stage.textContent = 'BOOT FAILED';
+    bootUI.stage.textContent = transportI18n.t('bootFailed');
     bootUI.percent.hidden = true;
     bootUI.error.hidden = false;
     bootUI.errorMessage.textContent = String((error && error.message) || error);
@@ -322,22 +389,24 @@ function loadTransportData() {
     });
 }
 
-// Begin the expensive application only after the initial loader has painted.
-// A timer prevents a permanently backgrounded tab from being stuck forever.
-(() => {
-    if (new URLSearchParams(location.search).get('boot-preview') === '1' || !bootMainScript) {
-        bootPhase('PREVIEW', 'Loading screen preview / no transport data requested');
-        return;
-    }
-    let started = false;
-    function startMap() {
-        if (started) return;
-        started = true;
-        const script = document.createElement('script');
-        script.src = bootMainScript;
-        script.onerror = () => bootFailed(new Error('Could not load the map script'));
-        document.body.appendChild(script);
-    }
-    requestAnimationFrame(() => requestAnimationFrame(startMap));
-    setTimeout(startMap, 300);
-})();
+// Start the application at most once. A direct preview does not load the graph.
+function startMap() {
+    if (bootMapStarted || bootPreview || !bootMainScript) return;
+    bootMapStarted = true;
+    const script = document.createElement('script');
+    script.src = bootMainScript;
+    script.onerror = () => bootFailed(new Error('Could not load the map script'));
+    document.body.appendChild(script);
+}
+// Let the initial loader paint before starting expensive work.
+transportI18n.ready
+    .then(() => {
+        updateBootPreviewButton();
+        if (bootPreview || !bootMainScript) {
+            bootPhase('PREVIEW', 'Loading screen preview / no transport data requested');
+            return;
+        }
+        requestAnimationFrame(() => requestAnimationFrame(startMap));
+        setTimeout(startMap, 300);
+    })
+    .catch(bootFailed);

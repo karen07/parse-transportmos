@@ -1,11 +1,16 @@
 <!doctype html>
-<html>
+<html lang="ru" data-walk-speed="@@WALK_SPEED@@" data-languages="@@LANGUAGES@@">
     <head>
         <meta charset="utf-8" />
+        <meta name="referrer" content="strict-origin" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
         <meta name="application-version" content="@@VERSION@@" />
-        <title>Moscow transport reachability</title>
-        <meta name="theme-color" content="#0d1534" />
+        <title data-i18n="pageTitle">@@I18N:pageTitle@@</title>
+        <meta name="theme-color" content="#ffffff" />
+        <script>
+            /* @@LANGUAGE_JS@@ */
+            /* @@BOOT_THEME_JS@@ */
+        </script>
         <link rel="icon" type="image/x-icon" href="favicon.ico?v=@@VERSION@@" />
         <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=@@VERSION@@" />
         <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=@@VERSION@@" />
@@ -43,11 +48,52 @@
     <body>
         <input id="info-collapse" type="checkbox" checked aria-hidden="true" />
 
-        <div id="map" aria-label="Transport reachability map"></div>
+        <div data-i18n-aria-label="mapAria" id="map" aria-label="@@I18N:mapAria@@"></div>
         <div id="boot-overlay" role="status" aria-live="polite" aria-atomic="true">
             <div id="boot-card">
-                <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
-                <h1>Building your map<span class="boot-blink">_</span></h1>
+                <div class="boot-toolbar">
+                    <div
+                        data-language-switch
+                        role="group"
+                        data-i18n-aria-label="language"
+                        aria-label="@@I18N:language@@"
+                    >
+                        <button type="button" lang="ru" data-lang="ru" aria-pressed="true">
+                            RU
+                        </button>
+                        <button type="button" lang="en" data-lang="en" aria-pressed="false">
+                            EN
+                        </button>
+                    </div>
+                    <div
+                        data-boot-theme-switch
+                        role="group"
+                        data-i18n-aria-label="bootTheme"
+                        aria-label="@@I18N:bootTheme@@"
+                    >
+                        <button
+                            type="button"
+                            data-theme-value="light"
+                            aria-pressed="true"
+                            data-i18n="bootThemeLight"
+                        >
+                            @@I18N:bootThemeLight@@
+                        </button>
+                        <button
+                            type="button"
+                            data-theme-value="dark"
+                            aria-pressed="false"
+                            data-i18n="bootThemeDark"
+                        >
+                            @@I18N:bootThemeDark@@
+                        </button>
+                    </div>
+                    <button type="button" id="boot-preview-toggle" data-i18n="bootStay" hidden>
+                        @@I18N:bootStay@@
+                    </button>
+                </div>
+                <div data-i18n="bootEyebrow" class="boot-eyebrow">@@I18N:bootEyebrow@@</div>
+                <h1 data-i18n="bootTitle">@@I18N:bootTitle@@<span class="boot-blink">_</span></h1>
                 <div class="boot-network-space">
                     <div id="boot-network-shell" aria-hidden="true">
                         <img
@@ -58,27 +104,31 @@
                         />
                         <canvas id="boot-network" width="900" height="600"></canvas>
                         <div class="boot-network-caption">
-                            <span>
-                                MAJOR ROADS / &copy;
+                            <span data-i18n="majorRoads">
+                                @@I18N:majorRoads@@
                                 <a
+                                    data-i18n="osmContributors"
                                     href="https://www.openstreetmap.org/copyright"
                                     target="_blank"
                                     rel="noopener noreferrer"
                                 >
-                                    OpenStreetMap contributors
+                                    @@I18N:osmContributors@@
                                 </a>
                             </span>
-                            <span class="boot-network-live">NETWORK ACTIVE</span>
+                            <span data-i18n="networkActive" class="boot-network-live">
+                                @@I18N:networkActive@@
+                            </span>
                         </div>
                     </div>
                 </div>
-                <div id="boot-stage">INITIALIZING</div>
+                <div data-i18n="initializing" id="boot-stage">@@I18N:initializing@@</div>
                 <div class="boot-progress-line">
                     <div
+                        data-i18n-aria-label="loadingProgress"
                         id="boot-meter"
                         class="boot-meter is-indeterminate"
                         role="progressbar"
-                        aria-label="Map loading progress"
+                        aria-label="@@I18N:loadingProgress@@"
                         aria-valuemin="0"
                         aria-valuemax="100"
                     >
@@ -86,19 +136,28 @@
                     </div>
                     <b id="boot-percent" hidden></b>
                 </div>
-                <div id="boot-details">Connecting to the data source...</div>
+                <div data-i18n="connecting" id="boot-details">@@I18N:connecting@@</div>
                 <div id="boot-error" hidden>
                     <p id="boot-error-message"></p>
-                    <button type="button" id="boot-retry">Reload page</button>
+                    <button data-i18n="reload" type="button" id="boot-retry">
+                        @@I18N:reload@@
+                    </button>
                 </div>
             </div>
         </div>
 
-        <aside id="info" aria-label="Transport reachability controls">
-            <label id="info-handle" for="info-collapse" aria-label="Expand or collapse settings">
+        <aside data-i18n-aria-label="controlsAria" id="info" aria-label="@@I18N:controlsAria@@">
+            <label
+                data-i18n-aria-label="expandAria"
+                id="info-handle"
+                for="info-collapse"
+                aria-label="@@I18N:expandAria@@"
+            >
                 <span id="info-handle-left">
-                    <span id="info-handle-title"> Transport reachability </span>
-                    <span id="info-handle-hint"> Tap to expand or collapse </span>
+                    <span data-i18n="reachabilityTitle" id="info-handle-title">
+                        @@I18N:reachabilityTitle@@
+                    </span>
+                    <span data-i18n="expandHint" id="info-handle-hint"> @@I18N:expandHint@@ </span>
                 </span>
                 <span id="info-arrow" aria-hidden="true">
                     <svg
@@ -117,41 +176,89 @@
             <div id="info-content">
                 <div class="info-intro">
                     <div class="info-heading-row">
-                        <div id="info-title">Transport reachability</div>
+                        <div data-i18n="reachabilityTitle" id="info-title">
+                            @@I18N:reachabilityTitle@@
+                        </div>
                         <button
+                            data-i18n-title="resetTitle"
+                            data-i18n-aria-label="resetAria"
                             id="reset-origin"
                             type="button"
-                            title="Clear the selected start point and route"
-                            aria-label="Clear selected start point and route"
+                            title="@@I18N:resetTitle@@"
+                            aria-label="@@I18N:resetAria@@"
                             disabled
                         >
                             <svg viewBox="0 0 24 24" aria-hidden="true">
                                 <circle cx="12" cy="12" r="9"></circle>
                                 <path d="M9 9l6 6m0-6-6 6"></path>
                             </svg>
-                            <span>Reset</span>
+                            <span data-i18n="reset">@@I18N:reset@@</span>
                         </button>
                     </div>
-                    <div class="info-row">
-                        Click once for a start point. Double-click anywhere for route to any point
-                        while keeping reachability mode.
+                    <div data-i18n="instructions" class="info-row">@@I18N:instructions@@</div>
+                    <div class="language-control">
+                        <span data-i18n="language">@@I18N:language@@</span>
+                        <div
+                            data-language-switch
+                            role="group"
+                            data-i18n-aria-label="language"
+                            aria-label="@@I18N:language@@"
+                        >
+                            <button type="button" lang="ru" data-lang="ru" aria-pressed="true">
+                                RU
+                            </button>
+                            <button type="button" lang="en" data-lang="en" aria-pressed="false">
+                                EN
+                            </button>
+                        </div>
+                    </div>
+                    <div class="language-control">
+                        <span data-i18n="bootTheme">@@I18N:bootTheme@@</span>
+                        <div
+                            data-boot-theme-switch
+                            role="group"
+                            data-i18n-aria-label="bootTheme"
+                            aria-label="@@I18N:bootTheme@@"
+                        >
+                            <button
+                                type="button"
+                                data-theme-value="light"
+                                aria-pressed="true"
+                                data-i18n="bootThemeLight"
+                            >
+                                @@I18N:bootThemeLight@@
+                            </button>
+                            <button
+                                type="button"
+                                data-theme-value="dark"
+                                aria-pressed="false"
+                                data-i18n="bootThemeDark"
+                            >
+                                @@I18N:bootThemeDark@@
+                            </button>
+                        </div>
                     </div>
                     <div class="project-version">v@@VERSION@@</div>
-                    <div
-                        id="timing-status"
-                        role="status"
-                        style="font-size: 12px; color: #64748b; margin-top: 5px"
-                    >
-                        Ready
-                    </div>
+                    <div data-i18n="ready" id="timing-status" role="status">@@I18N:ready@@</div>
                 </div>
 
                 <div class="control" id="transport-modes">
                     <div class="control-label">
-                        <span id="transport-modes-heading">Transport modes</span>
+                        <span data-i18n="modeHeading" id="transport-modes-heading">
+                            @@I18N:modeHeading@@
+                        </span>
                     </div>
-                    <div class="mode-grid" role="group" aria-label="Transport modes">
-                        <label class="mode-option" title="19.2 km/h">
+                    <div
+                        data-i18n-aria-label="modeHeading"
+                        class="mode-grid"
+                        role="group"
+                        aria-label="@@I18N:modeHeading@@"
+                    >
+                        <label
+                            data-i18n-title="speedBus"
+                            class="mode-option"
+                            title="@@I18N:speedBus@@"
+                        >
                             <input class="mode-input" type="checkbox" value="bus" checked />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -162,10 +269,14 @@
                                     <path d="M16 15h.01" />
                                     <path d="M8 7h8" />
                                 </svg>
-                                <span data-mode-name="bus">Bus</span>
+                                <span data-i18n="bus" data-mode-name="bus"> @@I18N:bus@@ </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="18 km/h">
+                        <label
+                            data-i18n-title="speedTram"
+                            class="mode-option"
+                            title="@@I18N:speedTram@@"
+                        >
                             <input class="mode-input" type="checkbox" value="tram" checked />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -176,10 +287,14 @@
                                     <path d="M8 15h.01" />
                                     <path d="M16 15h.01" />
                                 </svg>
-                                <span data-mode-name="tram">Tram</span>
+                                <span data-i18n="tram" data-mode-name="tram"> @@I18N:tram@@ </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="16.8 km/h">
+                        <label
+                            data-i18n-title="speedTrolleybus"
+                            class="mode-option"
+                            title="@@I18N:speedTrolleybus@@"
+                        >
                             <input class="mode-input" type="checkbox" value="trolleybus" checked />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -190,19 +305,31 @@
                                     <path d="M8 16h.01" />
                                     <path d="M16 16h.01" />
                                 </svg>
-                                <span data-mode-name="trolleybus">Trolleybus</span>
+                                <span data-i18n="trolleybus" data-mode-name="trolleybus">
+                                    @@I18N:trolleybus@@
+                                </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="37.8 km/h">
+                        <label
+                            data-i18n-title="speedMetro"
+                            class="mode-option"
+                            title="@@I18N:speedMetro@@"
+                        >
                             <input class="mode-input" type="checkbox" value="metro" />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
                                     <path d="M4 20V5l8 10 8-10v15M2 21h20" />
                                 </svg>
-                                <span data-mode-name="metro">Metro</span>
+                                <span data-i18n="metro" data-mode-name="metro">
+                                    @@I18N:metro@@
+                                </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="46.8 km/h">
+                        <label
+                            data-i18n-title="speedMcc"
+                            class="mode-option"
+                            title="@@I18N:speedMcc@@"
+                        >
                             <input class="mode-input" type="checkbox" value="mcc" />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -214,12 +341,13 @@
                                     <path d="M16 15h.01" />
                                     <circle cx="12" cy="12" r="8" stroke-dasharray="2 6" />
                                 </svg>
-                                <span data-mode-name="mcc">MCC</span>
+                                <span data-i18n="mcc" data-mode-name="mcc"> @@I18N:mcc@@ </span>
                             </span>
                         </label>
                         <label
+                            data-i18n-title="railHint"
                             class="mode-option"
-                            title="MCD and suburban rail; separate train services"
+                            title="@@I18N:railHint@@"
                         >
                             <input class="mode-input" type="checkbox" value="rail" />
                             <span class="mode-pill">
@@ -228,18 +356,18 @@
                                     <path d="M4 12h16M7 7h10M8 19l-2 3m10-3 2 3" />
                                     <path d="M8 15h.01M16 15h.01" />
                                 </svg>
-                                <span data-mode-name="rail">MCD + Electric Trains</span>
+                                <span data-i18n="rail" data-mode-name="rail"> @@I18N:rail@@ </span>
                             </span>
                         </label>
                     </div>
-                    <div class="mode-hint" id="transport-modes-hint">
-                        Surface transport is on by default. Speeds are estimates.
+                    <div data-i18n="modeHint" class="mode-hint" id="transport-modes-hint">
+                        @@I18N:modeHint@@
                     </div>
                 </div>
 
                 <div class="control">
                     <div class="control-label">
-                        <label for="walk-time">Max walking time</label>
+                        <label data-i18n="maxWalk" for="walk-time"> @@I18N:maxWalk@@ </label>
                         <b id="walk-time-value"></b>
                     </div>
                     <input
@@ -251,26 +379,31 @@
                         value="@@INITIAL_WALK_MINUTES@@"
                     />
                     <div class="range-scale range-scale-walk">
-                        <span>1 min</span>
+                        <span data-i18n="min1">@@I18N:min1@@</span>
                         <span>5</span>
                         <span>10</span>
-                        <span>15 min</span>
+                        <span data-i18n="min15">@@I18N:min15@@</span>
                     </div>
                 </div>
 
                 <div class="control">
                     <div class="control-label">
-                        <label id="transfer-label" for="transfer-count"> Transfers </label>
-                        <b id="transfer-mode-value">No transfers</b>
+                        <label data-i18n="transfers" id="transfer-label" for="transfer-count">
+                            @@I18N:transfers@@
+                        </label>
+                        <b data-i18n="noTransfers" id="transfer-mode-value">
+                            @@I18N:noTransfers@@
+                        </b>
                     </div>
                     <input
+                        data-i18n-aria-label="transferAria"
                         id="transfer-count"
                         type="range"
                         min="0"
                         max="2"
                         step="1"
                         value="0"
-                        aria-label="Maximum number of transfers"
+                        aria-label="@@I18N:transferAria@@"
                     />
                     <div class="range-scale range-scale-transfer">
                         <span>0</span>
@@ -281,29 +414,32 @@
 
                 <div class="control">
                     <div class="control-label">
-                        <label for="travel-time-limit">Travel time limit</label>
-                        <b id="travel-time-limit-value">60 min</b>
+                        <label data-i18n="travelLimit" for="travel-time-limit">
+                            @@I18N:travelLimit@@
+                        </label>
+                        <b data-i18n="min60" id="travel-time-limit-value"> @@I18N:min60@@ </b>
                     </div>
                     <input
+                        data-i18n-aria-label="timeAria"
                         id="travel-time-limit"
                         type="range"
                         min="0"
                         max="185"
                         step="5"
                         value="60"
-                        aria-label="Maximum total travel time"
+                        aria-label="@@I18N:timeAria@@"
                     />
                     <div class="range-scale range-scale-time">
                         <span>0</span>
                         <span>60</span>
                         <span>120</span>
-                        <span>No limit</span>
+                        <span data-i18n="noLimit">@@I18N:noLimit@@</span>
                     </div>
                 </div>
 
                 <div class="control">
                     <div class="control-label">
-                        <label for="circle-opacity">Walking paths opacity</label>
+                        <label data-i18n="opacity" for="circle-opacity"> @@I18N:opacity@@ </label>
                         <b id="circle-opacity-value"></b>
                     </div>
                     <input
@@ -321,50 +457,49 @@
                     </div>
                 </div>
 
-                <div class="note">
-                    Walking access uses OSM pedestrian paths, with estimated speed @@WALK_SPEED@@
-                    m/min. Unmapped connections are excluded.
-                </div>
+                <div data-i18n="walkNote" class="note">@@I18N:walkNote@@</div>
 
                 <div id="analysis-summary">
-                    <div class="analysis-title">Reachability</div>
+                    <div data-i18n="reachability" class="analysis-title">@@I18N:reachability@@</div>
 
                     <div class="info-row">
-                        <span>Nearby stops</span>
+                        <span data-i18n="nearbyStops"> @@I18N:nearbyStops@@ </span>
                         <b id="nearby-count">0</b>
                     </div>
 
                     <div class="info-row">
-                        <span>Direct routes</span>
+                        <span data-i18n="directRoutes"> @@I18N:directRoutes@@ </span>
                         <b id="direct-route-count">0</b>
                     </div>
 
                     <div class="info-row">
-                        <span>Without transfers</span>
-                        <span class="analysis-value"> <b id="direct-stop-count">0</b> stops </span>
-                    </div>
-
-                    <div class="info-row">
-                        <span>One-transfer routes</span>
-                        <b id="transfer-route-count">0</b>
-                    </div>
-
-                    <div class="info-row">
-                        <span>With one transfer only</span>
-                        <span class="analysis-value">
-                            <b id="transfer-stop-count">0</b> stops
+                        <span data-i18n="withoutTransfers"> @@I18N:withoutTransfers@@ </span>
+                        <span data-i18n="stopsShort" class="analysis-value">
+                            <b id="direct-stop-count">0</b> @@I18N:stopsShort@@
                         </span>
                     </div>
 
                     <div class="info-row">
-                        <span>Two-transfer routes</span>
+                        <span data-i18n="oneTransferRoutes"> @@I18N:oneTransferRoutes@@ </span>
+                        <b id="transfer-route-count">0</b>
+                    </div>
+
+                    <div class="info-row">
+                        <span data-i18n="oneTransferOnly"> @@I18N:oneTransferOnly@@ </span>
+                        <span data-i18n="stopsShort" class="analysis-value">
+                            <b id="transfer-stop-count">0</b> @@I18N:stopsShort@@
+                        </span>
+                    </div>
+
+                    <div class="info-row">
+                        <span data-i18n="twoTransferRoutes"> @@I18N:twoTransferRoutes@@ </span>
                         <b id="two-transfer-route-count">0</b>
                     </div>
 
                     <div class="info-row">
-                        <span>With two transfers only</span>
-                        <span class="analysis-value">
-                            <b id="two-transfer-stop-count">0</b> stops
+                        <span data-i18n="twoTransferOnly"> @@I18N:twoTransferOnly@@ </span>
+                        <span data-i18n="stopsShort" class="analysis-value">
+                            <b id="two-transfer-stop-count">0</b> @@I18N:stopsShort@@
                         </span>
                     </div>
 
@@ -372,39 +507,42 @@
                 </div>
 
                 <div id="trip-panel" hidden>
-                    <div id="trip-title" class="trip-title">Trip</div>
-                    <button id="trip-back-top" type="button">Back</button>
+                    <div data-i18n="tripTitle" id="trip-title" class="trip-title">
+                        @@I18N:tripTitle@@
+                    </div>
+                    <button data-i18n="back" id="trip-back-top" type="button">@@I18N:back@@</button>
                     <div id="trip-alternatives"></div>
                     <div id="trip-steps"></div>
-                    <button id="trip-back" type="button">Back</button>
+                    <button data-i18n="back" id="trip-back" type="button">@@I18N:back@@</button>
                 </div>
             </div>
         </aside>
 
-        <div id="legend" aria-label="Map legend">
-            <div class="legend-title">Map</div>
+        <div data-i18n-aria-label="legendAria" id="legend" aria-label="@@I18N:legendAria@@">
+            <div data-i18n="map" class="legend-title">@@I18N:map@@</div>
             <div class="legend-row">
                 <span class="legend-origin" aria-hidden="true">x</span>
                 <span id="legend-origin-text"></span>
             </div>
             <div class="legend-row">
                 <span class="legend-coverage-direct" aria-hidden="true">x</span>
-                <span>without transfers</span>
+                <span data-i18n="legendDirect">@@I18N:legendDirect@@</span>
             </div>
             <div class="legend-row">
                 <span class="legend-coverage-transfer" aria-hidden="true">x</span>
-                <span>with one transfer</span>
+                <span data-i18n="legendOne">@@I18N:legendOne@@</span>
             </div>
             <div class="legend-row">
                 <span class="legend-coverage-two-transfer" aria-hidden="true">x</span>
-                <span>with two transfers</span>
+                <span data-i18n="legendTwo">@@I18N:legendTwo@@</span>
             </div>
             <div class="legend-row">
                 <span class="legend-route" aria-hidden="true">x</span>
-                <span>reachable routes</span>
+                <span data-i18n="legendRoutes">@@I18N:legendRoutes@@</span>
             </div>
         </div>
 
+        <script src="i18n.js?v=@@VERSION@@" defer></script>
         <script
             src="boot-loader.js?v=@@VERSION@@"
             data-map-script="@@PAGE_JS@@?v=@@VERSION@@"

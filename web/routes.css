@@ -1,3 +1,31 @@
+/* UI color tokens. Keep route colors and the transfer-tier colors semantic. */
+:root {
+    --ui-surface: #fff;
+    --ui-text: rgb(15 23 42);
+    --ui-text-secondary: rgb(51 65 85);
+    --ui-text-muted: rgb(71 85 105);
+    --ui-text-subtle: rgb(100 116 139);
+    --ui-muted: rgb(148 163 184);
+    --ui-slate: #64748b;
+    --ui-surface-raised: rgb(248 250 252);
+    --ui-surface-hover: rgb(241 245 249);
+    --ui-border-strong: rgb(203 213 225);
+    --ui-border: rgb(226 232 240);
+    --ui-panel-border: rgb(226 232 240 / 0.95);
+    --ui-legend-border: rgb(226 232 240 / 0.9);
+    --ui-panel: rgb(255 255 255 / 0.96);
+    --ui-legend: rgb(255 255 255 / 0.94);
+    --ui-mobile-panel: rgb(255 255 255 / 0.98);
+    --ui-danger: #b91c1c;
+    --ui-danger-border: #fca5a5;
+    --ui-danger-bg: #fef2f2;
+    --ui-accent-text: #1d4ed8;
+    --ui-accent-text-strong: rgb(30 64 175);
+    --ui-accent-bg: #eff6ff;
+    --ui-accent-bg-alt: rgb(239 246 255);
+    --ui-accent-border: #93c5fd;
+    --ui-accent-border-alt: rgb(147 197 253);
+}
 html,
 body,
 #map {
@@ -48,12 +76,13 @@ body {
     padding: 18px;
 
     overflow-y: auto;
+    overflow-x: hidden;
     overscroll-behavior: contain;
 
-    border: 1px solid rgb(226 232 240 / 0.95);
+    border: 1px solid var(--ui-panel-border);
     border-radius: 20px;
 
-    background: rgb(255 255 255 / 0.96);
+    background: var(--ui-panel);
 
     box-shadow:
         0 20px 25px -5px rgb(15 23 42 / 0.12),
@@ -109,7 +138,7 @@ body {
            ========================================================= */
 
 #info-title {
-    color: rgb(15 23 42);
+    color: var(--ui-text);
 
     font-size: 18px;
     line-height: 1.35;
@@ -132,10 +161,10 @@ body {
     flex-shrink: 0;
     min-height: 32px;
     padding: 5px 9px;
-    border: 1px solid rgb(203 213 225);
+    border: 1px solid var(--ui-border-strong);
     border-radius: 9px;
-    color: rgb(51 65 85);
-    background: #fff;
+    color: var(--ui-text-secondary);
+    background: var(--ui-surface);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -151,9 +180,9 @@ body {
 }
 
 #reset-origin:not(:disabled):hover {
-    color: #b91c1c;
-    border-color: #fca5a5;
-    background: #fef2f2;
+    color: var(--ui-danger);
+    border-color: var(--ui-danger-border);
+    background: var(--ui-danger-bg);
 }
 
 #reset-origin:disabled {
@@ -168,13 +197,13 @@ body {
 
 .info-intro {
     padding-bottom: 14px;
-    border-bottom: 1px solid rgb(241 245 249);
+    border-bottom: 1px solid var(--ui-surface-hover);
 }
 
 .info-row {
     margin-top: 6px;
 
-    color: rgb(71 85 105);
+    color: var(--ui-text-muted);
 
     font-size: 14px;
     line-height: 1.45;
@@ -183,7 +212,7 @@ body {
 .project-version {
     margin-top: 7px;
 
-    color: rgb(148 163 184);
+    color: var(--ui-muted);
 
     font-size: 10px;
     line-height: 1.2;
@@ -208,7 +237,7 @@ body {
 
     margin-bottom: 10px;
 
-    color: rgb(51 65 85);
+    color: var(--ui-text-secondary);
 
     font-size: 13px;
     line-height: 1.4;
@@ -222,7 +251,7 @@ body {
 .control-label b {
     flex-shrink: 0;
 
-    color: rgb(15 23 42);
+    color: var(--ui-text);
 
     font-weight: 650;
     text-align: right;
@@ -254,10 +283,10 @@ body {
     box-sizing: border-box;
     min-height: 72px;
     padding: 10px 3px 8px;
-    border: 1px solid rgb(203 213 225);
+    border: 1px solid var(--ui-border-strong);
     border-radius: 12px;
-    color: rgb(100 116 139);
-    background: rgb(248 250 252);
+    color: var(--ui-text-subtle);
+    background: var(--ui-surface-raised);
     font-size: 11px;
     font-weight: 600;
     line-height: 1.1;
@@ -279,13 +308,13 @@ body {
     fill: none;
 }
 .mode-input:checked + .mode-pill {
-    color: #1d4ed8;
-    border-color: #93c5fd;
-    background: #eff6ff;
+    color: var(--ui-accent-text);
+    border-color: var(--ui-accent-border);
+    background: var(--ui-accent-bg);
     box-shadow: inset 0 0 0 1px rgb(59 130 246 / 0.18);
 }
 .mode-input:focus-visible + .mode-pill {
-    outline: 3px solid #93c5fd;
+    outline: 3px solid var(--ui-accent-border);
     outline-offset: 2px;
 }
 .mode-option:hover .mode-pill {
@@ -293,7 +322,7 @@ body {
 }
 .mode-hint {
     margin-top: 8px;
-    color: rgb(100 116 139);
+    color: var(--ui-text-subtle);
     font-size: 11px;
     line-height: 1.4;
 }
@@ -318,7 +347,7 @@ body {
 
     cursor: pointer;
 
-    background: rgb(226 232 240);
+    background: var(--ui-border);
 }
 
 .control input[type='range']::-webkit-slider-thumb {
@@ -375,7 +404,7 @@ body {
     height: 10px;
     margin-top: 7px;
 
-    color: rgb(148 163 184);
+    color: var(--ui-muted);
 
     font-size: 10px;
     line-height: 1;
@@ -458,9 +487,9 @@ body {
 
     border-radius: 10px;
 
-    color: rgb(100 116 139);
+    color: var(--ui-text-subtle);
 
-    background: rgb(248 250 252);
+    background: var(--ui-surface-raised);
 
     font-size: 11px;
     line-height: 1.45;
@@ -475,7 +504,7 @@ body {
 
     padding-top: 16px;
 
-    border-top: 1px solid rgb(226 232 240);
+    border-top: 1px solid var(--ui-border);
 }
 
 #analysis-summary .info-row {
@@ -487,13 +516,13 @@ body {
 
     margin-top: 8px;
 
-    color: rgb(71 85 105);
+    color: var(--ui-text-muted);
 }
 
 #analysis-summary .info-row b {
     flex-shrink: 0;
 
-    color: rgb(15 23 42);
+    color: var(--ui-text);
 
     font-weight: 650;
 }
@@ -517,8 +546,8 @@ body {
 
     border-radius: 7px;
 
-    color: rgb(71 85 105);
-    background: rgb(248 250 252);
+    color: var(--ui-text-muted);
+    background: var(--ui-surface-raised);
 
     font-size: 11px;
     line-height: 1.2;
@@ -530,9 +559,9 @@ body {
 }
 
 .route-group-title-direct {
-    color: rgb(30 64 175);
-    background: rgb(239 246 255);
-    border: 1px solid rgb(147 197 253);
+    color: var(--ui-accent-text-strong);
+    background: var(--ui-accent-bg-alt);
+    border: 1px solid var(--ui-accent-border-alt);
     font-weight: 800;
 }
 
@@ -573,13 +602,13 @@ body {
 
     padding-top: 16px;
 
-    border-top: 1px solid rgb(226 232 240);
+    border-top: 1px solid var(--ui-border);
 }
 
 .trip-title {
     margin-bottom: 12px;
 
-    color: rgb(15 23 42);
+    color: var(--ui-text);
 
     font-size: 16px;
     line-height: 1.4;
@@ -609,12 +638,12 @@ body {
 
     padding: 9px 11px;
 
-    border: 1px solid rgb(203 213 225);
+    border: 1px solid var(--ui-border-strong);
     border-radius: 10px;
 
-    color: rgb(51 65 85);
+    color: var(--ui-text-secondary);
 
-    background: #ffffff;
+    background: var(--ui-surface);
 
     cursor: pointer;
 
@@ -631,9 +660,9 @@ body {
 }
 
 .trip-option:hover {
-    border-color: rgb(148 163 184);
+    border-color: var(--ui-muted);
 
-    background: rgb(248 250 252);
+    background: var(--ui-surface-raised);
 }
 
 .trip-option:focus-visible {
@@ -644,9 +673,9 @@ body {
 .trip-option-active {
     border-color: #2563eb;
 
-    color: rgb(30 64 175);
+    color: var(--ui-accent-text-strong);
 
-    background: rgb(239 246 255);
+    background: var(--ui-accent-bg-alt);
 
     box-shadow: inset 0 0 0 1px rgb(37 99 235 / 0.08);
 }
@@ -667,14 +696,14 @@ body {
 
     padding: 10px 12px;
 
-    border: 1px solid rgb(226 232 240);
+    border: 1px solid var(--ui-border);
     border-left-width: 4px;
 
     border-radius: 0 10px 10px 0;
 
-    color: rgb(51 65 85);
+    color: var(--ui-text-secondary);
 
-    background: rgb(248 250 252);
+    background: var(--ui-surface-raised);
 
     font-size: 13px;
     line-height: 1.45;
@@ -693,7 +722,7 @@ body {
 }
 
 .trip-step-walk {
-    border-left-color: #64748b;
+    border-left-color: var(--ui-slate);
 }
 
 #trip-back-top,
@@ -708,12 +737,12 @@ body {
     margin-top: 14px;
     padding: 8px 14px;
 
-    border: 1px solid rgb(203 213 225);
+    border: 1px solid var(--ui-border-strong);
     border-radius: 10px;
 
-    color: rgb(51 65 85);
+    color: var(--ui-text-secondary);
 
-    background: #ffffff;
+    background: var(--ui-surface);
 
     font-size: 13px;
     line-height: 1;
@@ -733,14 +762,14 @@ body {
 
 #trip-back-top:hover,
 #trip-back:hover {
-    border-color: rgb(148 163 184);
+    border-color: var(--ui-muted);
 
-    background: rgb(248 250 252);
+    background: var(--ui-surface-raised);
 }
 
 #trip-back-top:active,
 #trip-back:active {
-    background: rgb(241 245 249);
+    background: var(--ui-surface-hover);
 }
 
 #trip-back-top:focus-visible,
@@ -767,12 +796,12 @@ body {
 
     padding: 12px 14px;
 
-    border: 1px solid rgb(226 232 240 / 0.9);
+    border: 1px solid var(--ui-legend-border);
     border-radius: 14px;
 
-    color: rgb(71 85 105);
+    color: var(--ui-text-muted);
 
-    background: rgb(255 255 255 / 0.94);
+    background: var(--ui-legend);
 
     box-shadow:
         0 10px 15px -3px rgb(15 23 42 / 0.1),
@@ -788,7 +817,7 @@ body {
 .legend-title {
     margin-bottom: 8px;
 
-    color: rgb(15 23 42);
+    color: var(--ui-text);
 
     font-size: 12px;
     font-weight: 700;
@@ -875,7 +904,7 @@ body {
 }
 
 .leaflet-control-zoom a {
-    border-color: rgb(226 232 240) !important;
+    border-color: var(--ui-border) !important;
 }
 
 .leaflet-popup-content-wrapper {
@@ -971,7 +1000,7 @@ body {
 
         border-radius: 18px 18px 0 0;
 
-        background: rgb(255 255 255 / 0.98);
+        background: var(--ui-mobile-panel);
 
         cursor: pointer;
 
@@ -990,7 +1019,7 @@ body {
     #info-handle-title {
         overflow: hidden;
 
-        color: rgb(15 23 42);
+        color: var(--ui-text);
 
         font-size: 14px;
         line-height: 1.3;
@@ -1003,7 +1032,7 @@ body {
     #info-handle-hint {
         margin-top: 2px;
 
-        color: rgb(100 116 139);
+        color: var(--ui-text-subtle);
 
         font-size: 10px;
         line-height: 1.2;
@@ -1022,7 +1051,7 @@ body {
 
         border-radius: 999px;
 
-        background: rgb(203 213 225);
+        background: var(--ui-border-strong);
 
         transform: translateX(-50%);
     }
@@ -1041,9 +1070,9 @@ body {
 
         border-radius: 999px;
 
-        color: rgb(71 85 105);
+        color: var(--ui-text-muted);
 
-        background: rgb(241 245 249);
+        background: var(--ui-surface-hover);
 
         transition:
             transform 200ms ease,
@@ -1262,11 +1291,185 @@ body {
 
 .analysis-title {
     margin-bottom: 12px;
-    color: rgb(15 23 42);
+    color: var(--ui-text);
     font-size: 14px;
     font-weight: 600;
 }
 
 .analysis-value {
     flex-shrink: 0;
+}
+
+/* Locale selector stays within the existing settings panel. */
+.language-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    font-size: 12px;
+}
+
+/* Native controls, Leaflet chrome, and dynamic popup text. */
+body {
+    color: var(--ui-text);
+}
+#timing-status {
+    font-size: 12px;
+    color: var(--ui-text-subtle);
+    margin-top: 5px;
+}
+#map.leaflet-container {
+    background: var(--map-bg);
+}
+.map-muted {
+    color: var(--ui-text-muted);
+}
+
+/* One-shot geolocation, aligned with the existing Leaflet zoom control. */
+.leaflet-location-control {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+.location-button {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: var(--ui-surface);
+    color: var(--ui-text);
+    box-shadow: 0 4px 12px rgb(15 23 42 / 0.15);
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+.location-button svg {
+    width: 22px;
+    height: 22px;
+}
+.location-button:hover {
+    background: var(--ui-surface-hover);
+}
+.location-button:focus-visible {
+    outline: 2px solid var(--ui-accent-text);
+}
+.location-button[aria-busy='true'] {
+    color: var(--ui-accent-text);
+}
+.location-status {
+    box-sizing: border-box;
+    max-width: min(220px, calc(100vw - 76px));
+    padding: 8px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--ui-border);
+    background: var(--ui-surface);
+    color: var(--ui-text);
+    box-shadow: 0 4px 12px rgb(15 23 42 / 0.15);
+    font:
+        12px/1.4 system-ui,
+        sans-serif;
+}
+.location-status[hidden] {
+    display: none;
+}
+.location-status.location-error {
+    color: var(--ui-danger);
+}
+@media (max-width: 700px) {
+    .location-button {
+        width: 34px;
+        height: 34px;
+    }
+}
+
+/* Soft dark UI follows the same theme as the basemap and loader. */
+:root[data-boot-theme='dark'] {
+    --ui-surface: #353c46;
+    --ui-text: #eef1f5;
+    --ui-text-secondary: #d8dfe8;
+    --ui-text-muted: #c3cbd6;
+    --ui-text-subtle: #b5bfcd;
+    --ui-muted: #a8b3c2;
+    --ui-slate: #a8b3c2;
+    --ui-surface-raised: #414853;
+    --ui-surface-hover: #454e5b;
+    --ui-border-strong: #677483;
+    --ui-border: #505b69;
+    --ui-panel-border: #505b69;
+    --ui-legend-border: #505b69;
+    --ui-panel: rgb(48 54 64 / 0.97);
+    --ui-legend: rgb(48 54 64 / 0.96);
+    --ui-mobile-panel: rgb(48 54 64 / 0.98);
+    --ui-danger: #ffb1ae;
+    --ui-danger-border: #a96665;
+    --ui-danger-bg: #553b41;
+    --ui-accent-text: #a7d0ff;
+    --ui-accent-text-strong: #c0ddff;
+    --ui-accent-bg: #354e6a;
+    --ui-accent-bg-alt: #354e6a;
+    --ui-accent-border: #789dc7;
+    --ui-accent-border-alt: #789dc7;
+}
+:root[data-boot-theme='dark'] .leaflet-bar a,
+:root[data-boot-theme='dark'] .leaflet-popup-content-wrapper,
+:root[data-boot-theme='dark'] .leaflet-popup-tip,
+:root[data-boot-theme='dark'] .leaflet-tooltip,
+:root[data-boot-theme='dark'] .leaflet-control-attribution,
+:root[data-boot-theme='dark'] .maplibregl-ctrl-attrib {
+    background: var(--ui-surface);
+    color: var(--ui-text);
+}
+:root[data-boot-theme='dark'] .leaflet-bar a:hover {
+    background: var(--ui-surface-hover);
+}
+:root[data-boot-theme='dark'] .leaflet-bar a.leaflet-disabled {
+    color: var(--ui-muted);
+}
+:root[data-boot-theme='dark'] .leaflet-container a,
+:root[data-boot-theme='dark'] .maplibregl-ctrl-attrib a {
+    color: var(--ui-accent-text);
+}
+:root[data-boot-theme='dark'] .leaflet-popup-close-button {
+    color: var(--ui-text);
+}
+.language-control [data-language-switch] button[aria-pressed='true'],
+.language-control [data-boot-theme-switch] button[aria-pressed='true'] {
+    background: var(--ui-accent-bg);
+    color: var(--ui-accent-text);
+    border-color: var(--ui-accent-border);
+}
+
+/* Keep slider endpoint labels and flex children inside the panel. */
+.range-scale span:first-child {
+    left: 0;
+    transform: none;
+}
+.range-scale span:last-child {
+    left: auto;
+    right: 0;
+    transform: none;
+    text-align: right;
+}
+#info-content,
+.info-heading-row > *,
+.control-label > *,
+#analysis-summary .info-row > *,
+.language-control > * {
+    min-width: 0;
+}
+#info-content {
+    overflow-wrap: anywhere;
+}
+.language-control {
+    flex-wrap: wrap;
+}
+.language-control [data-language-switch],
+.language-control [data-boot-theme-switch] {
+    flex-wrap: wrap;
+}
+#trip-back-top,
+#trip-back {
+    box-sizing: border-box;
 }

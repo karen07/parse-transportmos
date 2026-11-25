@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .common import PROJECT_VERSION
+from .i18n import load_catalogs, publish_catalogs, render_default, wrap_html_lines
 
 # Standalone HTML/CSS/JavaScript source
 # Web UI lives in the web/ source tree. No JavaScript/CSS is embedded in Python.
@@ -185,6 +186,62 @@ def publish_boot_svg(cache_dir, output_path):
     return svg_path
 
 
+def render_page(
+    output_path, initial_walk_minutes, walk_speed, initial_opacity, catalogs=None
+):
+    """Render and validate HTML without reading or building any transport data."""
+    if catalogs is None:
+        catalogs = load_catalogs()
+    base = Path(output_path).stem
+    js_filename = base + ".js"
+    css_filename = base + ".css"
+    config_filename = base + "-config.json"
+    initial_walk_minutes = max(1.0, min(15.0, initial_walk_minutes))
+    initial_circle_opacity = max(0.0, min(100.0, initial_opacity))
+    html = (WEB_SOURCE_DIR / "page.html").read_text(encoding="ascii")
+    html = render_default(html, catalogs, walk_speed)
+    replacements = {
+        "@@VERSION@@": PROJECT_VERSION,
+        "@@LANGUAGES@@": " ".join(sorted(catalogs)),
+        "@@PAGE_JS@@": quote(js_filename),
+        "@@PAGE_CSS@@": quote(css_filename),
+        "@@CONFIG_JSON@@": quote(config_filename),
+        "@@INITIAL_WALK_MINUTES@@": f"{initial_walk_minutes:.0f}",
+        "@@INITIAL_OPACITY@@": f"{initial_circle_opacity:.0f}",
+        "@@WALK_SPEED@@": f"{walk_speed:.0f}",
+    }
+    for key, value in replacements.items():
+        html = html.replace(key, value)
+    html = wrap_html_lines(html)
+    # Inline raw source only after wrapping markup. Never reflow JavaScript/CSS.
+    for token, source in (
+        ("/* @@BOOT_CSS@@ */", "boot-loader.css"),
+        ("/* @@LANGUAGE_JS@@ */", "language.js"),
+        ("/* @@BOOT_THEME_JS@@ */", "boot-theme.js"),
+    ):
+        content = (WEB_SOURCE_DIR / source).read_text(encoding="ascii")
+        html = html.replace(token, "\n" + content.rstrip() + "\n")
+    if re.search(r"@@[A-Z_]+@@", html):
+        raise ValueError("Unresolved HTML template placeholder")
+    # Site CSP has script-src-attr 'none': keep inline event handlers out of HTML.
+    if re.search(r"\son[a-z]+\s*=", html, flags=re.IGNORECASE):
+        raise ValueError("Generated HTML contains CSP-blocked inline event handlers")
+    result = (
+        "\n".join(line.rstrip() for line in html.splitlines() if line.strip()) + "\n"
+    )
+    long_lines = [
+        (i, len(line), line)
+        for i, line in enumerate(result.splitlines(), 1)
+        if len(line) > 100
+    ]
+    if long_lines:
+        details = "\n".join(
+            f"  {i}: {length} chars: {line}" for i, length, line in long_lines[:10]
+        )
+        raise ValueError(f"Generated HTML lines exceed 100:\n{details}")
+    return result
+
+
 def build_html(
     data,
     initial_walk_minutes,
@@ -234,18 +291,7 @@ def build_html(
         min(100.0, initial_circle_opacity),
     )
 
-    # Render static interface labels as plain ASCII text. OSM place names
-    # remain untouched inside the compressed transport payload.
-    mode_names = {
-        "heading": "Transport modes",
-        "bus": "Bus",
-        "tram": "Tram",
-        "trolleybus": "Trolleybus",
-        "metro": "Metro",
-        "mcc": "MCC",
-        "rail": "MCD + Trains",
-    }
-    mode_hint = "Surface transport on by default. Travel times are estimates."
+    catalogs = load_catalogs()
 
     output_path = Path(output_path)
     base = output_path.stem
@@ -255,13 +301,21 @@ def build_html(
     data_worker_filename = base + "-data-worker.js"
     maplibre_worker_filename = base + "-maplibre-worker.js"
     config_filename = base + "-config.json"
-    html = (WEB_SOURCE_DIR / "page.html").read_text(encoding="ascii")
-    publish_boot_svg(Path(cache_dir), output_path)
-    boot_css = (WEB_SOURCE_DIR / "boot-loader.css").read_text(encoding="ascii")
+    from .major_roads import (
+        CENTER_LAT,
+        CENTER_LON,
+        METERS_PER_DEGREE_LON,
+        VIEW_X_METERS,
+    )
 
-    # Python injects critical CSS, not source JS code.
+    # The language bootstrap and critical CSS are inlined before first paint.
     config = {
         "version": PROJECT_VERSION,
+        "boot_view": {
+            "lat": CENTER_LAT,
+            "lon": CENTER_LON,
+            "width_degrees": 2 * VIEW_X_METERS / METERS_PER_DEGREE_LON,
+        },
         "data_file": data_filename,
         "data_worker_file": data_worker_filename,
         "maplibre_worker_file": maplibre_worker_filename,
@@ -269,37 +323,14 @@ def build_html(
         "grid_size": grid_size,
         "origin_lon": origin_lon,
         "origin_lat": origin_lat,
-        "mode_names": mode_names,
-        "mode_hint": mode_hint,
         "infer_through_service": data.get("through_service_policy") == "estimated",
         "initial_walk_minutes": initial_walk_minutes,
         "initial_opacity": initial_circle_opacity,
     }
-    replacements = {
-        "@@VERSION@@": PROJECT_VERSION,
-        "@@PAGE_JS@@": quote(js_filename),
-        "@@PAGE_CSS@@": quote(css_filename),
-        "@@CONFIG_JSON@@": quote(config_filename),
-        "/* @@BOOT_CSS@@ */": boot_css,
-        "@@INITIAL_WALK_MINUTES@@": f"{initial_walk_minutes:.0f}",
-        "@@INITIAL_OPACITY@@": f"{initial_circle_opacity:.0f}",
-        "@@WALK_SPEED@@": f"{walk_speed:.0f}",
-    }
-    for key, value in replacements.items():
-        html = html.replace(key, value)
-    if re.search(r"@@[A-Z_]+@@", html):
-        raise ValueError("Unresolved HTML template placeholder")
-    if not html.isascii():
-        raise ValueError("Generated HTML must contain ASCII only")
-    # Site CSP has script-src-attr 'none': keep inline event handlers out of HTML.
-    if re.search(r"\son[a-z]+\s*=", html, flags=re.IGNORECASE):
-        raise ValueError("Generated HTML contains CSP-blocked inline event handlers")
-    result = (
-        "\n".join(line.rstrip() for line in html.splitlines() if line.strip()) + "\n"
+    result = render_page(
+        output_path, initial_walk_minutes, walk_speed, initial_circle_opacity, catalogs
     )
-    long_lines = [i for i, line in enumerate(result.splitlines(), 1) if len(line) > 100]
-    if long_lines:
-        raise ValueError(f"Generated HTML lines exceed 100: {long_lines[:10]}")
+    publish_boot_svg(Path(cache_dir), output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     icon_assets = Path(__file__).resolve().parents[1] / "assets"
@@ -323,10 +354,16 @@ def build_html(
         css_filename: "routes.css",
         data_worker_filename: "routes-data-worker.js",
         "boot-loader.js": "boot-loader.js",
+        "i18n.js": "i18n.js",
     }
     for destination, source in static_assets.items():
         content = (WEB_SOURCE_DIR / source).read_bytes()
         write_atomic_bytes(output_path.with_name(destination), content)
+    for theme in ("light", "dark"):
+        filename = theme + ".json"
+        content = (WEB_SOURCE_DIR / "styles" / filename).read_bytes()
+        write_atomic_bytes(output_path.parent / "styles" / filename, content)
+    publish_catalogs(output_path.parent / "i18n", catalogs, write_atomic_bytes)
     # Older releases copied this stylesheet, but it is now inlined for FCP.
     output_path.with_name("boot-loader.css").unlink(missing_ok=True)
     # Prefer to vendor the official matching CSP worker once at build time.

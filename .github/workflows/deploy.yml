@@ -34,6 +34,12 @@ jobs:
           test -s site/routes-data-worker.js
           test -s site/routes-maplibre-worker.js
           test -s site/boot-loader.js
+          test -s site/i18n.js
+          test -s site/i18n/index.json
+          test -s site/i18n/en.json
+          test -s site/i18n/ru.json
+          test -s site/styles/light.json
+          test -s site/styles/dark.json
           test -s site/moscow-major-roads.svg
           gzip -t site/routes.json.gz
       - name: Prepare website

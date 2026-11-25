@@ -1,5 +1,72 @@
 let transportConfig = null;
 
+// The address bar is the shareable state. Unknown query parameters are preserved.
+function readShareState(params) {
+    function number(key, min, max) {
+        const raw = params.get(key);
+        if (raw === null || !/^-?\d+(?:\.\d+)?$/.test(raw)) return null;
+        const value = Number(raw);
+        return Number.isFinite(value) && value >= min && value <= max ? value : null;
+    }
+    function point(latKey, lonKey, maxLat = 90) {
+        const lat = number(latKey, -maxLat, maxLat);
+        const lon = number(lonKey, -180, 180);
+        return lat === null || lon === null ? null : { lat, lon };
+    }
+    function integer(key, min, max) {
+        const value = number(key, min, max);
+        return Number.isInteger(value) ? value : null;
+    }
+    const modes = params.get('modes');
+    const allowedModes = ['bus', 'tram', 'trolleybus', 'metro', 'mcc', 'rail'];
+    const modeList = modes === null ? null : modes === '' ? [] : modes.split(',');
+    const time = params.get('time') === 'unlimited' ? 185 : integer('time', 0, 185);
+    const origin = point('lat', 'lon');
+    return {
+        origin,
+        target: origin ? point('to_lat', 'to_lon') : null,
+        camera: point('map_lat', 'map_lon', 85.05113),
+        zoom: number('zoom', 1, 22),
+        modes: modeList && modeList.every((mode) => allowedModes.includes(mode)) ? modeList : null,
+        walk: integer('walk', 1, 15),
+        transfers: integer('transfers', 0, 2),
+        time: time !== null && time % 5 === 0 ? time : null,
+        opacity: integer('opacity', 0, 100),
+        panel: integer('panel', 0, 1),
+        alternative: integer('alternative', 0, 7) ?? 0,
+        focus: params.get('route'),
+        tier: integer('tier', 0, 2),
+    };
+}
+
+function writeShareState(url, state) {
+    const params = url.searchParams;
+    function set(key, value) {
+        if (value === null || value === undefined) params.delete(key);
+        else params.set(key, String(value));
+    }
+    function point(latKey, lonKey, value) {
+        set(latKey, value ? value.lat.toFixed(6) : null);
+        set(lonKey, value ? value.lon.toFixed(6) : null);
+    }
+    point('lat', 'lon', state.origin);
+    point('to_lat', 'to_lon', state.target);
+    point('map_lat', 'map_lon', state.camera);
+    set('zoom', state.zoom.toFixed(4));
+    set('modes', state.modes.join(','));
+    set('walk', state.walk);
+    set('transfers', state.transfers);
+    set('time', state.time === 185 ? 'unlimited' : state.time);
+    set('opacity', state.opacity);
+    set('panel', state.panel);
+    set('lang', state.lang);
+    set('theme', state.theme);
+    set('alternative', state.target ? state.alternative : null);
+    set('route', state.origin && !state.target ? state.focus?.routeKey : null);
+    set('tier', state.origin && !state.target ? state.focus?.transferCount : null);
+    return url;
+}
+
 function loadExternalScript(url, isLoaded) {
     return new Promise((resolve, reject) => {
         if (isLoaded()) {
@@ -23,6 +90,39 @@ function loadExternalScript(url, isLoaded) {
     });
 }
 
+function mapLabelExpression() {
+    const lang = transportI18n.language;
+    const names =
+        lang === 'en'
+            ? ['name:en', 'name_en', 'name:latin', 'name']
+            : ['name:' + lang, 'name_' + lang, 'name', 'name:latin'];
+    return ['coalesce', ...names.map((name) => ['get', name]), ''];
+}
+
+function localizeMapStyle(style) {
+    for (const layer of style.layers) {
+        if (layer.type === 'symbol' && layer.layout?.['text-field']) {
+            layer.layout['text-field'] = mapLabelExpression();
+        }
+    }
+}
+
+async function loadMapStyles() {
+    const styles = {};
+    await Promise.all(
+        ['light', 'dark'].map(async (theme) => {
+            const url = new URL('styles/' + theme + '.json', document.baseURI);
+            url.searchParams.set('v', transportConfig.version);
+            const response = await fetch(url);
+            if (!response.ok) throw new Error('Map style HTTP ' + response.status);
+            const style = await response.json();
+            localizeMapStyle(style);
+            styles[theme] = style;
+        }),
+    );
+    return styles;
+}
+
 async function loadMapLibraries() {
     await loadExternalScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', () => !!window.L);
     await loadExternalScript(
@@ -39,7 +139,75 @@ async function loadMapLibraries() {
     );
 }
 
+// One-shot browser geolocation. Invalidating the token ignores callbacks from
+// a request superseded by a manual selection or a second button press.
+function createLocationRequest({ geolocation, secure, status, onLocation }) {
+    let generation = 0;
+    let pending = false;
+    function cancel() {
+        ++generation;
+        pending = false;
+        status(null);
+    }
+    function toggle() {
+        if (pending) {
+            cancel();
+            return;
+        }
+        if (!secure) {
+            status('locationInsecure');
+            return;
+        }
+        if (!geolocation || typeof geolocation.getCurrentPosition !== 'function') {
+            status('locationUnsupported');
+            return;
+        }
+        const token = ++generation;
+        pending = true;
+        status('locationPending');
+        const finish = (callback) => (value) => {
+            if (!pending || token !== generation) return;
+            pending = false;
+            callback(value);
+        };
+        const success = finish(({ coords }) => {
+            const { latitude, longitude, accuracy } = coords;
+            if (
+                !Number.isFinite(latitude) ||
+                Math.abs(latitude) > 90 ||
+                !Number.isFinite(longitude) ||
+                Math.abs(longitude) > 180 ||
+                !Number.isFinite(accuracy) ||
+                accuracy < 0
+            ) {
+                status('locationUnavailable');
+                return;
+            }
+            status('locationFound', { meters: Math.ceil(accuracy) });
+            onLocation({ lat: latitude, lng: longitude, accuracy });
+        });
+        const failure = finish((error) => {
+            status(
+                { 1: 'locationDenied', 2: 'locationUnavailable', 3: 'locationTimeout' }[
+                    error.code
+                ] || 'locationUnavailable',
+            );
+        });
+        try {
+            geolocation.getCurrentPosition(success, failure, {
+                enableHighAccuracy: true,
+                maximumAge: 0,
+                timeout: 15000,
+            });
+        } catch (error) {
+            failure({ code: error.name === 'SecurityError' ? 1 : 2 });
+        }
+    }
+    return { toggle, cancel };
+}
+
 (async () => {
+    const initialShare = readShareState(new URL(location.href).searchParams);
     const bootStarted = performance.now();
     console.info('[map] BOOT START');
     // Read the tiny generated configuration before starting the expensive work.
@@ -50,7 +218,11 @@ async function loadMapLibraries() {
     }
     transportConfig = await configResponse.json();
     // Library scripts and large compressed network payload load concurrently.
-    const [data] = await Promise.all([loadTransportData(), loadMapLibraries()]);
+    const [data, , mapStyles] = await Promise.all([
+        loadTransportData(),
+        loadMapLibraries(),
+        loadMapStyles(),
+    ]);
     bootPhase('RENDERING MAP', 'Preparing controls and map layers...');
     console.info('[map] BOOT libraries', Math.round(performance.now() - bootStarted), 'ms');
     console.info('[map] BOOT data decoded', Math.round(performance.now() - bootStarted), 'ms');
@@ -104,6 +276,9 @@ async function loadMapLibraries() {
     const stops = data.stops;
     const routes = data.routes;
     const modeInputs = Array.from(document.querySelectorAll('.mode-input'));
+    if (initialShare.modes !== null) {
+        for (const input of modeInputs) input.checked = initialShare.modes.includes(input.value);
+    }
     function selectedTransportModes() {
         const modes = new Set(
             modeInputs.filter((input) => input.checked).map((input) => input.value),
@@ -127,45 +302,22 @@ async function loadMapLibraries() {
         return MODE_BOARDING_WAITS[mode] ?? BOARDING_WAIT_MIN;
     }
 
-    const TEXT = {
-        stop: 'Stop',
-        stopGenitive: 'stop',
-        transfers: 'Transfers',
-        tripTitle: 'Trip',
-        backToReachability: 'Back to reachability',
-        noTransfers: 'No transfers',
-        oneTransfer: 'One transfer',
-        twoTransfers: 'Two transfers',
-        accessDirect: 'Reachable: no transfers',
-        accessTransfer: 'Reachable: one transfer',
-        accessTwoTransfers: 'Reachable: two transfers',
-        doubleClick: 'Double-click: show trip',
-        destination: 'Destination',
-        boarding: 'Boarding',
-        transferExit: 'Transfer: exit',
-        transferBoarding: 'Transfer: boarding',
-        groupDirect: 'No transfers',
-        groupTransfer: 'After one transfer',
-        groupTwoTransfers: 'After two transfers',
-        restoreFailedStart: 'Could not restore a path to <b>',
-        restoreFailedEnd: '</b> for the current walking limit and transfer mode.',
-        walkPrefix: 'Walk ~<b>',
-        walkToStop: ' min</b> to stop <b>',
-        transportNotNeeded: '</b>. Transit is not needed.',
-        rideStopsSuffix: ' stops).',
-        transferWalkPrefix: 'Walk ~<b>',
-        minutesColon: ' min</b>: ',
-        optionPrefix: 'Option ',
-        walkOnly: 'walk',
-        walkShort: 'walk',
-        minutesShort: 'min',
-        stopsShort: 'stops',
-    };
+    const TEXT = transportI18n.messages;
 
     const walkTimeInput = document.getElementById('walk-time');
     const transferCountInput = document.getElementById('transfer-count');
     const travelTimeLimitInput = document.getElementById('travel-time-limit');
     const circleOpacityInput = document.getElementById('circle-opacity');
+    const infoCollapseInput = document.getElementById('info-collapse');
+    for (const [input, value] of [
+        [walkTimeInput, initialShare.walk],
+        [transferCountInput, initialShare.transfers],
+        [travelTimeLimitInput, initialShare.time],
+        [circleOpacityInput, initialShare.opacity],
+    ]) {
+        if (value !== null) input.value = String(value);
+    }
+    if (initialShare.panel !== null) infoCollapseInput.checked = initialShare.panel === 1;
     const walkTimeValue = document.getElementById('walk-time-value');
     const transferModeValue = document.getElementById('transfer-mode-value');
     const travelTimeLimitValue = document.getElementById('travel-time-limit-value');
@@ -181,12 +333,21 @@ async function loadMapLibraries() {
     const tripBack = document.getElementById('trip-back');
     const resetOrigin = document.getElementById('reset-origin');
     const timingStatus = document.getElementById('timing-status');
+    timingStatus.dataset.i18nDynamic = 'true';
+    let timingText = () => TEXT.ready;
+    function setTiming(format) {
+        timingText = format;
+        timingStatus.textContent = format();
+    }
 
     const TRAVEL_TIME_INFINITY_SLIDER_VALUE = 185;
     let walkMinutes = Number(walkTimeInput.value);
     let walkRadius = walkMinutes * WALK_SPEED_M_PER_MIN;
     let maxTransfers = Number(transferCountInput.value);
-    let maxTravelMinutes = 60;
+    let maxTravelMinutes =
+        Number(travelTimeLimitInput.value) === TRAVEL_TIME_INFINITY_SLIDER_VALUE
+            ? Infinity
+            : Number(travelTimeLimitInput.value);
     let circleOpacity = Number(circleOpacityInput.value) / 100.0;
     let selectedPoint = null;
     let selectedRouteFocus = null;
@@ -247,14 +408,19 @@ async function loadMapLibraries() {
         if (!p || p !== runProfile) return;
         const seconds = (profileElapsed(p) / 1000).toFixed(1);
         if (p.searchDone) {
-            timingStatus.textContent =
-                'Results ' +
-                (p.resultsReadyMs / 1000).toFixed(1) +
-                ' s | Drawing... ' +
-                seconds +
-                ' s';
+            setTiming(() =>
+                transportI18n.t('resultsDrawing', {
+                    result: (p.resultsReadyMs / 1000).toFixed(1),
+                    total: seconds,
+                }),
+            );
         } else {
-            timingStatus.textContent = p.currentPhase + '... ' + seconds + ' s';
+            setTiming(() =>
+                transportI18n.t('phaseTime', {
+                    phase: transportI18n.label(p.currentPhase),
+                    seconds,
+                }),
+            );
         }
     }
 
@@ -288,13 +454,12 @@ async function loadMapLibraries() {
                 longTasks: p.longTasks,
             };
             window.transportLastProfile = report;
-            timingStatus.textContent =
-                'Results ' +
-                (report.resultsReadyMs / 1000).toFixed(1) +
-                ' s | ' +
-                'Fully drawn ' +
-                (report.totalWallMs / 1000).toFixed(1) +
-                ' s';
+            setTiming(() =>
+                transportI18n.t('resultsDone', {
+                    result: (report.resultsReadyMs / 1000).toFixed(1),
+                    total: (report.totalWallMs / 1000).toFixed(1),
+                }),
+            );
             console.info('[map] FULLY IDLE', report.totalWallMs + ' ms');
             console.table(p.phases);
             console.info('[map] FINAL REPORT (copy window.transportLastProfile)', report);
@@ -342,7 +507,7 @@ async function loadMapLibraries() {
         if (p.finalFrame !== null) cancelAnimationFrame(p.finalFrame);
         p.finished = true;
         console.info('[map] ABORT', reason, '+' + profileElapsed(p) + ' ms', profileSnapshot(p));
-        timingStatus.textContent = 'Stopped (' + reason + ')';
+        setTiming(() => transportI18n.t('stopped', { reason: transportI18n.label(reason) }));
         runProfile = null;
     }
 
@@ -396,7 +561,7 @@ async function loadMapLibraries() {
         }
         window.transportLastProfile = null;
         console.info('[map] RUN', p.serial, 'START', p.settings);
-        timingStatus.textContent = 'Preparing...';
+        setTiming(() => TEXT.preparing);
         p.timer = setInterval(() => {
             if (p !== runProfile || p.finished) return;
             const snap = profileSnapshot(p);
@@ -428,7 +593,63 @@ async function loadMapLibraries() {
     const map = L.map('map', {
         preferCanvas: true,
         minZoom: 1,
-    }).setView([ORIGIN_LAT, ORIGIN_LON], 10);
+        zoomSnap: 0,
+    });
+    // The loader SVG is a 3:2 equidistant drawing with a known geographic extent.
+    // Match its horizontal meters per CSS pixel in the Web Mercator map.
+    const bootView = transportConfig.boot_view;
+    const bootRoads = document.getElementById('boot-roads');
+    const bootCenter = [bootView.lat, bootView.lon];
+    const zoomZeroWidth = (256 * bootView.width_degrees) / 360;
+    function syncBootCamera() {
+        const width = bootRoads.getBoundingClientRect().width;
+        if (width <= 0) return;
+        const zoom = Math.max(1, Math.min(18, Math.log2(width / zoomZeroWidth)));
+        const center = initialShare.camera || initialShare.origin;
+        map.setView(center ? [center.lat, center.lon] : bootCenter, initialShare.zoom ?? zoom, {
+            animate: false,
+        });
+    }
+    syncBootCamera();
+    const bootCameraObserver = new ResizeObserver(syncBootCamera);
+    bootCameraObserver.observe(bootRoads);
+
+    let shareReady = false;
+    let shareTimer = null;
+    function syncShareUrl() {
+        if (!shareReady) return;
+        clearTimeout(shareTimer);
+        shareTimer = null;
+        const center = map.wrapLatLng(map.getCenter());
+        const url = writeShareState(new URL(location.href), {
+            origin: selectedPoint,
+            target: targetPoint,
+            camera: { lat: center.lat, lon: center.lng },
+            zoom: map.getZoom(),
+            modes: modeInputs.filter((input) => input.checked).map((input) => input.value),
+            walk: Number(walkTimeInput.value),
+            transfers: Number(transferCountInput.value),
+            time: Number(travelTimeLimitInput.value),
+            opacity: Number(circleOpacityInput.value),
+            panel: Number(infoCollapseInput.checked),
+            lang: transportI18n.language,
+            theme: transportBootTheme.dark ? 'dark' : 'light',
+            alternative: tripAlternativeIndex,
+            focus: selectedRouteFocus,
+        });
+        if (url.href !== location.href) {
+            try {
+                history.replaceState(history.state, '', url.href);
+            } catch (error) {
+                console.warn('[map] URL update failed:', error);
+            }
+        }
+    }
+    function queueShareUrl() {
+        if (!shareReady) return;
+        clearTimeout(shareTimer);
+        shareTimer = setTimeout(syncShareUrl, 150);
+    }
 
     map.doubleClickZoom.disable();
 
@@ -447,15 +668,15 @@ async function loadMapLibraries() {
     createMapPane('originPane', 700, 'none');
 
     const MODE_NAMES = {
-        heading: transportConfig.mode_names.heading,
-        bus: transportConfig.mode_names.bus,
-        tram: transportConfig.mode_names.tram,
-        trolleybus: transportConfig.mode_names.trolleybus,
-        metro: transportConfig.mode_names.metro,
-        mcc: transportConfig.mode_names.mcc,
-        rail: transportConfig.mode_names.rail,
+        heading: TEXT.modeHeading,
+        bus: TEXT.bus,
+        tram: TEXT.tram,
+        trolleybus: TEXT.trolleybus,
+        metro: TEXT.metro,
+        mcc: TEXT.mcc,
+        rail: TEXT.rail,
     };
-    const MODE_HINT = transportConfig.mode_hint;
+    const MODE_HINT = TEXT.modeHint;
 
     const modeHeading = document.getElementById('transport-modes-heading');
     modeHeading.textContent = MODE_NAMES.heading;
@@ -468,14 +689,25 @@ async function loadMapLibraries() {
     });
     document.getElementById('transport-modes-hint').textContent = MODE_HINT;
 
+    for (const style of Object.values(mapStyles)) localizeMapStyle(style);
+    let activeTheme = transportBootTheme.dark ? 'dark' : 'light';
     const vectorMapLayer = L.maplibreGL({
-        style: 'https://tiles.openfreemap.org/styles/bright',
+        style: mapStyles[activeTheme],
         attribution:
             '<a href="https://openfreemap.org/">OpenFreeMap</a> | ' +
-            '&copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> | ' +
+            '(c) <a href="https://openmaptiles.org/">OpenMapTiles</a> | ' +
             '<a href="https://www.openstreetmap.org/copyright">' +
             'OpenStreetMap contributors</a>',
     }).addTo(map);
+    // The Leaflet transport layers are independent of the MapLibre basemap.
+    // Both styles share source and layer IDs, allowing a paint-only style diff.
+    const gl = vectorMapLayer.getMaplibreMap();
+    document.addEventListener('transport-theme-change', () => {
+        const theme = transportBootTheme.dark ? 'dark' : 'light';
+        if (theme === activeTheme) return;
+        activeTheme = theme;
+        gl.setStyle(mapStyles[theme]);
+    });
     // Start listening while the rest of the UI is constructed.
     const baseMapReady = waitForBaseMapReady(vectorMapLayer);
     // Attach the rejection handler immediately even if other initialization is slow.
@@ -494,6 +726,7 @@ async function loadMapLibraries() {
         canvas.getContext('2d', { alpha: true }),
     );
 
+    const themedRouteKeys = new WeakMap();
     const twoTransferRouteLayer = L.layerGroup().addTo(map);
     const transferRouteLayer = L.layerGroup().addTo(map);
     const directRouteLayer = L.layerGroup().addTo(map);
@@ -552,7 +785,7 @@ async function loadMapLibraries() {
         return [x, y];
     }
 
-    function routeColor(key) {
+    function routeColor(key, onMap = false) {
         let hash = 0;
 
         for (let i = 0; i < key.length; ++i) {
@@ -560,7 +793,8 @@ async function loadMapLibraries() {
             hash |= 0;
         }
 
-        return 'hsl(' + (Math.abs(hash) % 360) + ',70%,42%)';
+        const lightness = onMap && transportBootTheme.dark ? 64 : 42;
+        return 'hsl(' + (Math.abs(hash) % 360) + ',70%,' + lightness + '%)';
     }
 
     function updateTargetControls() {
@@ -595,8 +829,10 @@ async function loadMapLibraries() {
         maxTravelMinutes = newMaxTravelMinutes;
         circleOpacity = Number(circleOpacityInput.value) / 100.0;
 
-        walkTimeValue.textContent =
-            walkMinutes.toFixed(0) + ' min (~' + Math.round(walkRadius) + ' m)';
+        walkTimeValue.textContent = transportI18n.t('walkValue', {
+            minutes: walkMinutes.toFixed(0),
+            meters: Math.round(walkRadius),
+        });
 
         transferLabel.textContent = TEXT.transfers;
         tripTitle.textContent = TEXT.tripTitle;
@@ -607,13 +843,15 @@ async function loadMapLibraries() {
         transferModeValue.textContent = transferModeLabels[maxTransfers];
 
         travelTimeLimitValue.textContent = Number.isFinite(maxTravelMinutes)
-            ? Math.round(maxTravelMinutes) + ' min'
-            : 'No limit';
+            ? transportI18n.t('timeValue', { minutes: Math.round(maxTravelMinutes) })
+            : TEXT.noLimit;
 
         circleOpacityValue.textContent = Math.round(circleOpacity * 100) + '%';
 
-        legendOriginText.textContent =
-            walkMinutes.toFixed(0) + ' min (~' + Math.round(walkRadius) + ' m) from selected point';
+        legendOriginText.textContent = transportI18n.t('originValue', {
+            minutes: walkMinutes.toFixed(0),
+            meters: Math.round(walkRadius),
+        });
 
         updateTargetControls();
     }
@@ -1192,13 +1430,13 @@ async function loadMapLibraries() {
             return '?';
         }
         const names = {
-            bus: 'Bus',
-            tram: 'Tram',
-            trolleybus: 'Trolleybus',
-            metro: 'Metro',
-            mcc: 'MCC',
-            mcd: 'MCD',
-            train: 'Train',
+            bus: TEXT.bus,
+            tram: TEXT.tram,
+            trolleybus: TEXT.trolleybus,
+            metro: TEXT.metro,
+            mcc: TEXT.mcc,
+            mcd: TEXT.mcd,
+            train: TEXT.train,
         };
         const type = route.mode || route.route || '';
         const ref = route.ref || '?';
@@ -1223,11 +1461,23 @@ async function loadMapLibraries() {
             originWalkingLines = walkCoverageFromNodes(seeds);
         }
 
+        const gps = selectedPoint?.accuracy != null;
+        if (gps && selectedPoint.accuracy > 0) {
+            L.circle([lat, lon], {
+                radius: selectedPoint.accuracy,
+                weight: 1,
+                color: '#2563eb',
+                fillColor: '#3b82f6',
+                fillOpacity: 0.12,
+                interactive: false,
+                pane: 'originPane',
+            }).addTo(originLayer);
+        }
         L.circleMarker([lat, lon], {
             radius: 7,
             weight: 2,
-            color: '#111',
-            fillColor: '#fff',
+            color: gps ? '#fff' : '#111',
+            fillColor: gps ? '#2563eb' : '#fff',
             fillOpacity: 1,
             interactive: false,
             pane: 'originPane',
@@ -1241,12 +1491,12 @@ async function loadMapLibraries() {
             return;
         }
 
-        const color = routeColor(routeKey);
+        const color = routeColor(routeKey, true);
         const routeLayers = [directRouteLayer, transferRouteLayer, twoTransferRouteLayer];
         const targetLayer = routeLayers[transferCount];
         const weights = [4, 2.8, 2.2];
         const opacities = [0.85, 0.48, 0.34];
-        const accessLabels = ['no transfers', 'one transfer', 'two transfers'];
+        const accessLabels = ['accessDirect', 'accessTransfer', 'accessTwoTransfers'];
 
         for (const segment of reachableSegments.values()) {
             const geometry = routeSegmentGeometry(segment);
@@ -1276,16 +1526,18 @@ async function loadMapLibraries() {
             const to = stops[direction.stops[segment.endPos]];
 
             layer.bindPopup(
-                '<b>' +
+                () =>
+                    '<b>' +
                     escapeHtml(routeLabel(route)) +
                     '</b><br>' +
                     escapeHtml(from ? from.name : '?') +
                     ' &rarr; ' +
                     escapeHtml(to ? to.name : '?') +
                     '<br>' +
-                    accessLabels[transferCount],
+                    TEXT[accessLabels[transferCount]],
             );
 
+            themedRouteKeys.set(layer, routeKey);
             layer.addTo(targetLayer);
         }
     }
@@ -1395,7 +1647,7 @@ async function loadMapLibraries() {
             stopChainGeometry(item.direction, part.startPos, part.endPos);
         if (!geometry) return;
         const ctx = routeContexts[tier];
-        ctx.strokeStyle = routeColor(item.routeKey);
+        ctx.strokeStyle = routeColor(item.routeKey, true);
         ctx.beginPath();
         let visible = false;
         for (const line of geometryLines(geometry)) {
@@ -2238,7 +2490,7 @@ async function loadMapLibraries() {
         const stop = stops[stopIndex];
         const rows = [];
         const ordered = Array.from(stop.routes).sort((a, b) =>
-            routeLabel(routes[a]).localeCompare(routeLabel(routes[b]), undefined, {
+            routeLabel(routes[a]).localeCompare(routeLabel(routes[b]), transportI18n.language, {
                 numeric: true,
             }),
         );
@@ -2419,7 +2671,7 @@ async function loadMapLibraries() {
             access +
             '<br><br>' +
             stopRouteDetails(stopIndex) +
-            '<br><span style="color:#666">' +
+            '<br><span class="map-muted">' +
             TEXT.doubleClick +
             '</span>'
         );
@@ -2543,14 +2795,16 @@ async function loadMapLibraries() {
         return bestIndex;
     }
 
+    let openLocalizedStop = null;
     function openStopPopup(stopIndex) {
         const stop = stops[stopIndex];
         const tier = renderedStopTiers.get(stopIndex);
         if (!stop || tier === undefined) return;
-        L.popup({ maxWidth: 320 })
+        openLocalizedStop = L.popup({ maxWidth: 320 })
             .setLatLng([stop.lat, stop.lon])
             .setContent(stopPopupContent(stopIndex, tier))
             .openOn(map);
+        openLocalizedStop.localeStopIndex = stopIndex;
     }
 
     function stopDistanceMeters(aIndex, bIndex) {
@@ -3890,7 +4144,7 @@ async function loadMapLibraries() {
         const xy = walkPolylineXY(start, end);
         if (!xy) return;
         L.polyline(xy.map(walkXYToLatLng), {
-            color: '#555',
+            color: transportBootTheme.dark ? '#c3cbd6' : '#555',
             weight: 3,
             opacity: 0.85,
             dashArray: '5 7',
@@ -4079,6 +4333,7 @@ async function loadMapLibraries() {
             tripAlternativeIndex = 0;
         }
 
+        syncShareUrl();
         drawTripAlternatives(point, itineraries, tripAlternativeIndex);
 
         L.circleMarker([selectedPoint.lat, selectedPoint.lon], {
@@ -4095,11 +4350,7 @@ async function loadMapLibraries() {
         drawTripPoint(point, TEXT.destination, '#16a34a');
 
         if (itineraries.length === 0) {
-            addTripStep(
-                'No route found to the selected point for the current ' +
-                    'pedestrian walking limit and transfer mode.',
-                'trip-step-walk',
-            );
+            addTripStep(TEXT.noRoute, 'trip-step-walk');
             return;
         }
 
@@ -4129,7 +4380,7 @@ async function loadMapLibraries() {
 
         if (!targetStop || !board || !alight1 || !route1) {
             console.error('Invalid first trip leg', itinerary);
-            addTripStep('Unable to draw the selected route.', 'trip-step-walk');
+            addTripStep(TEXT.unableDraw, 'trip-step-walk');
             return;
         }
 
@@ -4173,7 +4424,7 @@ async function loadMapLibraries() {
 
         if (!transferBoard || !route2 || stops[leg2EndStopIndex] === undefined) {
             console.error('Invalid second trip leg', itinerary);
-            addTripStep('Unable to draw the selected route.', 'trip-step-walk');
+            addTripStep(TEXT.unableDraw, 'trip-step-walk');
             return;
         }
 
@@ -4226,7 +4477,7 @@ async function loadMapLibraries() {
 
         if (!route3 || stops[leg3EndStopIndex] === undefined) {
             console.error('Invalid third trip leg', itinerary);
-            addTripStep('Unable to draw the selected route.', 'trip-step-walk');
+            addTripStep(TEXT.unableDraw, 'trip-step-walk');
             return;
         }
 
@@ -4278,12 +4529,11 @@ async function loadMapLibraries() {
             return;
         }
 
-        targetPoint = {
-            lat: point.lat,
-            lon: point.lon,
-        };
+        const wrapped = map.wrapLatLng([point.lat, point.lon]);
+        targetPoint = { lat: wrapped.lat, lon: wrapped.lng };
         setTargetPickMode(false);
         tripAlternativeIndex = 0;
+        syncShareUrl();
         renderTrip(targetPoint);
     }
 
@@ -5814,7 +6064,7 @@ async function loadMapLibraries() {
         }
     }
 
-    async function appendRouteGroup(container, title, routeKeys, transferCount, token) {
+    async function appendRouteGroup(container, titleKey, routeKeys, transferCount, token) {
         if (routeKeys.size === 0) {
             return;
         }
@@ -5826,7 +6076,8 @@ async function loadMapLibraries() {
             heading.classList.add('route-group-title-direct');
         }
 
-        heading.textContent = title;
+        heading.dataset.i18n = titleKey;
+        heading.textContent = TEXT[titleKey];
         container.appendChild(heading);
 
         const ordered = Array.from(routeKeys);
@@ -5837,7 +6088,7 @@ async function loadMapLibraries() {
             const aa = ar && ar.ref ? ar.ref : '';
             const bb = br && br.ref ? br.ref : '';
 
-            return aa.localeCompare(bb, undefined, {
+            return aa.localeCompare(bb, transportI18n.language, {
                 numeric: true,
             });
         });
@@ -5858,6 +6109,7 @@ async function loadMapLibraries() {
             item.className = 'route-chip';
             item.style.background = routeColor(key);
             item.style.opacity = ['1', '0.65', '0.5'][transferCount];
+            item.dataset.routeKey = key;
             item.textContent = routeLabel(route);
             item.style.cursor = 'pointer';
 
@@ -5866,7 +6118,7 @@ async function loadMapLibraries() {
                 selectedRouteFocus.routeKey === key &&
                 selectedRouteFocus.transferCount === transferCount
             ) {
-                item.style.outline = '3px solid #111';
+                item.style.outline = '3px solid var(--ui-text)';
                 item.style.outlineOffset = '2px';
             }
 
@@ -5900,6 +6152,7 @@ async function loadMapLibraries() {
 
         if (!routeStops) {
             selectedRouteFocus = null;
+            syncShareUrl();
             return null;
         }
 
@@ -5921,7 +6174,7 @@ async function loadMapLibraries() {
             return;
         }
 
-        const color = routeColor(selectedRouteFocus.routeKey);
+        const color = routeColor(selectedRouteFocus.routeKey, true);
 
         for (const stopIndex of routeStops) {
             const stop = stops[stopIndex];
@@ -5936,11 +6189,12 @@ async function loadMapLibraries() {
             });
 
             marker.bindPopup(
-                '<b>' +
+                () =>
+                    '<b>' +
                     escapeHtml(stop.name || TEXT.stop) +
                     '</b><br>' +
                     escapeHtml(routeLabel(routes[selectedRouteFocus.routeKey])) +
-                    "<br><span style='color:#666'>" +
+                    "<br><span class='map-muted'>" +
                     TEXT.doubleClick +
                     '</span>',
             );
@@ -5964,6 +6218,7 @@ async function loadMapLibraries() {
                 showTripToStop(stopIndex);
             });
 
+            themedRouteKeys.set(marker, selectedRouteFocus.routeKey);
             marker.addTo(stopLayer);
         }
     }
@@ -5972,14 +6227,14 @@ async function loadMapLibraries() {
         const container = document.getElementById('routes');
         container.innerHTML = '';
 
-        await appendRouteGroup(container, TEXT.groupDirect, directRoutes, 0, token);
+        await appendRouteGroup(container, 'groupDirect', directRoutes, 0, token);
 
         if (maxTransfers >= 1) {
-            await appendRouteGroup(container, TEXT.groupTransfer, transferRoutes, 1, token);
+            await appendRouteGroup(container, 'groupTransfer', transferRoutes, 1, token);
         }
 
         if (maxTransfers >= 2) {
-            await appendRouteGroup(container, TEXT.groupTwoTransfers, twoTransferRoutes, 2, token);
+            await appendRouteGroup(container, 'groupTwoTransfers', twoTransferRoutes, 2, token);
         }
     }
 
@@ -6156,6 +6411,7 @@ async function loadMapLibraries() {
     }
 
     function scheduleRender() {
+        queueShareUrl();
         profileAbort('new settings or point');
         updateControls();
         const token = ++renderGeneration;
@@ -6198,6 +6454,12 @@ async function loadMapLibraries() {
                 if (!(await warmWalkSegmentGrid(token))) return;
                 profilePhaseEnd('Walking snap index');
                 if (token !== renderGeneration) return;
+                if (locationStatusKey === 'locationFound' && selectedPoint.accuracy != null) {
+                    const xy = project(selectedPoint.lon, selectedPoint.lat);
+                    if (!snapWalkXY(xy[0], xy[1])) {
+                        showLocationStatus('locationNoGraph');
+                    }
+                }
                 profilePhaseStart('Start coverage wave');
                 const wave = startProgressiveCoverage(token, true);
                 if (runProfile) runProfile.wave = wave;
@@ -6284,6 +6546,17 @@ async function loadMapLibraries() {
     transferCountInput.addEventListener('input', scheduleRender);
 
     travelTimeLimitInput.addEventListener('input', scheduleRender);
+    for (const input of [
+        walkTimeInput,
+        transferCountInput,
+        travelTimeLimitInput,
+        circleOpacityInput,
+        infoCollapseInput,
+        ...modeInputs,
+    ]) {
+        input.addEventListener('change', syncShareUrl);
+    }
+    map.on('moveend', queueShareUrl);
 
     map.on('zoomstart', () => {
         suspendRoutesForZoom();
@@ -6318,12 +6591,14 @@ async function loadMapLibraries() {
         circleOpacity = Number(circleOpacityInput.value) / 100.0;
         circleOpacityValue.textContent = Math.round(circleOpacity * 100) + '%';
         coverageCanvas.style.opacity = String(circleOpacity);
+        queueShareUrl();
     });
 
     function backToReachability() {
         targetPoint = null;
         setTargetPickMode(false);
         tripAlternativeIndex = 0;
+        syncShareUrl();
         scheduleRender();
     }
 
@@ -6331,8 +6606,9 @@ async function loadMapLibraries() {
     tripBack.addEventListener('click', backToReachability);
 
     function resetSelection() {
+        locationRequest.cancel();
         profileAbort('Reset');
-        timingStatus.textContent = 'Ready';
+        setTiming(() => TEXT.ready);
         ++renderGeneration;
         if (renderFrame !== null) cancelAnimationFrame(renderFrame);
         renderFrame = null;
@@ -6365,15 +6641,73 @@ async function loadMapLibraries() {
             document.getElementById(id).textContent = '0';
         }
         resetOrigin.disabled = true;
-        legendOriginText.textContent = 'Choose a starting point';
+        legendOriginText.textContent = TEXT.chooseStart;
+        syncShareUrl();
     }
+
+    // Native Leaflet control: the permission prompt is only triggered by a click.
+    let locationButton, locationStatus, locationStatusKey, locationStatusParams;
+    function showLocationStatus(key, params) {
+        locationStatusKey = key;
+        locationStatusParams = params;
+        const pending = key === 'locationPending';
+        locationButton.setAttribute('aria-busy', String(pending));
+        locationButton.setAttribute(
+            'aria-label',
+            pending ? TEXT.locationCancel : TEXT.locationTitle,
+        );
+        locationButton.title = pending ? TEXT.locationCancel : TEXT.locationTitle;
+        locationStatus.textContent = key ? transportI18n.t(key, params) : '';
+        locationStatus.hidden = !key;
+        locationStatus.classList.toggle(
+            'location-error',
+            !!key && !['locationPending', 'locationFound'].includes(key),
+        );
+    }
+    const locationRequest = createLocationRequest({
+        geolocation: navigator.geolocation,
+        secure: window.isSecureContext,
+        status: showLocationStatus,
+        onLocation: (position) => {
+            cancelPendingMapClick();
+            map.closePopup();
+            map.setView([position.lat, position.lng], Math.max(map.getZoom(), 15));
+            selectStartPoint(position, position.accuracy);
+        },
+    });
+    const locationControl = L.control({ position: 'topleft' });
+    locationControl.onAdd = () => {
+        const container = L.DomUtil.create('div', 'leaflet-location-control');
+        locationButton = L.DomUtil.create('button', 'location-button', container);
+        locationButton.type = 'button';
+        locationButton.innerHTML =
+            '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" ' +
+            'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+            '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2" fill="currentColor"/>' +
+            '<path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>';
+        locationStatus = L.DomUtil.create('div', 'location-status', container);
+        locationStatus.setAttribute('role', 'status');
+        locationStatus.setAttribute('aria-live', 'polite');
+        showLocationStatus(null);
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.disableScrollPropagation(container);
+        locationButton.addEventListener('click', () => {
+            cancelPendingMapClick();
+            locationRequest.toggle();
+        });
+        return container;
+    };
+    locationControl.addTo(map);
 
     resetOrigin.addEventListener('click', resetSelection);
 
-    function selectStartPoint(latlng) {
+    function selectStartPoint(latlng, accuracy = null) {
+        if (accuracy === null) locationRequest.cancel();
+        const point = map.wrapLatLng(latlng);
         selectedPoint = {
-            lat: latlng.lat,
-            lon: latlng.lng,
+            lat: point.lat,
+            lon: point.lng,
+            accuracy,
         };
         resetOrigin.disabled = false;
         targetPoint = null;
@@ -6385,6 +6719,7 @@ async function loadMapLibraries() {
         analysisCache = null;
         reachabilitySearchCache.clear();
         itineraryCache.clear();
+        syncShareUrl();
         scheduleRender();
     }
 
@@ -6398,6 +6733,7 @@ async function loadMapLibraries() {
     }
 
     map.on('click', (event) => {
+        locationRequest.cancel();
         if (targetPickMode && selectedPoint) {
             cancelPendingMapClick();
             suppressMapClickUntil = performance.now() + 600;
@@ -6438,6 +6774,7 @@ async function loadMapLibraries() {
     });
 
     map.on('dblclick', (event) => {
+        locationRequest.cancel();
         cancelPendingMapClick();
         suppressMapClickUntil = performance.now() + 600;
 
@@ -6463,6 +6800,65 @@ async function loadMapLibraries() {
         });
     });
 
+    function updateMapLabels() {
+        const expression = mapLabelExpression();
+        const style = gl.getStyle();
+        for (const layer of style?.layers || []) {
+            if (
+                layer.type === 'symbol' &&
+                layer.layout?.['text-field'] &&
+                JSON.stringify(layer.layout['text-field']) !== JSON.stringify(expression)
+            ) {
+                gl.setLayoutProperty(layer.id, 'text-field', expression);
+            }
+        }
+    }
+    gl.on('style.load', updateMapLabels);
+    document.addEventListener('transport-language-change', () => {
+        for (const style of Object.values(mapStyles)) localizeMapStyle(style);
+        // Update only text fields; never replace the transport layers or camera.
+        if (gl.isStyleLoaded()) updateMapLabels();
+        else if (gl.getStyle()?.layers?.length) {
+            // The style may already be installed while individual tiles are loading.
+            try {
+                updateMapLabels();
+            } catch (_) {
+                /* Retry on style.load. */
+            }
+        }
+        updateControls();
+        timingStatus.textContent = timingText();
+        if (locationButton) showLocationStatus(locationStatusKey, locationStatusParams);
+        for (const chip of document.querySelectorAll('#routes [data-route-key]')) {
+            chip.textContent = routeLabel(routes[chip.dataset.routeKey]);
+        }
+        if (targetPoint && !tripPanel.hidden) {
+            // The existing itinerary cache is reused; selected alternative stays unchanged.
+            renderTrip(targetPoint);
+        } else if (openLocalizedStop && map.hasLayer(openLocalizedStop)) {
+            const index = openLocalizedStop.localeStopIndex;
+            openLocalizedStop.setContent(stopPopupContent(index, renderedStopTiers.get(index)));
+        } else {
+            map.closePopup();
+        }
+    });
+    document.addEventListener('transport-theme-change', () => {
+        redrawProgressiveRoutes();
+        for (const group of [
+            directRouteLayer,
+            transferRouteLayer,
+            twoTransferRouteLayer,
+            stopLayer,
+        ]) {
+            group.eachLayer((layer) => {
+                const key = themedRouteKeys.get(layer);
+                if (key && layer.setStyle) layer.setStyle({ color: routeColor(key, true) });
+            });
+        }
+        tripWalkLayer.eachLayer((layer) => {
+            layer.setStyle({ color: transportBootTheme.dark ? '#c3cbd6' : '#555' });
+        });
+    });
     updateControls();
     analysisSummary.hidden = true;
     bootPhase('LOADING MAP TILES', 'Waiting for vector map tiles to become visible...');
@@ -6473,15 +6869,36 @@ async function loadMapLibraries() {
         Math.round(performance.now() - bootStarted),
         'ms; ready to select origin',
     );
+    bootCameraObserver.disconnect();
+    if (initialShare.origin) {
+        selectedPoint = { ...initialShare.origin, accuracy: null };
+        targetPoint = initialShare.target;
+        tripAlternativeIndex = targetPoint ? initialShare.alternative : 0;
+        if (
+            !targetPoint &&
+            initialShare.focus &&
+            initialShare.tier !== null &&
+            Object.hasOwn(routes, initialShare.focus)
+        ) {
+            selectedRouteFocus = {
+                routeKey: initialShare.focus,
+                transferCount: initialShare.tier,
+            };
+        }
+        resetOrigin.disabled = false;
+    }
+    shareReady = true;
+    syncShareUrl();
     bootComplete();
+    if (selectedPoint) scheduleRender();
 })().catch((error) => {
     console.error('Transport map initialization failed:', error);
     bootFailed(error);
     const container = document.getElementById('map');
     if (container) {
-        container.textContent = 'Could not initialize map: ' + error.message;
+        container.textContent = transportI18n.t('initError', { error: error.message });
         container.style.padding = '24px';
         container.style.boxSizing = 'border-box';
-        container.style.color = '#b91c1c';
+        container.style.color = 'var(--ui-danger)';
     }
 });

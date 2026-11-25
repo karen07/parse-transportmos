@@ -29,8 +29,7 @@ from .diagnostics import (
 )
 from .osm_sources import build_cache, prepare_raw_source
 from .pedestrian import load_or_build_pedestrian
-from .self_tests import run_self_tests
-from .site_builder import build_html, publish_boot_svg, write_atomic_bytes
+from .site_builder import build_html, publish_boot_svg, render_page, write_atomic_bytes
 from .transfers import check_moskvorechye_transfers, load_or_build_walk_transfers
 from .transport import build_transport_data, inspect_route_ref
 from .transport_index import build_index
@@ -46,11 +45,6 @@ def parse_args():
         "--output",
         default="site/routes.html",
         help="Output HTML path (default: site/routes.html)",
-    )
-    parser.add_argument(
-        "--self-test",
-        action="store_true",
-        help="Run standalone station/transfer regression tests",
     )
     parser.add_argument(
         "--cache-dir",
@@ -227,9 +221,6 @@ def main():
         print(f"[build] DONE {name}: {duration:.3f}s", flush=True)
 
     print(f"[build] START v{PROJECT_VERSION}", flush=True)
-    if args.self_test:
-        run_self_tests()
-        return
     if args.boot_pbf and not args.boot_roads_only:
         raise ValueError("--boot-pbf requires --boot-roads-only")
     if args.boot_roads_only:
@@ -274,7 +265,7 @@ def main():
             opacity = old_config["initial_opacity"]
         else:
             # Backwards-compatible refresh of sites generated before v0.15.10.
-            old_html = output.read_text(encoding="ascii")
+            old_html = output.read_text(encoding="utf-8")
             old_js = output.with_suffix(".js").read_text(encoding="utf-8")
             packed = json.loads(gzip.decompress(data_file.read_bytes()))
             if packed.get("walking", {}).get("format") != "delta-varint-dm-v1":
@@ -308,7 +299,7 @@ def main():
             reuse_data=True,
             cache_dir=Path(args.cache_dir),
         )
-        write_atomic_bytes(output, html.encode("ascii"))
+        write_atomic_bytes(output, html.encode("utf-8"))
         print("[build] Web assets refreshed, transport data unchanged", flush=True)
         return
     if args.allow_moskvorechye_private:
@@ -317,6 +308,8 @@ def main():
             flush=True,
         )
         print("[station] This does NOT establish public access rights.", flush=True)
+    render_page(args.output, args.walk_minutes, args.walk_speed, args.circle_opacity)
+    print("[build] HTML template validated", flush=True)
     phase_started = time.monotonic()
     print("[build] START transport input", flush=True)
     if args.input_geojson:
@@ -593,7 +586,7 @@ def main():
     step_done("HTML encode + gzip", phase_started)
     phase_started = time.monotonic()
     print("[build] START HTML file write", flush=True)
-    write_atomic_bytes(Path(args.output), html.encode("ascii"))
+    write_atomic_bytes(Path(args.output), html.encode("utf-8"))
     step_done("HTML file write", phase_started)
     print(f"wrote: {Path(args.output).resolve()}")
     print("[build] FINAL TIMINGS (seconds)", flush=True)

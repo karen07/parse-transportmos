@@ -1,25 +1,217 @@
 <!doctype html>
-<html>
+<html lang="ru" data-walk-speed="80" data-languages="en ru">
     <head>
         <meta charset="utf-8" />
+        <meta name="referrer" content="strict-origin" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <meta name="application-version" content="0.16.4" />
-        <title>Moscow transport reachability</title>
-        <meta name="theme-color" content="#0d1534" />
-        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.16.4" />
-        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.16.4" />
-        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.16.4" />
-        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.16.4" />
+        <meta name="application-version" content="0.16.17" />
+        <title data-i18n="pageTitle">Транспортная доступность Москвы</title>
+        <meta name="theme-color" content="#ffffff" />
+        <script>
+            /* Select the locale before first paint; Russian is the project default. */
+            const transportLanguage = (() => {
+                const root = document.documentElement;
+                const key = 'transport-map-language';
+                const available = root.dataset.languages.split(' ');
+                const normalize = (value) => {
+                    const code = (value || '').toLowerCase();
+                    return available.includes(code) ? code : code.split('-')[0];
+                };
+                const valid = (value) => available.includes(value);
+                const requested = normalize(new URL(location.href).searchParams.get('lang'));
+                let saved;
+                try {
+                    saved = normalize(localStorage.getItem(key));
+                } catch (_) {
+                    /* No storage. */
+                }
+                let language = valid(requested) ? requested : valid(saved) ? saved : 'ru';
+                const initialUrl = new URL(location.href);
+                initialUrl.searchParams.set('lang', language);
+                if (initialUrl.href !== location.href)
+                    history.replaceState(history.state, '', initialUrl.href);
+                if (language !== 'ru') root.dataset.localePending = 'true';
+                function select(code) {
+                    if (!valid(code)) return;
+                    const next = new URL(location.href);
+                    try {
+                        localStorage.setItem(key, code);
+                        next.searchParams.set('lang', code);
+                    } catch (_) {
+                        next.searchParams.set('lang', code);
+                    }
+                    language = code;
+                    history.replaceState(history.state, '', next.href);
+                }
+                return {
+                    get language() {
+                        return language;
+                    },
+                    select,
+                };
+            })();
+            /* Shared map and loader theme, selected before first paint. */
+            const transportBootTheme = (() => {
+                const root = document.documentElement;
+                const key = 'transport-map-boot-theme';
+                const valid = (value) => value === 'light' || value === 'dark';
+                const requested = new URL(location.href).searchParams.get('theme');
+                let saved;
+                try {
+                    saved = localStorage.getItem(key);
+                } catch (_) {
+                    /* No storage. */
+                }
+                root.dataset.bootTheme = valid(requested)
+                    ? requested
+                    : valid(saved)
+                      ? saved
+                      : 'light';
+                const initialUrl = new URL(location.href);
+                initialUrl.searchParams.set('theme', root.dataset.bootTheme);
+                if (initialUrl.href !== location.href)
+                    history.replaceState(history.state, '', initialUrl.href);
+                function updateButtons() {
+                    const meta = document.querySelector('meta[name="theme-color"]');
+                    if (meta)
+                        meta.content = root.dataset.bootTheme === 'dark' ? '#303640' : '#ffffff';
+                    for (const button of document.querySelectorAll('[data-theme-value]')) {
+                        button.setAttribute(
+                            'aria-pressed',
+                            String(button.dataset.themeValue === root.dataset.bootTheme),
+                        );
+                    }
+                }
+                function select(value) {
+                    if (!valid(value)) return;
+                    if (root.dataset.bootTheme === value) return;
+                    root.dataset.bootTheme = value;
+                    const url = new URL(location.href);
+                    try {
+                        localStorage.setItem(key, value);
+                        url.searchParams.set('theme', value);
+                    } catch (_) {
+                        url.searchParams.set('theme', value);
+                    }
+                    // Keep the URL override consistent without restarting the map or loader.
+                    if (url.href !== location.href)
+                        history.replaceState(history.state, '', url.href);
+                    updateButtons();
+                    document.dispatchEvent(new Event('transport-theme-change'));
+                }
+                document.addEventListener(
+                    'DOMContentLoaded',
+                    () => {
+                        updateButtons();
+                        for (const button of document.querySelectorAll('[data-theme-value]')) {
+                            button.addEventListener('click', () =>
+                                select(button.dataset.themeValue),
+                            );
+                        }
+                    },
+                    { once: true },
+                );
+                return {
+                    get dark() {
+                        return root.dataset.bootTheme === 'dark';
+                    },
+                };
+            })();
+        </script>
+        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.16.17" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.16.17" />
+        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.16.17" />
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.16.17" />
         <!-- First paint uses inline critical CSS and a local SVG. -->
         <style>
+            /* Critical palette, also used by the empty map before external CSS loads. */
+            :root {
+                color-scheme: light;
+                --boot-bg: #ffffff;
+                --map-bg: #f5f3ef;
+                --boot-text: #292c36;
+                --boot-eyebrow: #67556d;
+                --boot-title: #302a35;
+                --boot-cursor: #ba4d17;
+                --boot-caption-bg: #ffffffdd;
+                --boot-caption: #55434e;
+                --boot-live: #a84b18;
+                --boot-dot: #e9852b;
+                --boot-dot-glow: #ef914d;
+                --boot-stage: #9e451a;
+                --boot-progress: #886275;
+                --boot-meter-border: #d7b4a0;
+                --boot-meter: #f4e8e0;
+                --boot-meter-shadow: #44251420;
+                --boot-fill-start: #e16b2e;
+                --boot-fill-end: #f5a44e;
+                --boot-fill-glow: #f3a27f55;
+                --boot-percent: #9e451a;
+                --boot-details: #514b59;
+                --boot-error: #ab2626;
+                --boot-retry-border: #cd754d;
+                --boot-retry-bg: #fff0e6;
+                --boot-retry-text: #8a381b;
+                --boot-road-filter: grayscale(1) opacity(0.29);
+            }
+            :root[data-boot-theme='dark'] {
+                color-scheme: dark;
+                --map-bg: #303640;
+            }
+            :root[data-boot-theme='dark'] #boot-overlay {
+                color-scheme: dark;
+                --boot-bg: #0b1020;
+                --boot-text: #e8eafa;
+                --boot-eyebrow: #c3a2cd;
+                --boot-title: #f6e5ec;
+                --boot-cursor: #f59a78;
+                --boot-caption-bg: #0c0c1dbb;
+                --boot-caption: #c9a9be;
+                --boot-live: #f3ac80;
+                --boot-dot: #f6b76b;
+                --boot-dot-glow: #f48b5a;
+                --boot-stage: #f4bc9f;
+                --boot-progress: #c08b9f;
+                --boot-meter-border: #7c546e;
+                --boot-meter: #221b30;
+                --boot-meter-shadow: #0008;
+                --boot-fill-start: #bf677d;
+                --boot-fill-end: #f3a27f;
+                --boot-fill-glow: #f3a27f80;
+                --boot-percent: #ffccab;
+                --boot-details: #a9a4b9;
+                --boot-error: #ffb1ae;
+                --boot-retry-border: #f3ad96;
+                --boot-retry-bg: #402632;
+                --boot-retry-text: #fff0e6;
+                --boot-road-filter: none;
+            }
+            html,
+            body,
+            #map {
+                background: var(--boot-bg);
+                color: var(--boot-text);
+                margin: 0;
+            }
+            #map {
+                background: var(--map-bg);
+            }
+            #boot-roads {
+                filter: var(--boot-road-filter);
+            }
             #boot-overlay {
                 position: fixed;
                 inset: 0;
                 z-index: 100000;
-                background: #0b1020;
-                color: #e8eafa;
+                background: var(--boot-bg);
+                color: var(--boot-text);
                 font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                 box-sizing: border-box;
+                transition: opacity 350ms ease;
+            }
+            #boot-overlay.is-complete {
+                opacity: 0;
+                pointer-events: none;
             }
             #boot-overlay[hidden] {
                 display: none;
@@ -37,13 +229,13 @@
                 text-align: center;
             }
             .boot-eyebrow {
-                color: #c3a2cd;
+                color: var(--boot-eyebrow);
                 font-size: 11px;
                 letter-spacing: 0.23em;
                 text-transform: uppercase;
             }
             #boot-card h1 {
-                color: #f6e5ec;
+                color: var(--boot-title);
                 font-size: clamp(18px, 3.3vw, 27px);
                 font-weight: 500;
                 letter-spacing: 0.08em;
@@ -57,7 +249,7 @@
                 position: absolute;
                 left: 100%;
                 top: 0;
-                color: #f59a78;
+                color: var(--boot-cursor);
                 animation: boot-blink 1s steps(1) infinite;
             }
             @keyframes boot-blink {
@@ -103,9 +295,9 @@
                 display: flex;
                 justify-content: space-between;
                 padding: 16px 16px 10px;
-                background: linear-gradient(0deg, #0c0c1dbb, transparent);
+                background: linear-gradient(0deg, var(--boot-caption-bg), transparent);
                 font-size: 10px;
-                color: #c9a9be;
+                color: var(--boot-caption);
                 letter-spacing: 0.1em;
             }
             .boot-network-caption a {
@@ -114,7 +306,7 @@
                 text-decoration: underline;
             }
             .boot-network-live {
-                color: #f3ac80;
+                color: var(--boot-live);
             }
             .boot-network-live::before {
                 content: '';
@@ -123,12 +315,12 @@
                 height: 6px;
                 border-radius: 50%;
                 margin-right: 8px;
-                background: #f6b76b;
-                box-shadow: 0 0 8px #f48b5a;
+                background: var(--boot-dot);
+                box-shadow: 0 0 8px var(--boot-dot-glow);
             }
             #boot-stage {
                 margin-top: clamp(4px, 1vh, 10px);
-                color: #f4bc9f;
+                color: var(--boot-stage);
                 font-size: 12px;
                 font-weight: 650;
                 letter-spacing: 0.16em;
@@ -139,25 +331,25 @@
                 width: min(1000px, calc(100% - clamp(100px, 16vw, 136px)));
                 margin-inline: auto;
                 padding: 8px 0 5px;
-                color: #c08b9f;
+                color: var(--boot-progress);
             }
             .boot-meter {
                 position: relative;
                 min-width: 0;
                 height: 9px;
                 overflow: hidden;
-                border: 1px solid #7c546e;
+                border: 1px solid var(--boot-meter-border);
                 border-radius: 999px;
-                background: #221b30;
-                box-shadow: inset 0 1px 4px #0008;
+                background: var(--boot-meter);
+                box-shadow: inset 0 1px 4px var(--boot-meter-shadow);
             }
             #boot-meter-fill {
                 display: block;
                 height: 100%;
                 width: 0;
                 border-radius: inherit;
-                background: linear-gradient(90deg, #bf677d, #f3a27f);
-                box-shadow: 0 0 12px #f3a27f80;
+                background: linear-gradient(90deg, var(--boot-fill-start), var(--boot-fill-end));
+                box-shadow: 0 0 12px var(--boot-fill-glow);
                 transition: width 100ms linear;
             }
             .boot-meter.is-indeterminate #boot-meter-fill {
@@ -177,7 +369,7 @@
                 left: calc(100% + 12px);
                 top: 13px;
                 transform: translateY(-50%);
-                color: #ffccab;
+                color: var(--boot-percent);
                 font-size: 15px;
                 font-variant-numeric: tabular-nums;
                 white-space: nowrap;
@@ -187,7 +379,7 @@
                 display: none;
             }
             #boot-details {
-                color: #a9a4b9;
+                color: var(--boot-details);
                 font-size: 12px;
                 overflow-wrap: anywhere;
                 min-height: 19px;
@@ -204,16 +396,16 @@
             }
             #boot-error {
                 margin-top: 14px;
-                color: #ffb1ae;
+                color: var(--boot-error);
                 overflow-wrap: anywhere;
             }
             #boot-retry {
                 cursor: pointer;
                 padding: 9px 18px;
-                border: 1px solid #f3ad96;
+                border: 1px solid var(--boot-retry-border);
                 border-radius: 6px;
-                background: #402632;
-                color: #fff0e6;
+                background: var(--boot-retry-bg);
+                color: var(--boot-retry-text);
             }
             @media (prefers-reduced-motion: reduce) {
                 .boot-blink {
@@ -244,6 +436,78 @@
                     padding: 4px;
                 }
             }
+            /* Language switch is available even in the standalone loader preview. */
+            [data-language-switch],
+            [data-boot-theme-switch] {
+                display: inline-flex;
+                gap: 3px;
+            }
+            [data-language-switch] button,
+            [data-boot-theme-switch] button {
+                font: inherit;
+                font-size: 11px;
+                font-weight: 600;
+                cursor: pointer;
+                padding: 4px 7px;
+                color: inherit;
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+            }
+            [data-language-switch] button[aria-pressed='true'],
+            [data-boot-theme-switch] button[aria-pressed='true'] {
+                color: var(--boot-live);
+                border-color: var(--boot-meter-border);
+                background: var(--boot-retry-bg);
+            }
+            [data-language-switch] button:focus-visible,
+            [data-boot-theme-switch] button:focus-visible {
+                outline: 2px solid var(--boot-live);
+            }
+            .boot-toolbar {
+                position: absolute;
+                top: max(8px, env(safe-area-inset-top));
+                right: max(12px, env(safe-area-inset-right));
+                z-index: 1;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                color: var(--boot-text);
+            }
+            :root[data-locale-pending] #boot-card [data-i18n],
+            :root[data-locale-pending] #boot-card [data-language-switch],
+            :root[data-locale-pending] #boot-card [data-boot-theme-switch] {
+                visibility: hidden;
+            }
+            @media (max-width: 1050px) {
+                .boot-toolbar {
+                    position: static;
+                    align-self: flex-end;
+                    margin-right: 12px;
+                }
+            }
+            #boot-preview-toggle {
+                font: inherit;
+                font-size: 11px;
+                font-weight: 600;
+                cursor: pointer;
+                padding: 4px 7px;
+                border: 1px solid var(--boot-meter-border);
+                border-radius: 4px;
+                color: var(--boot-live);
+                background: var(--boot-retry-bg);
+            }
+            #boot-preview-toggle[hidden] {
+                display: none;
+            }
+            #boot-preview-toggle:focus-visible {
+                outline: 2px solid var(--boot-live);
+            }
+            .boot-toolbar {
+                flex-wrap: wrap;
+                justify-content: flex-end;
+                max-width: calc(100% - 24px);
+            }
         </style>
         <!-- Noncritical app styles cannot block first paint of the loader. -->
         <link
@@ -258,55 +522,106 @@
             href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
             data-activate-stylesheet
         />
-        <link rel="preload" as="style" href="routes.css?v=0.16.4" data-activate-stylesheet />
+        <link rel="preload" as="style" href="routes.css?v=0.16.17" data-activate-stylesheet />
         <noscript>
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
             <link
                 rel="stylesheet"
                 href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
             />
-            <link rel="stylesheet" href="routes.css?v=0.16.4" />
+            <link rel="stylesheet" href="routes.css?v=0.16.17" />
         </noscript>
         <meta name="transport-config" content="routes-config.json" />
     </head>
     <body>
         <input id="info-collapse" type="checkbox" checked aria-hidden="true" />
-        <div id="map" aria-label="Transport reachability map"></div>
+        <div
+            data-i18n-aria-label="mapAria"
+            id="map"
+            aria-label="Карта транспортной доступности"
+        ></div>
         <div id="boot-overlay" role="status" aria-live="polite" aria-atomic="true">
             <div id="boot-card">
-                <div class="boot-eyebrow">MOSCOW / TRANSPORT REACHABILITY</div>
-                <h1>Building your map<span class="boot-blink">_</span></h1>
+                <div class="boot-toolbar">
+                    <div
+                        data-language-switch
+                        role="group"
+                        data-i18n-aria-label="language"
+                        aria-label="Язык"
+                    >
+                        <button type="button" lang="ru" data-lang="ru" aria-pressed="true">
+                            RU
+                        </button>
+                        <button type="button" lang="en" data-lang="en" aria-pressed="false">
+                            EN
+                        </button>
+                    </div>
+                    <div
+                        data-boot-theme-switch
+                        role="group"
+                        data-i18n-aria-label="bootTheme"
+                        aria-label="Тема"
+                    >
+                        <button
+                            type="button"
+                            data-theme-value="light"
+                            aria-pressed="true"
+                            data-i18n="bootThemeLight"
+                        >
+                            Светлая
+                        </button>
+                        <button
+                            type="button"
+                            data-theme-value="dark"
+                            aria-pressed="false"
+                            data-i18n="bootThemeDark"
+                        >
+                            Темная
+                        </button>
+                    </div>
+                    <button type="button" id="boot-preview-toggle" data-i18n="bootStay" hidden>
+                        Остаться на заставке
+                    </button>
+                </div>
+                <div data-i18n="bootEyebrow" class="boot-eyebrow">
+                    МОСКВА / ТРАНСПОРТНАЯ ДОСТУПНОСТЬ
+                </div>
+                <h1 data-i18n="bootTitle">Загружаем карту<span class="boot-blink">_</span></h1>
                 <div class="boot-network-space">
                     <div id="boot-network-shell" aria-hidden="true">
                         <img
                             id="boot-roads"
-                            src="moscow-major-roads.svg?v=0.16.4"
+                            src="moscow-major-roads.svg?v=0.16.17"
                             alt=""
                             fetchpriority="high"
                         />
                         <canvas id="boot-network" width="900" height="600"></canvas>
                         <div class="boot-network-caption">
-                            <span>
-                                MAJOR ROADS / &copy;
+                            <span data-i18n="majorRoads">
+                                ОСНОВНЫЕ ДОРОГИ / (c)
                                 <a
+                                    data-i18n="osmContributors"
                                     href="https://www.openstreetmap.org/copyright"
                                     target="_blank"
                                     rel="noopener noreferrer"
                                 >
-                                    OpenStreetMap contributors
+                                    Участники OpenStreetMap
                                 </a>
                             </span>
-                            <span class="boot-network-live">NETWORK ACTIVE</span>
+                            <span data-i18n="networkActive" class="boot-network-live">
+                                СЕТЬ АКТИВНА
+                            </span>
                         </div>
                     </div>
                 </div>
-                <div id="boot-stage">INITIALIZING</div>
+                <div data-i18n="initializing" id="boot-stage">ИНИЦИАЛИЗАЦИЯ</div>
                 <div class="boot-progress-line">
                     <div
+                        data-i18n-aria-label="loadingProgress"
                         id="boot-meter"
                         class="boot-meter is-indeterminate"
                         role="progressbar"
-                        aria-label="Map loading progress"
+                        aria-label="Ход загрузки карты"
                         aria-valuemin="0"
                         aria-valuemax="100"
                     >
@@ -314,18 +629,35 @@
                     </div>
                     <b id="boot-percent" hidden></b>
                 </div>
-                <div id="boot-details">Connecting to the data source...</div>
+                <div data-i18n="connecting" id="boot-details">
+                    Подключение к источнику данных...
+                </div>
                 <div id="boot-error" hidden>
                     <p id="boot-error-message"></p>
-                    <button type="button" id="boot-retry">Reload page</button>
+                    <button data-i18n="reload" type="button" id="boot-retry">
+                        Перезагрузить страницу
+                    </button>
                 </div>
             </div>
         </div>
-        <aside id="info" aria-label="Transport reachability controls">
-            <label id="info-handle" for="info-collapse" aria-label="Expand or collapse settings">
+        <aside
+            data-i18n-aria-label="controlsAria"
+            id="info"
+            aria-label="Настройки транспортной доступности"
+        >
+            <label
+                data-i18n-aria-label="expandAria"
+                id="info-handle"
+                for="info-collapse"
+                aria-label="Развернуть или свернуть настройки"
+            >
                 <span id="info-handle-left">
-                    <span id="info-handle-title"> Transport reachability </span>
-                    <span id="info-handle-hint"> Tap to expand or collapse </span>
+                    <span data-i18n="reachabilityTitle" id="info-handle-title">
+                        Транспортная доступность
+                    </span>
+                    <span data-i18n="expandHint" id="info-handle-hint">
+                        Нажмите, чтобы развернуть или свернуть
+                    </span>
                 </span>
                 <span id="info-arrow" aria-hidden="true">
                     <svg
@@ -343,40 +675,87 @@
             <div id="info-content">
                 <div class="info-intro">
                     <div class="info-heading-row">
-                        <div id="info-title">Transport reachability</div>
+                        <div data-i18n="reachabilityTitle" id="info-title">
+                            Транспортная доступность
+                        </div>
                         <button
+                            data-i18n-title="resetTitle"
+                            data-i18n-aria-label="resetAria"
                             id="reset-origin"
                             type="button"
-                            title="Clear the selected start point and route"
-                            aria-label="Clear selected start point and route"
+                            title="Сбросить начальную точку и маршрут"
+                            aria-label="Сбросить начальную точку и маршрут"
                             disabled
                         >
                             <svg viewBox="0 0 24 24" aria-hidden="true">
                                 <circle cx="12" cy="12" r="9"></circle>
                                 <path d="M9 9l6 6m0-6-6 6"></path>
                             </svg>
-                            <span>Reset</span>
+                            <span data-i18n="reset">Сброс</span>
                         </button>
                     </div>
-                    <div class="info-row">
-                        Click once for a start point. Double-click anywhere for route to any point
-                        while keeping reachability mode.
+                    <div data-i18n="instructions" class="info-row">
+                        Один клик - начальная точка. Двойной клик - маршрут до выбранной точки без
+                        выхода из режима доступности.
                     </div>
-                    <div class="project-version">v0.16.4</div>
-                    <div
-                        id="timing-status"
-                        role="status"
-                        style="font-size: 12px; color: #64748b; margin-top: 5px"
-                    >
-                        Ready
+                    <div class="language-control">
+                        <span data-i18n="language">Язык</span>
+                        <div
+                            data-language-switch
+                            role="group"
+                            data-i18n-aria-label="language"
+                            aria-label="Язык"
+                        >
+                            <button type="button" lang="ru" data-lang="ru" aria-pressed="true">
+                                RU
+                            </button>
+                            <button type="button" lang="en" data-lang="en" aria-pressed="false">
+                                EN
+                            </button>
+                        </div>
                     </div>
+                    <div class="language-control">
+                        <span data-i18n="bootTheme">Тема</span>
+                        <div
+                            data-boot-theme-switch
+                            role="group"
+                            data-i18n-aria-label="bootTheme"
+                            aria-label="Тема"
+                        >
+                            <button
+                                type="button"
+                                data-theme-value="light"
+                                aria-pressed="true"
+                                data-i18n="bootThemeLight"
+                            >
+                                Светлая
+                            </button>
+                            <button
+                                type="button"
+                                data-theme-value="dark"
+                                aria-pressed="false"
+                                data-i18n="bootThemeDark"
+                            >
+                                Темная
+                            </button>
+                        </div>
+                    </div>
+                    <div class="project-version">v0.16.17</div>
+                    <div data-i18n="ready" id="timing-status" role="status">Готово</div>
                 </div>
                 <div class="control" id="transport-modes">
                     <div class="control-label">
-                        <span id="transport-modes-heading">Transport modes</span>
+                        <span data-i18n="modeHeading" id="transport-modes-heading">
+                            Виды транспорта
+                        </span>
                     </div>
-                    <div class="mode-grid" role="group" aria-label="Transport modes">
-                        <label class="mode-option" title="19.2 km/h">
+                    <div
+                        data-i18n-aria-label="modeHeading"
+                        class="mode-grid"
+                        role="group"
+                        aria-label="Виды транспорта"
+                    >
+                        <label data-i18n-title="speedBus" class="mode-option" title="19,2 км/ч">
                             <input class="mode-input" type="checkbox" value="bus" checked />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -387,10 +766,10 @@
                                     <path d="M16 15h.01" />
                                     <path d="M8 7h8" />
                                 </svg>
-                                <span data-mode-name="bus">Bus</span>
+                                <span data-i18n="bus" data-mode-name="bus"> Автобус </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="18 km/h">
+                        <label data-i18n-title="speedTram" class="mode-option" title="18 км/ч">
                             <input class="mode-input" type="checkbox" value="tram" checked />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -401,10 +780,14 @@
                                     <path d="M8 15h.01" />
                                     <path d="M16 15h.01" />
                                 </svg>
-                                <span data-mode-name="tram">Tram</span>
+                                <span data-i18n="tram" data-mode-name="tram"> Трамвай </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="16.8 km/h">
+                        <label
+                            data-i18n-title="speedTrolleybus"
+                            class="mode-option"
+                            title="16,8 км/ч"
+                        >
                             <input class="mode-input" type="checkbox" value="trolleybus" checked />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -415,19 +798,21 @@
                                     <path d="M8 16h.01" />
                                     <path d="M16 16h.01" />
                                 </svg>
-                                <span data-mode-name="trolleybus">Trolleybus</span>
+                                <span data-i18n="trolleybus" data-mode-name="trolleybus">
+                                    Троллейбус
+                                </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="37.8 km/h">
+                        <label data-i18n-title="speedMetro" class="mode-option" title="37,8 км/ч">
                             <input class="mode-input" type="checkbox" value="metro" />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
                                     <path d="M4 20V5l8 10 8-10v15M2 21h20" />
                                 </svg>
-                                <span data-mode-name="metro">Metro</span>
+                                <span data-i18n="metro" data-mode-name="metro"> Метро </span>
                             </span>
                         </label>
-                        <label class="mode-option" title="46.8 km/h">
+                        <label data-i18n-title="speedMcc" class="mode-option" title="46,8 км/ч">
                             <input class="mode-input" type="checkbox" value="mcc" />
                             <span class="mode-pill">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -439,12 +824,13 @@
                                     <path d="M16 15h.01" />
                                     <circle cx="12" cy="12" r="8" stroke-dasharray="2 6" />
                                 </svg>
-                                <span data-mode-name="mcc">MCC</span>
+                                <span data-i18n="mcc" data-mode-name="mcc"> МЦК </span>
                             </span>
                         </label>
                         <label
+                            data-i18n-title="railHint"
                             class="mode-option"
-                            title="MCD and suburban rail; separate train services"
+                            title="МЦД и пригородные поезда; отдельные железнодорожные маршруты"
                         >
                             <input class="mode-input" type="checkbox" value="rail" />
                             <span class="mode-pill">
@@ -453,40 +839,47 @@
                                     <path d="M4 12h16M7 7h10M8 19l-2 3m10-3 2 3" />
                                     <path d="M8 15h.01M16 15h.01" />
                                 </svg>
-                                <span data-mode-name="rail">MCD + Electric Trains</span>
+                                <span data-i18n="rail" data-mode-name="rail">
+                                    МЦД + электрички
+                                </span>
                             </span>
                         </label>
                     </div>
-                    <div class="mode-hint" id="transport-modes-hint">
-                        Surface transport is on by default. Speeds are estimates.
+                    <div data-i18n="modeHint" class="mode-hint" id="transport-modes-hint">
+                        Наземный транспорт включён по умолчанию. Скорости приблизительные.
                     </div>
                 </div>
                 <div class="control">
                     <div class="control-label">
-                        <label for="walk-time">Max walking time</label>
+                        <label data-i18n="maxWalk" for="walk-time">
+                            Максимальное время пешком
+                        </label>
                         <b id="walk-time-value"></b>
                     </div>
                     <input id="walk-time" type="range" min="1" max="15" step="1" value="5" />
                     <div class="range-scale range-scale-walk">
-                        <span>1 min</span>
+                        <span data-i18n="min1">1 мин</span>
                         <span>5</span>
                         <span>10</span>
-                        <span>15 min</span>
+                        <span data-i18n="min15">15 мин</span>
                     </div>
                 </div>
                 <div class="control">
                     <div class="control-label">
-                        <label id="transfer-label" for="transfer-count"> Transfers </label>
-                        <b id="transfer-mode-value">No transfers</b>
+                        <label data-i18n="transfers" id="transfer-label" for="transfer-count">
+                            Пересадки
+                        </label>
+                        <b data-i18n="noTransfers" id="transfer-mode-value"> Без пересадок </b>
                     </div>
                     <input
+                        data-i18n-aria-label="transferAria"
                         id="transfer-count"
                         type="range"
                         min="0"
                         max="2"
                         step="1"
                         value="0"
-                        aria-label="Maximum number of transfers"
+                        aria-label="Максимальное количество пересадок"
                     />
                     <div class="range-scale range-scale-transfer">
                         <span>0</span>
@@ -496,28 +889,33 @@
                 </div>
                 <div class="control">
                     <div class="control-label">
-                        <label for="travel-time-limit">Travel time limit</label>
-                        <b id="travel-time-limit-value">60 min</b>
+                        <label data-i18n="travelLimit" for="travel-time-limit">
+                            Ограничение времени в пути
+                        </label>
+                        <b data-i18n="min60" id="travel-time-limit-value"> 60 мин </b>
                     </div>
                     <input
+                        data-i18n-aria-label="timeAria"
                         id="travel-time-limit"
                         type="range"
                         min="0"
                         max="185"
                         step="5"
                         value="60"
-                        aria-label="Maximum total travel time"
+                        aria-label="Максимальное общее время в пути"
                     />
                     <div class="range-scale range-scale-time">
                         <span>0</span>
                         <span>60</span>
                         <span>120</span>
-                        <span>No limit</span>
+                        <span data-i18n="noLimit">Без ограничений</span>
                     </div>
                 </div>
                 <div class="control">
                     <div class="control-label">
-                        <label for="circle-opacity">Walking paths opacity</label>
+                        <label data-i18n="opacity" for="circle-opacity">
+                            Прозрачность пешеходных путей
+                        </label>
                         <b id="circle-opacity-value"></b>
                     </div>
                     <input id="circle-opacity" type="range" min="0" max="100" step="1" value="50" />
@@ -527,78 +925,81 @@
                         <span>100%</span>
                     </div>
                 </div>
-                <div class="note">
-                    Walking access uses OSM pedestrian paths, with estimated speed 80 m/min.
-                    Unmapped connections are excluded.
+                <div data-i18n="walkNote" class="note">
+                    Пеший доступ рассчитывается по путям OSM со скоростью 80 м/мин. Отсутствующие на
+                    карте связи исключаются.
                 </div>
                 <div id="analysis-summary">
-                    <div class="analysis-title">Reachability</div>
+                    <div data-i18n="reachability" class="analysis-title">Доступность</div>
                     <div class="info-row">
-                        <span>Nearby stops</span>
+                        <span data-i18n="nearbyStops"> Ближайшие остановки </span>
                         <b id="nearby-count">0</b>
                     </div>
                     <div class="info-row">
-                        <span>Direct routes</span>
+                        <span data-i18n="directRoutes"> Прямые маршруты </span>
                         <b id="direct-route-count">0</b>
                     </div>
                     <div class="info-row">
-                        <span>Without transfers</span>
-                        <span class="analysis-value"> <b id="direct-stop-count">0</b> stops </span>
-                    </div>
-                    <div class="info-row">
-                        <span>One-transfer routes</span>
-                        <b id="transfer-route-count">0</b>
-                    </div>
-                    <div class="info-row">
-                        <span>With one transfer only</span>
-                        <span class="analysis-value">
-                            <b id="transfer-stop-count">0</b> stops
+                        <span data-i18n="withoutTransfers"> Без пересадок </span>
+                        <span data-i18n="stopsShort" class="analysis-value">
+                            <b id="direct-stop-count">0</b> ост.
                         </span>
                     </div>
                     <div class="info-row">
-                        <span>Two-transfer routes</span>
+                        <span data-i18n="oneTransferRoutes"> Маршруты с одной пересадкой </span>
+                        <b id="transfer-route-count">0</b>
+                    </div>
+                    <div class="info-row">
+                        <span data-i18n="oneTransferOnly"> Только с одной пересадкой </span>
+                        <span data-i18n="stopsShort" class="analysis-value">
+                            <b id="transfer-stop-count">0</b> ост.
+                        </span>
+                    </div>
+                    <div class="info-row">
+                        <span data-i18n="twoTransferRoutes"> Маршруты с двумя пересадками </span>
                         <b id="two-transfer-route-count">0</b>
                     </div>
                     <div class="info-row">
-                        <span>With two transfers only</span>
-                        <span class="analysis-value">
-                            <b id="two-transfer-stop-count">0</b> stops
+                        <span data-i18n="twoTransferOnly"> Только с двумя пересадками </span>
+                        <span data-i18n="stopsShort" class="analysis-value">
+                            <b id="two-transfer-stop-count">0</b> ост.
                         </span>
                     </div>
                     <div id="routes"></div>
                 </div>
                 <div id="trip-panel" hidden>
-                    <div id="trip-title" class="trip-title">Trip</div>
-                    <button id="trip-back-top" type="button">Back</button>
+                    <div data-i18n="tripTitle" id="trip-title" class="trip-title">Поездка</div>
+                    <button data-i18n="back" id="trip-back-top" type="button">Назад</button>
                     <div id="trip-alternatives"></div>
                     <div id="trip-steps"></div>
-                    <button id="trip-back" type="button">Back</button>
+                    <button data-i18n="back" id="trip-back" type="button">Назад</button>
                 </div>
             </div>
         </aside>
-        <div id="legend" aria-label="Map legend">
-            <div class="legend-title">Map</div>
+        <div data-i18n-aria-label="legendAria" id="legend" aria-label="Легенда карты">
+            <div data-i18n="map" class="legend-title">Карта</div>
             <div class="legend-row">
                 <span class="legend-origin" aria-hidden="true">x</span>
                 <span id="legend-origin-text"></span>
             </div>
             <div class="legend-row">
                 <span class="legend-coverage-direct" aria-hidden="true">x</span>
-                <span>without transfers</span>
+                <span data-i18n="legendDirect">без пересадок</span>
             </div>
             <div class="legend-row">
                 <span class="legend-coverage-transfer" aria-hidden="true">x</span>
-                <span>with one transfer</span>
+                <span data-i18n="legendOne">с одной пересадкой</span>
             </div>
             <div class="legend-row">
                 <span class="legend-coverage-two-transfer" aria-hidden="true">x</span>
-                <span>with two transfers</span>
+                <span data-i18n="legendTwo">с двумя пересадками</span>
             </div>
             <div class="legend-row">
                 <span class="legend-route" aria-hidden="true">x</span>
-                <span>reachable routes</span>
+                <span data-i18n="legendRoutes">доступные маршруты</span>
             </div>
         </div>
-        <script src="boot-loader.js?v=0.16.4" data-map-script="routes.js?v=0.16.4" defer></script>
+        <script src="i18n.js?v=0.16.17" defer></script>
+        <script src="boot-loader.js?v=0.16.17" data-map-script="routes.js?v=0.16.17" defer></script>
     </body>
 </html>
