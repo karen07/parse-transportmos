@@ -4,7 +4,7 @@
         <meta charset="utf-8" />
         <meta name="referrer" content="strict-origin" />
         <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-        <meta name="application-version" content="0.16.17" />
+        <meta name="application-version" content="0.16.22" />
         <title data-i18n="pageTitle">Транспортная доступность Москвы</title>
         <meta name="theme-color" content="#ffffff" />
         <script>
@@ -118,17 +118,17 @@
                 };
             })();
         </script>
-        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.16.17" />
-        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.16.17" />
-        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.16.17" />
-        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.16.17" />
+        <link rel="icon" type="image/x-icon" href="favicon.ico?v=0.16.22" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=0.16.22" />
+        <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=0.16.22" />
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=0.16.22" />
         <!-- First paint uses inline critical CSS and a local SVG. -->
         <style>
             /* Critical palette, also used by the empty map before external CSS loads. */
             :root {
                 color-scheme: light;
                 --boot-bg: #ffffff;
-                --map-bg: #f5f3ef;
+                --map-bg: #f7f7f4;
                 --boot-text: #292c36;
                 --boot-eyebrow: #67556d;
                 --boot-title: #302a35;
@@ -522,14 +522,14 @@
             href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
             data-activate-stylesheet
         />
-        <link rel="preload" as="style" href="routes.css?v=0.16.17" data-activate-stylesheet />
+        <link rel="preload" as="style" href="routes.css?v=0.16.22" data-activate-stylesheet />
         <noscript>
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
             <link
                 rel="stylesheet"
                 href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
             />
-            <link rel="stylesheet" href="routes.css?v=0.16.17" />
+            <link rel="stylesheet" href="routes.css?v=0.16.22" />
         </noscript>
         <meta name="transport-config" content="routes-config.json" />
     </head>
@@ -591,7 +591,7 @@
                     <div id="boot-network-shell" aria-hidden="true">
                         <img
                             id="boot-roads"
-                            src="moscow-major-roads.svg?v=0.16.17"
+                            src="moscow-major-roads.svg?v=0.16.22"
                             alt=""
                             fetchpriority="high"
                         />
@@ -740,7 +740,7 @@
                             </button>
                         </div>
                     </div>
-                    <div class="project-version">v0.16.17</div>
+                    <div class="project-version">v0.16.22</div>
                     <div data-i18n="ready" id="timing-status" role="status">Готово</div>
                 </div>
                 <div class="control" id="transport-modes">
@@ -913,12 +913,10 @@
                 </div>
                 <div class="control">
                     <div class="control-label">
-                        <label data-i18n="opacity" for="circle-opacity">
-                            Прозрачность пешеходных путей
-                        </label>
+                        <label data-i18n="opacity" for="circle-opacity"> Непрозрачность зон </label>
                         <b id="circle-opacity-value"></b>
                     </div>
-                    <input id="circle-opacity" type="range" min="0" max="100" step="1" value="50" />
+                    <input id="circle-opacity" type="range" min="0" max="100" step="1" value="75" />
                     <div class="range-scale range-scale-opacity">
                         <span>0%</span>
                         <span>50%</span>
@@ -999,7 +997,7 @@
                 <span data-i18n="legendRoutes">доступные маршруты</span>
             </div>
         </div>
-        <script src="i18n.js?v=0.16.17" defer></script>
-        <script src="boot-loader.js?v=0.16.17" data-map-script="routes.js?v=0.16.17" defer></script>
+        <script src="i18n.js?v=0.16.22" defer></script>
+        <script src="boot-loader.js?v=0.16.22" data-map-script="routes.js?v=0.16.22" defer></script>
     </body>
 </html>

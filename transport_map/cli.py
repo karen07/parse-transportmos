@@ -137,7 +137,7 @@ def parse_args():
     parser.add_argument("--walk-minutes", type=float, default=5.0)
     parser.add_argument("--walk-speed", type=float, default=80.0)
     parser.add_argument("--grid-size", type=float, default=400.0)
-    parser.add_argument("--circle-opacity", type=float, default=50.0)
+    parser.add_argument("--circle-opacity", type=float, default=None)
     parser.add_argument(
         "--mkad-buffer-km",
         type=float,
@@ -183,7 +183,7 @@ def parse_args():
             parser.error(f"--{name.replace('_', '-')} must be greater than zero")
     if not 0 <= args.mkad_buffer_km <= 50:
         parser.error("--mkad-buffer-km must be between 0 and 50")
-    if not 0 <= args.circle_opacity <= 100:
+    if args.circle_opacity is not None and not 0 <= args.circle_opacity <= 100:
         parser.error("--circle-opacity must be between 0 and 100")
     if not 100 <= args.audit_rail_radius <= 2500:
         parser.error("--audit-rail-radius must be between 100 and 2500")
@@ -289,6 +289,8 @@ def main():
             opacity = old_constant(
                 r'id="circle-opacity"[^>]*?value="([0-9.]+)"', old_html
             )
+        if args.circle_opacity is not None:
+            opacity = args.circle_opacity
         print("[build] Refreshing page assets; keeping existing OSM data", flush=True)
         html = build_html(
             packed,
@@ -308,6 +310,8 @@ def main():
             flush=True,
         )
         print("[station] This does NOT establish public access rights.", flush=True)
+    if args.circle_opacity is None:
+        args.circle_opacity = 75.0
     render_page(args.output, args.walk_minutes, args.walk_speed, args.circle_opacity)
     print("[build] HTML template validated", flush=True)
     phase_started = time.monotonic()

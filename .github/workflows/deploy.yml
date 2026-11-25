@@ -12,18 +12,18 @@ concurrency:
   group: github-pages
   cancel-in-progress: false
 jobs:
-  deploy:
-    name: Deploy to GitHub Pages
+  prepare:
+    name: Prepare website
     if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
     runs-on: ubuntu-24.04
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       - name: Validate website
         run: |
           test -s site/routes.html
@@ -44,10 +44,53 @@ jobs:
           gzip -t site/routes.json.gz
       - name: Prepare website
         run: cp site/routes.html site/index.html
+      - name: Set artifact name
+        id: artifact
+        run: echo "name=github-pages-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - name: Upload website
-        uses: actions/upload-pages-artifact@v4
+        id: upload
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site/
+          name: ${{ steps.artifact.outputs.name }}
+          retention-days: 7
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Wait for artifact metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact_name }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          test -n "$ARTIFACT_NAME"
+          for attempt in $(seq 1 24); do
+            result=$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+              -f name="$ARTIFACT_NAME" \
+              --jq '.artifacts[] | select(.expired == false) | .id' || true)
+            if [ "$result" = "$ARTIFACT_ID" ]; then
+              echo "Artifact $ARTIFACT_NAME ($ARTIFACT_ID) is visible"
+              exit 0
+            fi
+            echo "Waiting for artifact metadata ($attempt/24)"
+            sleep 5
+          done
+          echo "::error::Uploaded artifact did not become visible via the REST API"
+          exit 1
       - name: Deploy website
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
+        with:
+          artifact_name: ${{ needs.prepare.outputs.artifact_name }}

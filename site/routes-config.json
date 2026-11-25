@@ -1,5 +1,5 @@
 {
-    "version": "0.16.17",
+    "version": "0.16.22",
     "boot_view": {
         "lat": 55.752,
         "lon": 37.62,
@@ -14,5 +14,5 @@
     "origin_lat": 55.744308,
     "infer_through_service": true,
     "initial_walk_minutes": 5.0,
-    "initial_opacity": 50.0
+    "initial_opacity": 75.0
 }

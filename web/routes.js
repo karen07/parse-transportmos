@@ -8,8 +8,8 @@ function readShareState(params) {
         const value = Number(raw);
         return Number.isFinite(value) && value >= min && value <= max ? value : null;
     }
-    function point(latKey, lonKey, maxLat = 90) {
-        const lat = number(latKey, -maxLat, maxLat);
+    function point(latKey, lonKey) {
+        const lat = number(latKey, -90, 90);
         const lon = number(lonKey, -180, 180);
         return lat === null || lon === null ? null : { lat, lon };
     }
@@ -25,8 +25,6 @@ function readShareState(params) {
     return {
         origin,
         target: origin ? point('to_lat', 'to_lon') : null,
-        camera: point('map_lat', 'map_lon', 85.05113),
-        zoom: number('zoom', 1, 22),
         modes: modeList && modeList.every((mode) => allowedModes.includes(mode)) ? modeList : null,
         walk: integer('walk', 1, 15),
         transfers: integer('transfers', 0, 2),
@@ -51,8 +49,8 @@ function writeShareState(url, state) {
     }
     point('lat', 'lon', state.origin);
     point('to_lat', 'to_lon', state.target);
-    point('map_lat', 'map_lon', state.camera);
-    set('zoom', state.zoom.toFixed(4));
+    // Remove obsolete camera parameters from links created by older versions.
+    for (const key of ['map_lat', 'map_lon', 'zoom']) params.delete(key);
     set('modes', state.modes.join(','));
     set('walk', state.walk);
     set('transfers', state.transfers);
@@ -138,6 +136,37 @@ async function loadMapLibraries() {
         () => !!window.L.maplibreGL,
     );
 }
+
+const RAIL_ROUTE_MIN_ZOOM = 12.0;
+const SURFACE_ROUTE_MIN_ZOOM = 13.5;
+const STOP_MIN_ZOOM = 15.0;
+const ROUTE_LABEL_MIN_ZOOM = 15.5;
+
+function zoomFade(zoom, minimum) {
+    return Math.max(0, Math.min(1, zoom - minimum));
+}
+
+function coverageWidthForZoom(zoom) {
+    const stops = [
+        [11, 10],
+        [12, 8],
+        [13, 6],
+        [14, 5],
+        [15, 4],
+        [16, 3],
+    ];
+    if (zoom <= stops[0][0]) return stops[0][1];
+    for (let i = 1; i < stops.length; ++i) {
+        const [z, width] = stops[i];
+        if (zoom <= z) {
+            const [prevZ, prevWidth] = stops[i - 1];
+            return prevWidth + ((width - prevWidth) * (zoom - prevZ)) / (z - prevZ);
+        }
+    }
+    return 3;
+}
+const ROUTE_LINE_WIDTHS = [3.2, 2.2, 1.7];
+const ROUTE_LINE_OPACITIES = [0.72, 0.38, 0.26];
 
 // One-shot browser geolocation. Invalidating the token ignores callbacks from
 // a request superseded by a manual selection or a second button press.
@@ -605,10 +634,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         const width = bootRoads.getBoundingClientRect().width;
         if (width <= 0) return;
         const zoom = Math.max(1, Math.min(18, Math.log2(width / zoomZeroWidth)));
-        const center = initialShare.camera || initialShare.origin;
-        map.setView(center ? [center.lat, center.lon] : bootCenter, initialShare.zoom ?? zoom, {
-            animate: false,
-        });
+        map.setView(bootCenter, zoom, { animate: false });
     }
     syncBootCamera();
     const bootCameraObserver = new ResizeObserver(syncBootCamera);
@@ -620,12 +646,9 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         if (!shareReady) return;
         clearTimeout(shareTimer);
         shareTimer = null;
-        const center = map.wrapLatLng(map.getCenter());
         const url = writeShareState(new URL(location.href), {
             origin: selectedPoint,
             target: targetPoint,
-            camera: { lat: center.lat, lon: center.lng },
-            zoom: map.getZoom(),
             modes: modeInputs.filter((input) => input.checked).map((input) => input.value),
             walk: Number(walkTimeInput.value),
             transfers: Number(transferCountInput.value),
@@ -660,8 +683,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     createMapPane('coveragePane', 410, 'none');
+    createMapPane('routeOutlinePane', 419, 'none');
     createMapPane('routePane', 420, 'none');
     createMapPane('tripWalkPane', 430, 'none');
+    createMapPane('tripOutlinePane', 439, 'none');
     createMapPane('tripRoutePane', 440, 'none');
     createMapPane('stopPane', 650, 'auto');
     createMapPane('tripMarkerPane', 660, 'auto');
@@ -727,22 +752,32 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     );
 
     const themedRouteKeys = new WeakMap();
+    const routeOutlineLayers = L.layerGroup().addTo(map);
     const twoTransferRouteLayer = L.layerGroup().addTo(map);
     const transferRouteLayer = L.layerGroup().addTo(map);
     const directRouteLayer = L.layerGroup().addTo(map);
     const stopLayer = L.layerGroup().addTo(map);
-    // One low-overhead route canvas per transfer tier. Edges arrive directly
-    // from the RAPTOR scan, rather than waiting for the final route summary.
-    const routeCanvases = Array.from({ length: 3 }, (_, tier) => {
+    // Separate rail and surface canvases allow uniform opacity even where
+    // multiple edges overlap. Each pair still belongs to one transfer tier.
+    const routeCanvases = Array.from({ length: 6 }, (_, index) => {
+        const tier = Math.floor(index / 2);
         const canvas = document.createElement('canvas');
         canvas.style.position = 'absolute';
         canvas.style.pointerEvents = 'none';
         canvas.style.zIndex = String(3 - tier);
-        canvas.style.opacity = String([0.85, 0.48, 0.34][tier]);
+        canvas.style.opacity = '0';
         map.getPane('routePane').appendChild(canvas);
         return canvas;
     });
     const routeContexts = routeCanvases.map((canvas) => canvas.getContext('2d', { alpha: true }));
+    const routeLabelCanvas = document.createElement('canvas');
+    routeLabelCanvas.style.position = 'absolute';
+    routeLabelCanvas.style.pointerEvents = 'none';
+    routeLabelCanvas.style.zIndex = '5';
+    map.getPane('routePane').appendChild(routeLabelCanvas);
+    const routeLabelContext = routeLabelCanvas.getContext('2d');
+    const routeLabelCells = new Set();
+    const routeLabelKeys = new Set();
     const stopCanvas = document.createElement('canvas');
     stopCanvas.style.position = 'absolute';
     stopCanvas.style.pointerEvents = 'none';
@@ -762,6 +797,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     const originLayer = L.layerGroup().addTo(map);
     const tripWalkLayer = L.layerGroup().addTo(map);
     const tripRouteLayer = L.layerGroup().addTo(map);
+    const tripOutlineLayer = L.layerGroup().addTo(map);
     const tripMarkerLayer = L.layerGroup().addTo(map);
 
     function escapeHtml(value) {
@@ -793,8 +829,35 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             hash |= 0;
         }
 
-        const lightness = onMap && transportBootTheme.dark ? 64 : 42;
-        return 'hsl(' + (Math.abs(hash) % 360) + ',70%,' + lightness + '%)';
+        const saturation = onMap ? 85 : 80;
+        const lightness = onMap ? (transportBootTheme.dark ? 60 : 37) : 38;
+        return 'hsl(' + (Math.abs(hash) % 360) + ',' + saturation + '%,' + lightness + '%)';
+    }
+
+    function routeOutlineColor() {
+        return transportBootTheme.dark ? '#101318' : '#ffffff';
+    }
+
+    function routeModeOf(routeKey) {
+        const route = routes[routeKey];
+        return route ? route.mode || route.route || 'bus' : 'bus';
+    }
+
+    function isRailRouteMode(mode) {
+        return ['metro', 'mcc', 'mcd', 'train', 'rail', 'subway', 'light_rail'].includes(mode);
+    }
+
+    function shouldShowStopDots() {
+        return zoomFade(map.getZoom(), STOP_MIN_ZOOM) > 0;
+    }
+
+    function routeFade(routeKey) {
+        const rail = isRailRouteMode(routeModeOf(routeKey));
+        return zoomFade(map.getZoom(), rail ? RAIL_ROUTE_MIN_ZOOM : SURFACE_ROUTE_MIN_ZOOM);
+    }
+
+    function shouldShowBackgroundRoute(routeKey) {
+        return routeFade(routeKey) > 0;
     }
 
     function updateTargetControls() {
@@ -1412,6 +1475,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         originWalkingLines = [];
         coverageState = null;
         clearCoverageOverlay();
+        routeOutlineLayers.clearLayers();
         twoTransferRouteLayer.clearLayers();
         transferRouteLayer.clearLayers();
         directRouteLayer.clearLayers();
@@ -1419,6 +1483,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         originLayer.clearLayers();
         tripWalkLayer.clearLayers();
         tripRouteLayer.clearLayers();
+        tripOutlineLayer.clearLayers();
         tripMarkerLayer.clearLayers();
         displayedStopIndexes.clear();
         cancelStopCanvasRedraw();
@@ -1494,8 +1559,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         const color = routeColor(routeKey, true);
         const routeLayers = [directRouteLayer, transferRouteLayer, twoTransferRouteLayer];
         const targetLayer = routeLayers[transferCount];
-        const weights = [4, 2.8, 2.2];
-        const opacities = [0.85, 0.48, 0.34];
+        const weights = ROUTE_LINE_WIDTHS;
+        const opacities = ROUTE_LINE_OPACITIES;
         const accessLabels = ['accessDirect', 'accessTransfer', 'accessTwoTransfers'];
 
         for (const segment of reachableSegments.values()) {
@@ -1512,13 +1577,22 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 geometry: geometry,
             };
 
+            if (isFocusedRoute(routeKey, transferCount)) {
+                L.geoJSON(feature, {
+                    pane: 'routeOutlinePane',
+                    interactive: false,
+                    style: { color: routeOutlineColor(), weight: 9, opacity: 1 },
+                }).addTo(routeOutlineLayers);
+            }
             const layer = L.geoJSON(feature, {
                 pane: 'routePane',
                 interactive: false,
                 style: {
                     color: color,
-                    weight: weights[transferCount],
-                    opacity: opacities[transferCount],
+                    weight: isFocusedRoute(routeKey, transferCount) ? 5 : weights[transferCount],
+                    opacity: isFocusedRoute(routeKey, transferCount)
+                        ? 1
+                        : opacities[transferCount] * routeFade(routeKey),
                 },
             });
 
@@ -1539,6 +1613,9 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
             themedRouteKeys.set(layer, routeKey);
             layer.addTo(targetLayer);
+            if (isFocusedRoute(routeKey, transferCount) || shouldShowBackgroundRoute(routeKey)) {
+                paintRouteLabel(routeKey, geometry);
+            }
         }
     }
 
@@ -1565,24 +1642,45 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         routeCanvasOrigin = map.containerPointToLayerPoint([0, 0]);
         routeCanvasBounds = map.getBounds().pad(0.05);
         routeCanvasScale = scale;
-        for (let tier = 0; tier < 3; ++tier) {
-            const canvas = routeCanvases[tier];
+        L.DomUtil.setPosition(routeLabelCanvas, routeCanvasOrigin);
+        routeLabelCanvas.style.width = size.x + 'px';
+        routeLabelCanvas.style.height = size.y + 'px';
+        routeLabelCanvas.style.opacity = String(zoomFade(map.getZoom(), ROUTE_LABEL_MIN_ZOOM));
+        routeLabelCanvas.width = width;
+        routeLabelCanvas.height = height;
+        routeLabelContext.setTransform(scale, 0, 0, scale, 0, 0);
+        for (let index = 0; index < routeCanvases.length; ++index) {
+            const tier = Math.floor(index / 2);
+            const canvas = routeCanvases[index];
+            const fade = zoomFade(
+                map.getZoom(),
+                index % 2 === 0 ? RAIL_ROUTE_MIN_ZOOM : SURFACE_ROUTE_MIN_ZOOM,
+            );
+            canvas.style.opacity = String(ROUTE_LINE_OPACITIES[tier] * fade);
             canvas.style.width = size.x + 'px';
             canvas.style.height = size.y + 'px';
             L.DomUtil.setPosition(canvas, routeCanvasOrigin);
             if (canvas.width !== width) canvas.width = width;
             if (canvas.height !== height) canvas.height = height;
-            routeContexts[tier].setTransform(scale, 0, 0, scale, 0, 0);
-            routeContexts[tier].lineWidth = [4, 2.8, 2.2][tier];
-            routeContexts[tier].lineCap = 'round';
-            routeContexts[tier].lineJoin = 'round';
+            routeContexts[index].setTransform(scale, 0, 0, scale, 0, 0);
+            routeContexts[index].lineWidth = ROUTE_LINE_WIDTHS[tier];
+            routeContexts[index].lineCap = 'round';
+            routeContexts[index].lineJoin = 'round';
         }
     }
 
     function clearRouteCanvasPixels() {
-        for (let tier = 0; tier < 3; ++tier) {
-            const canvas = routeCanvases[tier];
-            const ctx = routeContexts[tier];
+        routeLabelContext.clearRect(
+            0,
+            0,
+            routeLabelCanvas.width / routeCanvasScale,
+            routeLabelCanvas.height / routeCanvasScale,
+        );
+        routeLabelCells.clear();
+        routeLabelKeys.clear();
+        for (let index = 0; index < routeCanvases.length; ++index) {
+            const canvas = routeCanvases[index];
+            const ctx = routeContexts[index];
             ctx.save();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1636,7 +1734,52 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         }
     }
 
+    function paintRouteLabel(routeKey, geometry) {
+        if (
+            routeCanvasZooming ||
+            zoomFade(map.getZoom(), ROUTE_LABEL_MIN_ZOOM) <= 0 ||
+            routeLabelKeys.has(routeKey)
+        )
+            return;
+        const ref = routes[routeKey]?.ref;
+        if (!ref || String(ref).length > 16) return;
+        const ctx = routeLabelContext;
+        const size = map.getSize();
+        ctx.font = 'bold 11px sans-serif';
+        const width = ctx.measureText(String(ref)).width + 12;
+        for (const line of geometryLines(geometry)) {
+            for (const coord of line) {
+                const pt = map.latLngToLayerPoint([coord[1], coord[0]]);
+                const x = pt.x - routeCanvasOrigin.x;
+                const y = pt.y - routeCanvasOrigin.y;
+                if (x < width || x > size.x - width || y < 12 || y > size.y - 12) continue;
+                const cells = [];
+                for (
+                    let cx = Math.floor((x - width / 2 - 6) / 32);
+                    cx <= Math.floor((x + width / 2 + 6) / 32);
+                    ++cx
+                ) {
+                    for (let cy = Math.floor((y - 13) / 24); cy <= Math.floor((y + 13) / 24); ++cy)
+                        cells.push(cx + ':' + cy);
+                }
+                if (cells.some((cell) => routeLabelCells.has(cell))) continue;
+                for (const cell of cells) routeLabelCells.add(cell);
+                routeLabelKeys.add(routeKey);
+                ctx.fillStyle = routeOutlineColor();
+                ctx.fillRect(x - width / 2 - 1, y - 9, width + 2, 18);
+                ctx.fillStyle = routeColor(routeKey, true);
+                ctx.fillRect(x - width / 2, y - 8, width, 16);
+                ctx.fillStyle = transportBootTheme.dark ? '#101318' : '#ffffff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(String(ref), x, y);
+                return;
+            }
+        }
+    }
+
     function paintOneRouteEdge(item, tier) {
+        if (!shouldShowBackgroundRoute(item.routeKey)) return;
         const part = {
             direction: item.direction,
             startPos: item.pos - 1,
@@ -1646,7 +1789,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             routeSinglePartGeometry(part) ||
             stopChainGeometry(item.direction, part.startPos, part.endPos);
         if (!geometry) return;
-        const ctx = routeContexts[tier];
+        const rail = isRailRouteMode(routeModeOf(item.routeKey));
+        const ctx = routeContexts[tier * 2 + (rail ? 0 : 1)];
         ctx.strokeStyle = routeColor(item.routeKey, true);
         ctx.beginPath();
         let visible = false;
@@ -1681,7 +1825,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             }
             visible = true;
         }
-        if (visible) ctx.stroke();
+        if (visible) {
+            ctx.stroke();
+            paintRouteLabel(item.routeKey, geometry);
+        }
     }
 
     function paintProgressiveRouteFrame() {
@@ -1712,10 +1859,29 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function scheduleRoutePaint() {
-        if (routeCanvasZooming || routePaintFrame !== null) return;
+        if (
+            routeCanvasZooming ||
+            routePaintFrame !== null ||
+            zoomFade(map.getZoom(), RAIL_ROUTE_MIN_ZOOM) <= 0
+        )
+            return;
         if (!routeEdgeRecords.some((items, tier) => routeCanvasCursors[tier] < items.length))
             return;
         routePaintFrame = requestAnimationFrame(paintProgressiveRouteFrame);
+    }
+
+    function updateFallbackRouteVisibility() {
+        const groups = [directRouteLayer, transferRouteLayer, twoTransferRouteLayer];
+        groups.forEach((group, tier) =>
+            group.eachLayer((layer) => {
+                const key = themedRouteKeys.get(layer);
+                if (!key || !layer.setStyle) return;
+                const opacity = isFocusedRoute(key, tier)
+                    ? 1
+                    : ROUTE_LINE_OPACITIES[tier] * routeFade(key);
+                layer.setStyle({ opacity });
+            }),
+        );
     }
 
     function redrawProgressiveRoutes() {
@@ -1724,6 +1890,21 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         positionRouteCanvases();
         clearRouteCanvasPixels();
         routeCanvasCursors.fill(0);
+        const groups = [directRouteLayer, transferRouteLayer, twoTransferRouteLayer];
+        groups.forEach((group, tier) =>
+            group.eachLayer((layer) => {
+                const key = themedRouteKeys.get(layer);
+                if (
+                    !key ||
+                    zoomFade(map.getZoom(), ROUTE_LABEL_MIN_ZOOM) <= 0 ||
+                    !(isFocusedRoute(key, tier) || shouldShowBackgroundRoute(key))
+                )
+                    return;
+                for (const feature of layer.toGeoJSON().features || []) {
+                    if (feature.geometry) paintRouteLabel(key, feature.geometry);
+                }
+            }),
+        );
         scheduleRoutePaint();
     }
 
@@ -1738,14 +1919,19 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     function suspendRoutesForZoom() {
         routeCanvasZooming = true;
         cancelRoutePaint();
-        for (const canvas of routeCanvases) canvas.style.visibility = 'hidden';
+        for (const canvas of [...routeCanvases, routeLabelCanvas]) {
+            canvas.style.visibility = 'hidden';
+        }
         clearRouteCanvasPixels();
     }
 
     function resumeRoutesAfterZoom() {
         routeCanvasZooming = false;
+        updateFallbackRouteVisibility();
         redrawProgressiveRoutes();
-        for (const canvas of routeCanvases) canvas.style.visibility = 'visible';
+        for (const canvas of [...routeCanvases, routeLabelCanvas]) {
+            canvas.style.visibility = 'visible';
+        }
     }
 
     function coverageRadiusForArrival(arrivalMinutes) {
@@ -1783,8 +1969,11 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     let originWalkingLines = [];
     // Painting never owns the search: its cursor may lag behind Dijkstra safely.
     // Canvases preserve the 2/1/0/origin stacking even when sources arrive later.
-    const coverageColors = ['#3388ff', '#ff9800', '#7c3aed', '#dc2626'];
-    const coverageWidths = [10, 10, 10, 7];
+    function coverageColors() {
+        return transportBootTheme.dark
+            ? ['#168dff', '#ff9700', '#a347ff', '#ff3954']
+            : ['#0065ee', '#f07800', '#7924e9', '#e22236'];
+    }
     const coverageCursor = [0, 0, 0, 0];
     // The wave stores per-vertex best budgets. Canvas queues only visible edge IDs.
     let coverageState = null;
@@ -1988,8 +2177,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 canvas.height = height;
             }
             ctx.setTransform(scale, 0, 0, scale, 0, 0);
-            ctx.lineWidth = coverageWidths[tier];
-            ctx.strokeStyle = coverageColors[tier];
+            ctx.lineWidth = coverageWidthForZoom(map.getZoom()) * (tier === 3 ? 0.7 : 1);
+            ctx.strokeStyle = coverageColors()[tier];
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
         }
@@ -2530,8 +2719,17 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     // A single viewport-sized Canvas replaces thousands of Leaflet circleMarkers.
     // All hit testing and popups are handled by the existing map events.
-    const stopOutlineColors = ['#1565c0', '#ef6c00', '#6d28d9'];
-    const stopFillColors = ['#42a5f5', '#ffb74d', '#a78bfa'];
+    function stopOutlineColors() {
+        return transportBootTheme.dark
+            ? ['#08477e', '#8b4b00', '#58218e']
+            : ['#0044a5', '#a94c00', '#4f139c'];
+    }
+
+    function stopFillColors() {
+        return transportBootTheme.dark
+            ? ['#35a4ff', '#ffab22', '#b665ff']
+            : ['#087bff', '#ff8a00', '#963cff'];
+    }
 
     function stopMarkerRadiusForZoom() {
         const zoom = map.getZoom();
@@ -2549,6 +2747,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         stopCanvasOrigin = map.containerPointToLayerPoint([0, 0]);
         stopCanvasScale = scale;
         stopCanvasBounds = map.getBounds().pad(0.02);
+        stopCanvas.style.opacity = String(zoomFade(map.getZoom(), STOP_MIN_ZOOM));
         L.DomUtil.setPosition(stopCanvas, stopCanvasOrigin);
         stopCanvas.style.width = size.x + 'px';
         stopCanvas.style.height = size.y + 'px';
@@ -2571,6 +2770,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function paintStopDot(stopIndex, tier) {
+        if (!shouldShowStopDots()) return;
         const stop = stops[stopIndex];
         if (!stop || !stopCanvasBounds.contains([stop.lat, stop.lon])) {
             return;
@@ -2580,8 +2780,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         const y = point.y - stopCanvasOrigin.y;
         stopContext.beginPath();
         stopContext.arc(x, y, stopMarkerRadiusForZoom(), 0, Math.PI * 2);
-        stopContext.fillStyle = stopFillColors[tier];
-        stopContext.strokeStyle = stopOutlineColors[tier];
+        const fills = stopFillColors();
+        const outlines = stopOutlineColors();
+        stopContext.fillStyle = fills[tier];
+        stopContext.strokeStyle = outlines[tier];
         stopContext.lineWidth = 0.7;
         stopContext.fill();
         stopContext.stroke();
@@ -2637,6 +2839,11 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         if (stopCanvasZooming) return;
         positionStopCanvas();
         clearStopPixels();
+        if (!shouldShowStopDots()) {
+            stopCanvas.style.visibility = 'hidden';
+            return;
+        }
+        stopCanvas.style.visibility = 'visible';
         const bounds = map.getBounds().pad(0.02);
         stopCanvasRedrawItems = Array.from(renderedStopTiers).filter(([index]) =>
             bounds.contains([stops[index].lat, stops[index].lon]),
@@ -2770,7 +2977,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function nearestDisplayedStop(latlng, maxPixels) {
-        if (!visibleStopIndexes.size) return null;
+        if (!shouldShowStopDots() || !visibleStopIndexes.size) return null;
         const clickPoint = map.latLngToContainerPoint(latlng);
         const gx = Math.floor(clickPoint.x / STOP_HIT_CELL);
         const gy = Math.floor(clickPoint.y / STOP_HIT_CELL);
@@ -4110,6 +4317,13 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                     layer.bindPopup(popupHtml);
                 }
 
+                L.polyline(cleanLatLngs, {
+                    pane: 'tripOutlinePane',
+                    interactive: false,
+                    color: routeOutlineColor(),
+                    weight: 10,
+                    opacity: 1,
+                }).addTo(tripOutlineLayer);
                 layer.addTo(tripRouteLayer);
                 drawn = true;
             } catch (error) {
@@ -6556,7 +6770,6 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     ]) {
         input.addEventListener('change', syncShareUrl);
     }
-    map.on('moveend', queueShareUrl);
 
     map.on('zoomstart', () => {
         suspendRoutesForZoom();
@@ -6569,7 +6782,6 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         resumeRoutesAfterZoom();
         stopCanvasZooming = false;
         redrawStopCanvas();
-        stopCanvas.style.visibility = 'visible';
     });
     map.on('moveend', () => {
         if (!stopCanvasZooming) redrawStopCanvas();
@@ -6844,6 +7056,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     });
     document.addEventListener('transport-theme-change', () => {
         redrawProgressiveRoutes();
+        redrawStopCanvas();
+        requestCoverageViewportRedraw();
+        routeOutlineLayers.eachLayer((layer) => layer.setStyle({ color: routeOutlineColor() }));
+        tripOutlineLayer.eachLayer((layer) => layer.setStyle({ color: routeOutlineColor() }));
         for (const group of [
             directRouteLayer,
             transferRouteLayer,
@@ -6859,6 +7075,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             layer.setStyle({ color: transportBootTheme.dark ? '#c3cbd6' : '#555' });
         });
     });
+    positionRouteCanvases();
     updateControls();
     analysisSummary.hidden = true;
     bootPhase('LOADING MAP TILES', 'Waiting for vector map tiles to become visible...');

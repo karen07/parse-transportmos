@@ -13,7 +13,7 @@
             "id": "background",
             "type": "background",
             "paint": {
-                "background-color": "#F5F3EF"
+                "background-color": "#F7F7F4"
             }
         },
         {
@@ -38,7 +38,7 @@
                 ]
             ],
             "paint": {
-                "fill-color": "#EEEBE5"
+                "fill-color": "#ECEDE9"
             }
         },
         {
@@ -63,7 +63,30 @@
                 ]
             ],
             "paint": {
-                "fill-color": "#EAE6E0"
+                "fill-color": "#E2DED8"
+            }
+        },
+        {
+            "id": "farmland",
+            "type": "fill",
+            "source": "openmaptiles",
+            "source-layer": "landcover",
+            "minzoom": 7,
+            "filter": [
+                "in",
+                [
+                    "get",
+                    "class"
+                ],
+                [
+                    "literal",
+                    [
+                        "farmland"
+                    ]
+                ]
+            ],
+            "paint": {
+                "fill-color": "#DBD6A0"
             }
         },
         {
@@ -81,13 +104,12 @@
                 [
                     "literal",
                     [
-                        "grass",
-                        "farmland"
+                        "grass"
                     ]
                 ]
             ],
             "paint": {
-                "fill-color": "#DCE8D6"
+                "fill-color": "#AAD58D"
             }
         },
         {
@@ -110,7 +132,7 @@
                 ]
             ],
             "paint": {
-                "fill-color": "#D3E2CC"
+                "fill-color": "#83BF70"
             }
         },
         {
@@ -120,9 +142,24 @@
             "source-layer": "park",
             "minzoom": 8,
             "paint": {
-                "fill-color": "#DCE8D6",
-                "fill-opacity": 0.75
-            }
+                "fill-color": "#AAD58D",
+                "fill-opacity": 0.9
+            },
+            "filter": [
+                "in",
+                [
+                    "get",
+                    "class"
+                ],
+                [
+                    "literal",
+                    [
+                        "national_park",
+                        "nature_reserve",
+                        "public_park"
+                    ]
+                ]
+            ]
         },
         {
             "id": "green-landuse",
@@ -148,7 +185,7 @@
                 ]
             ],
             "paint": {
-                "fill-color": "#DCE8D6"
+                "fill-color": "#AAD58D"
             }
         },
         {
@@ -157,7 +194,7 @@
             "source": "openmaptiles",
             "source-layer": "water",
             "paint": {
-                "fill-color": "#B6D9EB"
+                "fill-color": "#65BCEC"
             }
         },
         {
@@ -171,7 +208,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#9BC7DF",
+                "line-color": "#3299D2",
                 "line-width": [
                     "interpolate",
                     [
@@ -196,8 +233,8 @@
             "source-layer": "building",
             "minzoom": 13,
             "paint": {
-                "fill-color": "#E5E1DA",
-                "fill-outline-color": "#D7D2CA",
+                "fill-color": "#DAD6CE",
+                "fill-outline-color": "#BEB8AD",
                 "fill-opacity": [
                     "interpolate",
                     [
@@ -224,7 +261,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#B9B3B0",
+                "line-color": "#898782",
                 "line-width": [
                     "interpolate",
                     [
@@ -244,8 +281,41 @@
                     3,
                     2
                 ],
-                "line-opacity": 0.55
-            }
+                "line-opacity": [
+                    "interpolate",
+                    [
+                        "linear"
+                    ],
+                    [
+                        "zoom"
+                    ],
+                    4,
+                    0.45,
+                    10,
+                    0.55,
+                    16,
+                    0.65
+                ]
+            },
+            "filter": [
+                "all",
+                [
+                    "has",
+                    "admin_level"
+                ],
+                [
+                    "<=",
+                    [
+                        "to-number",
+                        [
+                            "get",
+                            "admin_level"
+                        ],
+                        99
+                    ],
+                    8
+                ]
+            ]
         },
         {
             "id": "tunnel-minor-casing",
@@ -283,7 +353,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#DDD8CF",
+                "line-color": "#C9C5BC",
                 "line-width": [
                     "interpolate",
                     [
@@ -345,7 +415,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#D2C3A7",
+                "line-color": "#C6AE7F",
                 "line-width": [
                     "interpolate",
                     [
@@ -406,7 +476,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#D1B78D",
+                "line-color": "#C28D40",
                 "line-width": [
                     "interpolate",
                     [
@@ -468,7 +538,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#C2BDB3",
+                "line-color": "#98958C",
                 "line-width": [
                     "interpolate",
                     [
@@ -589,7 +659,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#F8F1E4",
+                "line-color": "#FFF2D6",
                 "line-width": [
                     "interpolate",
                     [
@@ -650,7 +720,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#F3E4C9",
+                "line-color": "#F3CC7D",
                 "line-width": [
                     "interpolate",
                     [
@@ -711,7 +781,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#92949B",
+                "line-color": "#686F79",
                 "line-width": [
                     "interpolate",
                     [
@@ -784,7 +854,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#DDD8CF",
+                "line-color": "#C9C5BC",
                 "line-width": [
                     "interpolate",
                     [
@@ -855,7 +925,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#D2C3A7",
+                "line-color": "#C6AE7F",
                 "line-width": [
                     "interpolate",
                     [
@@ -925,7 +995,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#D1B78D",
+                "line-color": "#C28D40",
                 "line-width": [
                     "interpolate",
                     [
@@ -996,7 +1066,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#C2BDB3",
+                "line-color": "#98958C",
                 "line-width": [
                     "interpolate",
                     [
@@ -1135,7 +1205,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#F8F1E4",
+                "line-color": "#FFF2D6",
                 "line-width": [
                     "interpolate",
                     [
@@ -1205,7 +1275,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#F3E4C9",
+                "line-color": "#F3CC7D",
                 "line-width": [
                     "interpolate",
                     [
@@ -1275,7 +1345,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#92949B",
+                "line-color": "#686F79",
                 "line-width": [
                     "interpolate",
                     [
@@ -1333,7 +1403,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#DDD8CF",
+                "line-color": "#C9C5BC",
                 "line-width": [
                     "interpolate",
                     [
@@ -1390,7 +1460,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#D2C3A7",
+                "line-color": "#C6AE7F",
                 "line-width": [
                     "interpolate",
                     [
@@ -1446,7 +1516,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#D1B78D",
+                "line-color": "#C28D40",
                 "line-width": [
                     "interpolate",
                     [
@@ -1503,7 +1573,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#C2BDB3",
+                "line-color": "#98958C",
                 "line-width": [
                     "interpolate",
                     [
@@ -1614,7 +1684,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#F8F1E4",
+                "line-color": "#FFF2D6",
                 "line-width": [
                     "interpolate",
                     [
@@ -1670,7 +1740,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#F3E4C9",
+                "line-color": "#F3CC7D",
                 "line-width": [
                     "interpolate",
                     [
@@ -1726,7 +1796,7 @@
                 "line-cap": "round"
             },
             "paint": {
-                "line-color": "#92949B",
+                "line-color": "#686F79",
                 "line-width": [
                     "interpolate",
                     [
@@ -1803,8 +1873,8 @@
                 "text-max-width": 10
             },
             "paint": {
-                "text-color": "#44768E",
-                "text-halo-color": "#F5F3EF",
+                "text-color": "#075887",
+                "text-halo-color": "#F7F7F4",
                 "text-halo-width": 1.2
             }
         },
@@ -1884,8 +1954,8 @@
                 "symbol-spacing": 300
             },
             "paint": {
-                "text-color": "#62676F",
-                "text-halo-color": "#F5F3EF",
+                "text-color": "#3E4855",
+                "text-halo-color": "#F7F7F4",
                 "text-halo-width": 1.2
             }
         },
@@ -1894,22 +1964,40 @@
             "type": "symbol",
             "source": "openmaptiles",
             "source-layer": "poi",
-            "minzoom": 12,
+            "minzoom": 11,
             "filter": [
-                "in",
+                "all",
                 [
-                    "get",
-                    "class"
+                    "in",
+                    [
+                        "get",
+                        "class"
+                    ],
+                    [
+                        "literal",
+                        [
+                            "railway",
+                            "rail",
+                            "subway"
+                        ]
+                    ]
                 ],
                 [
-                    "literal",
+                    "!",
                     [
-                        "railway",
-                        "rail",
-                        "bus",
-                        "bus_station",
-                        "subway",
-                        "tram"
+                        "in",
+                        [
+                            "get",
+                            "subclass"
+                        ],
+                        [
+                            "literal",
+                            [
+                                "tram_stop",
+                                "bus_stop",
+                                "subway_entrance"
+                            ]
+                        ]
                     ]
                 ]
             ],
@@ -1962,9 +2050,127 @@
                 "text-max-width": 10
             },
             "paint": {
-                "text-color": "#69717D",
-                "text-halo-color": "#F5F3EF",
-                "text-halo-width": 1.2
+                "text-color": "#404B59",
+                "text-halo-color": "#F7F7F4",
+                "text-halo-width": 1.2,
+                "text-opacity": [
+                    "interpolate",
+                    [
+                        "linear"
+                    ],
+                    [
+                        "zoom"
+                    ],
+                    11,
+                    0,
+                    12,
+                    1
+                ]
+            }
+        },
+        {
+            "id": "surface-stop-label",
+            "type": "symbol",
+            "source": "openmaptiles",
+            "source-layer": "poi",
+            "minzoom": 15,
+            "filter": [
+                "any",
+                [
+                    "in",
+                    [
+                        "get",
+                        "class"
+                    ],
+                    [
+                        "literal",
+                        [
+                            "bus",
+                            "bus_station",
+                            "tram"
+                        ]
+                    ]
+                ],
+                [
+                    "in",
+                    [
+                        "get",
+                        "subclass"
+                    ],
+                    [
+                        "literal",
+                        [
+                            "bus_stop",
+                            "tram_stop"
+                        ]
+                    ]
+                ]
+            ],
+            "layout": {
+                "text-field": [
+                    "coalesce",
+                    [
+                        "get",
+                        "name:ru"
+                    ],
+                    [
+                        "get",
+                        "name_ru"
+                    ],
+                    [
+                        "get",
+                        "name"
+                    ],
+                    [
+                        "get",
+                        "name:latin"
+                    ],
+                    [
+                        "get",
+                        "name:en"
+                    ],
+                    [
+                        "get",
+                        "name_en"
+                    ],
+                    ""
+                ],
+                "text-font": [
+                    "Noto Sans Bold"
+                ],
+                "text-size": [
+                    "interpolate",
+                    [
+                        "linear"
+                    ],
+                    [
+                        "zoom"
+                    ],
+                    12,
+                    10,
+                    17,
+                    13
+                ],
+                "text-padding": 3,
+                "text-max-width": 10
+            },
+            "paint": {
+                "text-color": "#404B59",
+                "text-halo-color": "#F7F7F4",
+                "text-halo-width": 1.2,
+                "text-opacity": [
+                    "interpolate",
+                    [
+                        "linear"
+                    ],
+                    [
+                        "zoom"
+                    ],
+                    15,
+                    0,
+                    16,
+                    1
+                ]
             }
         },
         {
@@ -2039,8 +2245,8 @@
                 "text-max-width": 10
             },
             "paint": {
-                "text-color": "#62676F",
-                "text-halo-color": "#F5F3EF",
+                "text-color": "#3E4855",
+                "text-halo-color": "#F7F7F4",
                 "text-halo-width": 1.2
             }
         },
@@ -2113,8 +2319,8 @@
                 "text-max-width": 10
             },
             "paint": {
-                "text-color": "#414850",
-                "text-halo-color": "#F5F3EF",
+                "text-color": "#202934",
+                "text-halo-color": "#F7F7F4",
                 "text-halo-width": 1.2
             }
         }
