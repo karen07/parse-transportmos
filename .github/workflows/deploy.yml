@@ -1,0 +1,47 @@
+name: Deploy website
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Validate website
+        run: |
+          test -s site/routes.html
+          test -s site/routes.js
+          test -s site/routes.css
+          test -s site/routes-config.json
+          test -s site/routes.json.gz
+          test -s site/routes-data-worker.js
+          test -s site/routes-maplibre-worker.js
+          test -s site/boot-loader.js
+          test -s site/moscow-major-roads.svg
+          gzip -t site/routes.json.gz
+      - name: Prepare website
+        run: cp site/routes.html site/index.html
+      - name: Upload website
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v4
