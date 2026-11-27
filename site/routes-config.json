@@ -1,11 +1,11 @@
 {
-    "version": "0.17.1",
+    "version": "0.17.3",
     "boot_view": {
         "lat": 55.752,
         "lon": 37.62,
         "width_degrees": 1.0866458560063634
     },
-    "data_file": "routes-network-6c5dd8f68794d64e.bin.gz",
+    "data_file": "routes-network-4a8988ea4e6ceeb9.bin.gz",
     "geometry_file": "routes-geometry-a2e15bad5bc4330a.bin.gz",
     "data_worker_file": "routes-data-worker.js",
     "maplibre_worker_file": "routes-maplibre-worker.js",
@@ -13,7 +13,7 @@
     "grid_size": 400.0,
     "origin_lon": 37.608226,
     "origin_lat": 55.744304,
-    "infer_through_service": true,
+    "infer_through_service": false,
     "initial_walk_minutes": 5.0,
     "initial_opacity": 75.0
 }

@@ -7,7 +7,9 @@ from .common import SURFACE_MODES, coord_distance_m, project
 from .transport import station_route_position
 
 
-def conservative_geometry_edge_lengths(geometry, direction_stops, stops, mode):
+def conservative_geometry_edge_lengths(
+    geometry, direction_stops, stops, mode, reasons=None
+):
     """Use mapped route distances only where projection is unambiguous enough.
 
     Stop-to-stop geometry is accepted only with close snaps, forward order,
@@ -17,9 +19,13 @@ def conservative_geometry_edge_lengths(geometry, direction_stops, stops, mode):
     count = max(0, len(direction_stops) - 1)
     rejected = [None] * count
     if not geometry or count == 0:
+        if reasons is not None:
+            reasons.extend(["missing_geometry"] * count)
         return rejected
     kind = geometry.get("type")
     if kind not in ("LineString", "MultiLineString"):
+        if reasons is not None:
+            reasons.extend(["unsupported_geometry"] * count)
         return rejected
     lines = (
         [geometry["coordinates"]] if kind == "LineString" else geometry["coordinates"]
@@ -43,28 +49,42 @@ def conservative_geometry_edge_lengths(geometry, direction_stops, stops, mode):
         stop = stops[stop_index]
         located.append(station_route_position(stop["lon"], stop["lat"], geometry))
     accepted = []
+
+    def reject(reason):
+        accepted.append(None)
+        if reasons is not None:
+            reasons.append(reason)
+
     for i in range(count):
         left_snap, left_pos = located[i]
         right_snap, right_pos = located[i + 1]
         if left_snap > max_snap or right_snap > max_snap:
-            accepted.append(None)
+            reject("stop_off_geometry")
             continue
         distance = right_pos - left_pos
-        if distance <= 0 or any(left_pos < b < right_pos for b in breaks):
-            accepted.append(None)
+        if distance <= 0:
+            reject("non_forward_projection")
+            continue
+        if any(left_pos < b < right_pos for b in breaks):
+            reject("geometry_gap")
             continue
         start = stops[direction_stops[i]]
         end = stops[direction_stops[i + 1]]
         straight = coord_distance_m(
             (start["lon"], start["lat"]), (end["lon"], end["lat"])
         )
-        if straight < 25.0 or distance < straight * 0.98:
-            accepted.append(None)
+        if straight < 25.0:
+            reject("close_stops")
+            continue
+        if distance < straight * 0.98:
+            reject("shorter_than_chord")
             continue
         if distance > max(straight * 4.0, straight + 300.0):
-            accepted.append(None)
+            reject("excessive_detour")
             continue
         accepted.append(round(distance, 1))
+        if reasons is not None:
+            reasons.append(None)
     return accepted
 
 
@@ -83,6 +103,8 @@ def pair_surface_route_directions(features, stop_index, stops):
         ref = (p.get("ref") or "").strip().casefold()
         network = (p.get("network") or "").strip().casefold()
         ids = [stop_index[s] for s in p.get("stops", ()) if s in stop_index]
+        if p.get("independent_route") or p.get("incomplete_members"):
+            continue
         if mode not in SURFACE_MODES or not ref or len(ids) < 4:
             continue
         buckets[(mode, ref, network)].append((i, ids))
@@ -249,6 +271,7 @@ def build_index(data_json, grid_size):
     # OSM route_master grouping remains authoritative where present.
     pair_surface_route_directions(route_features, stop_index, stops)
     routes = {}
+    geometry_audit = []
 
     for feature in route_features:
         props = feature.get("properties") or {}
@@ -290,14 +313,29 @@ def build_index(data_json, grid_size):
         if len(direction_stops) < 2:
             continue
 
-        if props.get("roundtrip"):
+        if props.get("roundtrip") and not props.get("incomplete_members"):
             route["roundtrip"] = props.get("roundtrip")
 
         mapped_edge_meters = [None] * (len(direction_stops) - 1)
+        reasons = []
         if props.get("geometry_source") == "osm_ways":
             mapped_edge_meters = conservative_geometry_edge_lengths(
-                geometry, direction_stops, stops, route["mode"]
+                geometry, direction_stops, stops, route["mode"], reasons
             )
+        else:
+            reasons = ["no_mapped_geometry"] * len(mapped_edge_meters)
+        for pos, reason in enumerate(reasons):
+            if reason is not None:
+                geometry_audit.append(
+                    {
+                        "route": route_key,
+                        "relation_id": props.get("relation_id"),
+                        "mode": route["mode"],
+                        "from_id": stops[direction_stops[pos]]["id"],
+                        "to_id": stops[direction_stops[pos + 1]]["id"],
+                        "reason": reason,
+                    }
+                )
         route["directions"].append(
             {
                 "relation_id": props.get("relation_id"),
@@ -305,7 +343,17 @@ def build_index(data_json, grid_size):
                 f"{len(route['directions'])}",
                 "from": props.get("from"),
                 "to": props.get("to"),
-                "roundtrip": props.get("roundtrip"),
+                "roundtrip": (
+                    None if props.get("incomplete_members") else props.get("roundtrip")
+                ),
+                **(
+                    {"no_inferred_continuation": True}
+                    if (
+                        props.get("incomplete_members")
+                        or props.get("independent_route")
+                    )
+                    else {}
+                ),
                 "geometry_source": props.get("geometry_source", "unknown"),
                 "stops": direction_stops,
                 "stop_roles": direction_stop_roles,
@@ -368,4 +416,5 @@ def build_index(data_json, grid_size):
         "grid": grid,
         "stops": stops,
         "routes": routes,
+        "geometry_audit": geometry_audit,
     }

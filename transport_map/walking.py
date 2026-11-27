@@ -58,12 +58,23 @@ MOSKVORECHYE_PLATFORM_IDS = frozenset(
 )
 
 
+def walking_direction_allowed(tags):
+    """Do not accept a way whose explicit restrictions forbid both directions."""
+    direction = (tags.get("oneway:foot") or "").lower()
+    forward = direction != "-1" and tags.get("foot:forward") != "no"
+    backward = direction not in {"yes", "1", "true"}
+    backward = backward and tags.get("foot:backward") != "no"
+    return forward or backward
+
+
 def allow_station_private_way(way_id, tags, enabled):
     """Explicit, local, experimental station-path access override.
 
     Private access is not proof of public access. Never bypass foot=no or
     non-footway restrictions, and never generate a synthetic connector.
     """
+    if not walking_direction_allowed(tags):
+        return False
     if not enabled or way_id not in MOSKVORECHYE_PRIVATE_WAYS:
         return False
     if tags.get("highway") not in {"footway", "path", "steps"}:
@@ -84,6 +95,8 @@ WALK_ZONE_MARGIN_M = 130.0
 
 
 def is_walkable_way(tags):
+    if not walking_direction_allowed(tags):
+        return False
     highway = tags.get("highway")
     if highway not in WALK_HIGHWAYS and not (
         highway is None and tags.get("indoor") == "corridor"
@@ -148,7 +161,7 @@ def is_linear_station_walkway(tags, references):
     approximation. Ways meet only through shared OSM node IDs, never by
     proximity or a visually crossing line. No railway track is walkable.
     """
-    if len(references) < 2:
+    if not walking_direction_allowed(tags) or len(references) < 2:
         return False
     railway_platform = tags.get("railway") == "platform"
     public_platform = tags.get("public_transport") == "platform"

@@ -134,7 +134,7 @@
         "phaseSnap": "Walking snap index",
         "phaseWave": "Start coverage wave",
         "phaseRouting": "Total transport routing",
-        "phaseFinalWave": "Seed final walking wave",
+        "phaseFinalWave": "Close walking wave sources",
         "phaseAnalysis": "Final result analysis and DOM",
         "phaseFinishing": "Finishing Canvas",
         "reasonNewSettings": "new settings or point",

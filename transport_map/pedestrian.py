@@ -116,6 +116,11 @@ def build_pedestrian_graph(
         ways.exterior_edges,
         ways.preferred_exterior_edges,
     )
+    # Preserve actual mapped outdoor endpoints, not arbitrary weak roots.
+    street_anchors = bytearray(len(ways.graph_nodes))
+    for edge_index in ways.exterior_edges:
+        a, b, _, _ = ways.edges[edge_index]
+        street_anchors[a] = street_anchors[b] = 1
     platform_stops = inferred_platform_point_stops(
         entrances, ways, exterior_parents, trusted_roots
     )
@@ -195,6 +200,9 @@ def build_pedestrian_graph(
     graph["interchange_hints"] = station_interchange_hints(entrances, stops)
     graph["rail_access_quality"] = rail_access_quality_report(
         graph, stops, exterior_roots, trusted_roots
+    )
+    graph["rail_directed_access"] = rail_directed_access_report(
+        graph, stops, street_anchors
     )
     graph["platform_link_audit"] = {
         **platform_link_audit,
@@ -280,6 +288,104 @@ def rail_access_quality_report(graph, stops, mapped_street_roots, major_street_r
         "counts": dict(counts),
         "by_mode": {key: dict(value) for key, value in sorted(by_mode.items())},
         "review_samples": samples,
+    }
+
+
+def rail_directed_access_report(graph, stops, street_anchors):
+    """Find paths from/to mapped outdoor endpoints on the actual directed graph.
+
+    Paths may use existing estimated connectors; this is a topology audit,
+    not proof of public access, walking time, or a particular entrance.
+    """
+    count = len(graph["nodes"])
+    if len(street_anchors) > count:
+        raise ValueError("Invalid street anchor count")
+
+    def visit(reverse):
+        degree = array("I", [0]) * count
+        edges = graph["edges"]
+        for a, b, _, flag in edges:
+            if reverse:
+                a, b = b, a
+            if flag not in (3, 13):
+                degree[a] += 1
+            if flag not in (2, 12):
+                degree[b] += 1
+        offsets = array("I", [0]) * (count + 1)
+        for i in range(count):
+            offsets[i + 1] = offsets[i] + degree[i]
+        to = array("I", [0]) * offsets[-1]
+        cursor = array("I", offsets[:-1])
+        for a, b, _, flag in edges:
+            if reverse:
+                a, b = b, a
+            if flag not in (3, 13):
+                to[cursor[a]] = b
+                cursor[a] += 1
+            if flag not in (2, 12):
+                to[cursor[b]] = a
+                cursor[b] += 1
+        del degree, cursor
+        seen = bytearray(count)
+        queue = array("I")
+        for i, anchor in enumerate(street_anchors):
+            if anchor:
+                seen[i] = 1
+                queue.append(i)
+        for node in queue:
+            for pos in range(offsets[node], offsets[node + 1]):
+                other = to[pos]
+                if not seen[other]:
+                    seen[other] = 1
+                    queue.append(other)
+        return seen
+
+    from_street = visit(False)
+    to_street = visit(True)
+    counts = Counter()
+    issues = []
+    stations = []
+    for stop in stops:
+        modes = set(stop.get("modes", ())) & StationEntranceCollector.RAIL_MODES
+        if not modes:
+            continue
+        node = stop.get("walk_node", -1)
+        attached = 0 <= node < count
+        entry = bool(attached and from_street[node])
+        exit_ = bool(attached and to_street[node])
+        if not attached:
+            status = "unattached"
+        elif entry and exit_:
+            status = "both_directions"
+        elif entry:
+            status = "entry_only"
+        elif exit_:
+            status = "exit_only"
+        else:
+            status = "isolated"
+        counts[status] += 1
+        item = {
+            "id": stop["id"],
+            "name": stop.get("name"),
+            "lon": stop.get("lon"),
+            "lat": stop.get("lat"),
+            "modes": sorted(modes),
+            "walk_node": node,
+            "entry_from_street": entry,
+            "exit_to_street": exit_,
+            "status": status,
+            "source": stop.get("station_access_kind", "none"),
+        }
+        stations.append(item)
+        if status != "both_directions":
+            issues.append(item)
+    print("[rail-quality] directed outdoor access:", dict(counts), flush=True)
+    return {
+        "metric": "directed_graph_paths_including_existing_estimated_links",
+        "street_anchor_count": sum(street_anchors),
+        "counts": dict(counts),
+        "issues": issues,
+        "stations": stations,
     }
 
 

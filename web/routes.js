@@ -2132,6 +2132,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     let coverageBufferPool = null;
     const coverageViewEdges = [[], [], [], []];
     let coverageViewIterator = null;
+    const coverageIndexed = [false, false, false, false];
     let coverageBounds = null;
     let coverageWorldSize = 1;
     let coverageWorldOffsetX = 0;
@@ -2156,7 +2157,6 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     let coverageSize = L.point(0, 0);
     let coverageScale = 1;
     let coveragePaintFrame = null;
-    let coveragePaintRotation = 0;
     let coverageTopLeft = L.point(0, 0);
     let coverageZooming = false;
     let coverageZoomInProgress = false;
@@ -2258,14 +2258,27 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     // Reconstruct a viewport from settled wave state, never from all-city strokes.
-    function* rebuildCoverageViewSteps() {
+    function* rebuildCoverageViewSteps(tiers) {
         if (!coverageState || !walkSegmentGrid) return;
         const seen = new Uint8Array(walkEdges.length);
         const grid = walkSegmentGrid;
-        const x0 = Math.max(grid.minX, Math.floor(coverageBounds[0] / WALK_GRID_METERS));
-        const x1 = Math.min(grid.maxX, Math.floor(coverageBounds[2] / WALK_GRID_METERS));
-        const y0 = Math.max(grid.minY, Math.floor(coverageBounds[1] / WALK_GRID_METERS));
-        const y1 = Math.min(grid.maxY, Math.floor(coverageBounds[3] / WALK_GRID_METERS));
+        const bounds = coverageBounds;
+        let x0 = Math.max(grid.minX, Math.floor(bounds[0] / WALK_GRID_METERS));
+        let x1 = Math.min(grid.maxX, Math.floor(bounds[2] / WALK_GRID_METERS));
+        let y0 = Math.max(grid.minY, Math.floor(bounds[1] / WALK_GRID_METERS));
+        let y1 = Math.min(grid.maxY, Math.floor(bounds[3] / WALK_GRID_METERS));
+        // Each drawable edge touches a settled vertex or the snapped origin edge.
+        // Its grid references include that vertex's cell, even outside the view.
+        // For a small origin wave, visiting these cells avoids scanning the city.
+        if (tiers.length === 1 && tiers[0] === 3) {
+            const box = coverageState.originBounds;
+            if (
+                box &&
+                (box[2] - box[0] + 1) * (box[3] - box[1] + 1) < (x1 - x0 + 1) * (y1 - y0 + 1)
+            ) {
+                [x0, y0, x1, y1] = box;
+            }
+        }
         if (x0 > x1 || y0 > y1) return;
         let checked = 0;
         function* append(ids) {
@@ -2276,7 +2289,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 const a = walkEdgeAB[2 * id],
                     b = walkEdgeAB[2 * id + 1];
                 if (!coverageEdgeInViewAB(a, b)) continue;
-                for (let tier = 0; tier < 4; ++tier) {
+                for (const tier of tiers) {
                     const reached = coverageState.settled[tier];
                     if (
                         reached[a] ||
@@ -2305,6 +2318,18 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 }
             }
         }
+    }
+
+    function queueCoverageIndex(schedule = true) {
+        if (!coverageState || coverageZooming || coverageViewIterator) return;
+        const tiers = [3, 0, 1, 2].filter(
+            (tier) => coverageState.ready[tier] && !coverageIndexed[tier],
+        );
+        if (!tiers.length) return;
+        for (const tier of tiers) coverageIndexed[tier] = true;
+        coverageViewIterator = rebuildCoverageViewSteps(tiers);
+        profilePhaseStart('Coverage viewport index');
+        if (schedule) scheduleCoveragePaint();
     }
 
     function positionCoverageOverlay() {
@@ -2362,6 +2387,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function clearCoveragePixels() {
         coverageMasksDirty = false;
+        coverageLastComposite = -Infinity;
         coverageTinyStep = map.getZoom() <= 12 ? 2 : 0;
         if (coverageTinyStep) {
             coverageTinyColumns = Math.ceil(coverageSize.x / coverageTinyStep);
@@ -2385,6 +2411,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     function clearCoverageOverlay() {
         cancelCoveragePaint();
         coverageViewIterator = null;
+        coverageIndexed.fill(false);
         coverageCursor.fill(0);
         for (const entries of coverageViewEdges) entries.length = 0;
         clearCoveragePixels();
@@ -2426,6 +2453,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         let position = coverageCursor[tier];
         let scanned = 0;
         let tinySkipped = 0;
+        let drawn = 0;
         ctx.beginPath();
         while (position < ids.length && scanned < 65536) {
             if ((scanned & 255) === 0 && performance.now() >= deadline) break;
@@ -2480,9 +2508,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 }
                 ctx.moveTo(x0, y0);
                 ctx.lineTo(x1, y1);
+                drawn++;
             }
         }
-        if (scanned) {
+        if (drawn) {
             ctx.stroke();
             coverageMasksDirty = true;
         }
@@ -2551,26 +2580,28 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         coveragePaintFrame = null;
         // One long batch per animation frame instead of 1024 edges per tier.
         // The deadline, not an arbitrary low item count, limits main-thread work.
-        const deadline = frameStart + 11;
+        const deadline = frameStart + 8;
         if (coverageViewIterator) {
-            while (performance.now() < deadline) {
+            // Share the frame between indexing and painting. Never wait for a
+            // full-city index pass before presenting already discovered edges.
+            const indexDeadline = frameStart + 4;
+            while (performance.now() < indexDeadline) {
                 if (coverageViewIterator.next().done) {
                     coverageViewIterator = null;
                     profilePhaseEnd(
                         'Coverage viewport index',
                         'tier counts: ' + coverageViewEdges.map((items) => items.length).join(','),
                     );
+                    queueCoverageIndex(false);
                     break;
                 }
             }
         }
         let lines = 0;
-        if (!coverageViewIterator) {
+        {
             while (performance.now() < deadline) {
                 let nextTier = -1;
-                for (let i = 0; i < 4; ++i) {
-                    const tier = coverageOrder[coveragePaintRotation];
-                    coveragePaintRotation = (coveragePaintRotation + 1) % 4;
+                for (const tier of [3, 0, 1, 2]) {
                     if (coverageCursor[tier] < coverageLinesForTier(tier).length) {
                         nextTier = tier;
                         break;
@@ -2591,11 +2622,20 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             Boolean(coverageViewIterator) ||
             coverageCursor.some((position, tier) => position < coverageLinesForTier(tier).length);
         const compositeStart = performance.now();
-        // Intermediate preview is throttled; the last composite is immediate.
+        // Show the first nonempty mask immediately, then coalesce previews.
         const shouldComposite =
-            coverageMasksDirty && (!unfinished || performance.now() - coverageLastComposite >= 150);
+            coverageMasksDirty && (!unfinished || performance.now() - coverageLastComposite >= 50);
         const composites = shouldComposite ? compositeCoverageMasks() : 0;
-        if (composites) coverageLastComposite = performance.now();
+        if (composites) {
+            coverageLastComposite = performance.now();
+            if (
+                runProfile &&
+                !runProfile.finished &&
+                runProfile.firstVisible.coverageComposite === undefined
+            ) {
+                runProfile.firstVisible.coverageComposite = profileElapsed(runProfile);
+            }
+        }
         if (runProfile && !runProfile.finished) {
             runProfile.cpu.coverageComposite =
                 (runProfile.cpu.coverageComposite || 0) + performance.now() - compositeStart;
@@ -2621,11 +2661,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         positionCoverageOverlay();
         coverageCursor.fill(0);
         for (const entries of coverageViewEdges) entries.length = 0;
-        coverageViewIterator = coverageState ? rebuildCoverageViewSteps() : null;
-        if (coverageViewIterator && runProfile && !runProfile.finished) {
-            profilePhaseStart('Coverage viewport index');
-        }
+        coverageViewIterator = null;
+        coverageIndexed.fill(false);
         clearCoveragePixels();
+        queueCoverageIndex();
         scheduleCoveragePaint();
     }
 
@@ -2638,6 +2677,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         }
         cancelCoveragePaint();
         coverageViewIterator = null;
+        coverageIndexed.fill(false);
         coverageCursor.fill(0);
         for (const entries of coverageViewEdges) entries.length = 0;
         coverageCanvas.style.visibility = 'hidden';
@@ -2700,8 +2740,9 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         redrawCoverageOverlay();
     }
 
-    // The OSM edge-to-vertex reverse index is no longer needed here.
-    // The wave settles vertices; the viewport index enumerates edges once later.
+    // Each transfer tier is an independent multi-source search. Close its
+    // sources after the matching RAPTOR round, settle it once, and paint it
+    // without clearing earlier tiers. No reverse edge index is needed.
     function startProgressiveCoverage(token, streaming = false) {
         const count = walkNodes.length;
         const heap = makeCoverageHeap();
@@ -2727,11 +2768,34 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             yields: 0,
             peakHeap: 0,
         };
-        const state = { remaining, settled, originInterval: null };
+        const state = {
+            remaining,
+            settled,
+            originInterval: null,
+            originBounds: null,
+            ready: [false, false, false, false],
+        };
         coverageState = state;
+        const closed = [false, false, false, false];
+        const completed = [false, false, false, false];
+        const pending = [];
         let started = false;
+        let finishedSources = false;
         let running = false;
         let scheduled = false;
+
+        function includeOriginNode(node) {
+            const x = Math.floor(walkNodeXY[2 * node] / (10 * WALK_GRID_METERS));
+            const y = Math.floor(walkNodeXY[2 * node + 1] / (10 * WALK_GRID_METERS));
+            const box = state.originBounds;
+            if (!box) state.originBounds = [x, y, x, y];
+            else {
+                box[0] = Math.min(box[0], x);
+                box[1] = Math.min(box[1], y);
+                box[2] = Math.max(box[2], x);
+                box[3] = Math.max(box[3], y);
+            }
+        }
 
         function seed(tier, node, budget) {
             if (!Number.isInteger(node) || node < 0 || budget <= 0) return;
@@ -2764,6 +2828,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                                 from: direction === 2 ? anchor.t : Math.max(0, anchor.t - span),
                                 to: direction === 3 ? anchor.t : Math.min(1, anchor.t + span),
                             };
+                            includeOriginNode(walkEdgeAB[2 * id]);
+                            includeOriginNode(walkEdgeAB[2 * id + 1]);
                         }
                     }
                     for (const [node, distance] of walkSeeds(anchor)) {
@@ -2771,69 +2837,102 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                     }
                 }
             }
-            for (let tier = 0; tier < 3; ++tier) {
-                for (const [node, radius] of sources[tier]) {
-                    seed(tier, node, radius);
-                }
-                sources[tier].clear();
-            }
+            closed[3] = true;
+            pending.push(3);
+            // Start the small origin search before RAPTOR can occupy the task queue.
+            void expand();
+        }
+
+        function closeTier(tier) {
+            if (token !== renderGeneration || closed[tier]) return;
+            closed[tier] = true;
+            pending.push(tier);
             start();
-            if (!heap.size) {
-                profilePhaseEnd('Walking coverage wave', 'no sources');
-                redrawCoverageOverlay();
-            }
+        }
+
+        function finish() {
+            if (token !== renderGeneration) return;
+            begin();
+            for (let tier = 0; tier < 3; ++tier) closeTier(tier);
+            finishedSources = true;
+            start();
+            finishIfIdle();
+        }
+
+        function finishIfIdle() {
+            if (
+                token !== renderGeneration ||
+                !finishedSources ||
+                running ||
+                scheduled ||
+                pending.length ||
+                heap.size
+            )
+                return;
+            profilePhaseEnd('Walking coverage wave', 'settled: ' + waveStats.settled);
+            profileCheckIdle();
         }
 
         async function expand() {
             running = true;
-            while (heap.size && token === renderGeneration) {
-                const startTime = performance.now();
-                let processed = 0;
-                while (heap.size && ((processed & 63) !== 0 || performance.now() - startTime < 8)) {
-                    const [negative, packed] = heap.pop();
-                    const tier = Math.floor(packed / count);
-                    const node = packed % count;
-                    const budget = -negative;
-                    waveStats.popped++;
-                    processed++;
-                    if (settled[tier][node] || budget + 0.001 < remaining[tier][node]) continue;
-                    settled[tier][node] = 1;
-                    waveStats.settled++;
-                    // Search settles only vertices. After completion, enumerate
-                    // each visible OSM edge ONCE and paint its final reachability.
-                    for (let i = walkOffsets[node]; i < walkOffsets[node + 1]; ++i) {
-                        seed(tier, walkTo[i], budget - walkWeight[i]);
+            while (pending.length && token === renderGeneration) {
+                const activeTier = pending.shift();
+                let hasCoverage = activeTier === 3 && state.originInterval !== null;
+                if (activeTier !== 3) {
+                    for (const [node, radius] of sources[activeTier])
+                        seed(activeTier, node, radius);
+                    sources[activeTier].clear();
+                }
+                while (heap.size && token === renderGeneration) {
+                    const startTime = performance.now();
+                    let processed = 0;
+                    while (
+                        heap.size &&
+                        ((processed & 63) !== 0 || performance.now() - startTime < 8)
+                    ) {
+                        const [negative, packed] = heap.pop();
+                        const tier = Math.floor(packed / count);
+                        const node = packed % count;
+                        const budget = -negative;
+                        waveStats.popped++;
+                        processed++;
+                        if (settled[tier][node] || budget + 0.001 < remaining[tier][node]) continue;
+                        settled[tier][node] = 1;
+                        hasCoverage = true;
+                        if (tier === 3) includeOriginNode(node);
+                        waveStats.settled++;
+                        for (let i = walkOffsets[node]; i < walkOffsets[node + 1]; ++i) {
+                            seed(tier, walkTo[i], budget - walkWeight[i]);
+                        }
+                    }
+                    waveStats.cpuMs += performance.now() - startTime;
+                    waveStats.peakHeap = Math.max(waveStats.peakHeap, heap.size);
+                    if (heap.size) {
+                        waveStats.yields++;
+                        await eventLoopYield();
                     }
                 }
-                waveStats.cpuMs += performance.now() - startTime;
-                waveStats.peakHeap = Math.max(waveStats.peakHeap, heap.size);
-                scheduleCoveragePaint();
-                if (heap.size) {
+                if (token !== renderGeneration) break;
+                completed[activeTier] = true;
+                state.ready[activeTier] = hasCoverage;
+                queueCoverageIndex();
+                // Give painting and routing a chance to run between tiers.
+                if (pending.length) {
                     waveStats.yields++;
                     await eventLoopYield();
                 }
             }
             running = false;
-            if (token === renderGeneration) {
-                const profiled = runProfile && runProfile.token === token;
-                if (profiled) {
-                    profilePhaseEnd('Walking coverage wave', 'settled: ' + waveStats.settled);
-                }
-                // Also support the non-profiled/non-streaming rendering path.
-                redrawCoverageOverlay();
-                if (profiled) profileFinish(runProfile);
-            }
+            finishIfIdle();
         }
 
         function start() {
-            if (!started || running || scheduled || token !== renderGeneration || !heap.size)
+            if (!started || running || scheduled || token !== renderGeneration || !pending.length)
                 return;
             scheduled = true;
             setTimeout(() => {
                 scheduled = false;
-                if (!running && token === renderGeneration && heap.size) {
-                    void expand();
-                }
+                if (!running && token === renderGeneration && pending.length) void expand();
             }, 0);
         }
         if (!streaming) {
@@ -2844,16 +2943,25 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                     sources[tier].set(node, Math.max(sources[tier].get(node) || -1, source.radius));
                 }
             }
-            begin();
+            finish();
         }
         return {
             idle() {
-                return started && !running && !scheduled && heap.size === 0;
+                return finishedSources && !running && !scheduled && !pending.length && !heap.size;
             },
             stats() {
-                return { ...waveStats, heapSize: heap.size, running, started };
+                return {
+                    ...waveStats,
+                    heapSize: heap.size,
+                    running,
+                    started,
+                    completedTiers: completed.slice(),
+                    sourcesClosed: finishedSources,
+                };
             },
             begin,
+            closeTier,
+            finish,
             addSource(tier, stopIndex, arrivalMinutes) {
                 if (token !== renderGeneration || tier < 0 || tier > 2) return;
                 const stop = stops[stopIndex];
@@ -2862,10 +2970,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 if (radius <= 0) return;
                 waveStats.sources++;
                 const node = stop.walk_node;
-                if (started) {
-                    // A recalculation must start with all sources together.
-                    // Normally this branch is unreachable for current RAPTOR runs.
-                    console.warn('Late walking source; recompute reachability');
+                if (closed[tier]) {
+                    console.warn('Late walking source for completed transport round');
                     return;
                 }
                 if (radius > (sources[tier].get(node) || -1)) {
@@ -5086,7 +5192,9 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         if (!route) return new Map();
         const cached = routeContinuationCache.get(route);
         if (cached) return cached;
-        const directions = route.directions || [];
+        const directions = (route.directions || []).filter(
+            (direction) => !direction.no_inferred_continuation,
+        );
         const result = new Map();
         const surface = ['bus', 'tram', 'trolleybus'].includes(route.mode || route.route);
         if (!surface || !ALLOW_INFERRED_THROUGH_SERVICE) {
@@ -6252,7 +6360,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         return context;
     }
 
-    async function ensureReachabilitySearchAsync(token, onEvidence, onRideEdge) {
+    async function ensureReachabilitySearchAsync(token, onEvidence, onRideEdge, onRoundDone) {
         const cacheKey = reachabilitySearchKey();
         let context = cacheGetRecent(reachabilitySearchCache, cacheKey);
         if (!context) {
@@ -6280,6 +6388,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                         replayStarted = performance.now();
                     }
                 }
+                if (token !== renderGeneration) return false;
+                if (onRoundDone) onRoundDone(round);
             }
         }
         while (context.builtRounds < requiredRounds) {
@@ -6315,6 +6425,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             context.evidence[round] = evidence;
             context.boardSources = null;
             context.builtRounds = round + 1;
+            if (onRoundDone) onRoundDone(round);
         }
         return token === renderGeneration;
     }
@@ -6990,6 +7101,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 profilePhaseStart('Start coverage wave');
                 const wave = startProgressiveCoverage(token, true);
                 if (runProfile) runProfile.wave = wave;
+                wave.begin();
                 positionRouteCanvases();
                 profilePhaseEnd('Start coverage wave');
                 const onEvidence = (stopIndex, candidate, tier, cached = false) => {
@@ -7005,14 +7117,21 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                     queueProgressiveRouteEdge(routeKey, direction, pos, tier, token);
                 };
                 profilePhaseStart('Total transport routing');
-                if (!(await ensureReachabilitySearchAsync(token, onEvidence, onRideEdge))) return;
+                if (
+                    !(await ensureReachabilitySearchAsync(
+                        token,
+                        onEvidence,
+                        onRideEdge,
+                        wave.closeTier,
+                    ))
+                )
+                    return;
                 profilePhaseEnd('Total transport routing');
                 if (token !== renderGeneration) return;
-                // RAPTOR takes less than a second. Seed one complete multi-source
-                // walk search to avoid revisiting millions of vertices for late stops.
-                profilePhaseStart('Seed final walking wave');
-                wave.begin();
-                profilePhaseEnd('Seed final walking wave');
+                // Close any empty/unrequested tiers as well, then let painting finish.
+                profilePhaseStart('Close walking wave sources');
+                wave.finish();
+                profilePhaseEnd('Close walking wave sources');
                 const searchMs = performance.now() - started;
                 profilePhaseStart('Final result analysis and DOM');
                 await renderSelection(true, token, true);

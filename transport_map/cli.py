@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import math
 import time
+from collections import Counter
 from pathlib import Path
 
 from .area import clip_transport_features, load_mkad_region
@@ -52,7 +54,7 @@ def parse_args():
     parser.add_argument(
         "--through-service-policy",
         choices=("estimated", "strict"),
-        default="estimated",
+        default="strict",
         help="Estimated: infer same-line reciprocal terminal turnarounds. "
         "Strict: never infer in-seat continuation between OSM relations.",
     )
@@ -366,9 +368,16 @@ def main():
     phase_started = time.monotonic()
     print("[build] START graph validation", flush=True)
     node_count = len(walking["nodes"])
-    for edge in walking["edges"]:
-        if edge[0] >= node_count or edge[1] >= node_count:
-            raise ValueError("Pedestrian graph contains an invalid edge")
+    for a, b, length, flag in walking["edges"]:
+        if not (0 <= a < node_count and 0 <= b < node_count):
+            raise ValueError("Pedestrian graph contains an invalid edge endpoint")
+        if not math.isfinite(length) or length < 0:
+            raise ValueError("Pedestrian graph contains an invalid edge weight")
+        if flag not in (0, 1, 2, 3, 5, 11, 12, 13):
+            raise ValueError("Pedestrian graph contains an invalid edge flag")
+    for stop in index["stops"]:
+        if not -1 <= stop.get("walk_node", -1) < node_count:
+            raise ValueError("Pedestrian graph contains an invalid stop node")
     index["walking"] = walking
     step_done("graph validation", phase_started)
     if args.allow_moskvorechye_private or args.check_moskvorechye_only:
@@ -390,6 +399,7 @@ def main():
         access_report = audit_all_rail_access(
             walking, index["stops"], args.audit_rail_radius
         )
+        access_report["directed_access"] = walking.get("rail_directed_access", {})
         args.audit_rail_access.write_text(
             json.dumps(access_report, ensure_ascii=True, indent=2) + "\n",
             encoding="ascii",
@@ -432,9 +442,6 @@ def main():
         check_moskvorechye_transfers(index["walk_transfers"], index["stops"])
     phase_started = time.monotonic()
     print("[build] START statistics and audit", flush=True)
-    for stop in index["stops"]:
-        if stop.get("walk_node", -1) >= node_count:
-            raise ValueError("Pedestrian graph contains an invalid stop node")
     walk_connected = sum(s.get("walk_node", -1) >= 0 for s in index["stops"])
     print(f"walking stops connected: {walk_connected}/{len(index['stops'])}")
     report = audit_index(index)
@@ -459,6 +466,7 @@ def main():
     report["rail_boarding_access"] = rail_boarding_access_report(index["stops"])
     report["platform_link_audit"] = walking.get("platform_link_audit", {})
     report["rail_access_quality"] = walking.get("rail_access_quality", {})
+    report["rail_directed_access"] = walking.get("rail_directed_access", {})
     geometry_edges = [
         edge
         for route in index["routes"].values()
@@ -466,11 +474,23 @@ def main():
         for edge in direction.get("edge_meters", [])
     ]
     trusted_count = sum(edge is not None for edge in geometry_edges)
+    geometry_audit = index.pop("geometry_audit", [])
+    report["geometry_distance_rejections"] = geometry_audit
+    report["geometry_distance_rejection_counts"] = dict(
+        Counter(item["reason"] for item in geometry_audit)
+    )
+    print(
+        "[travel-model] estimate reasons:",
+        report["geometry_distance_rejection_counts"],
+        flush=True,
+    )
     report["travel_model"] = {
         "source": "OSM topology with heuristic speeds, no schedules",
         "geometry_based_edges": trusted_count,
         "estimated_distance_edges": len(geometry_edges) - trusted_count,
-        "no_assumed_through_service_between_directions": True,
+        "no_assumed_through_service_between_directions": (
+            args.through_service_policy == "strict"
+        ),
         "boarding_waits_are_fixed_estimates": True,
     }
     if args.report_json:
@@ -498,10 +518,15 @@ def main():
         "connected_stops": walk_connected,
         "disconnected_stops": len(index["stops"]) - walk_connected,
         "sample_unconnected_stops": [
-            {"id": s["id"], "name": s.get("name")}
+            {
+                "id": s["id"],
+                "name": s.get("name"),
+                "lon": s.get("lon"),
+                "lat": s.get("lat"),
+            }
             for s in index["stops"]
             if s.get("walk_node", -1) < 0
-        ][:30],
+        ],
     }
     print(
         f"pedestrian graph: {len(walking['nodes'])} nodes, "

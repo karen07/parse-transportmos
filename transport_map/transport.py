@@ -724,6 +724,23 @@ def resolve_route_mode_and_master(route, master_key, master_info):
     return child_mode, master_key, False
 
 
+def choose_route_master(route, parent_keys, master_info):
+    """Use a unique compatible master, independent of PBF relation order."""
+    compatible = []
+    conflicts = []
+    for key in sorted(set(parent_keys)):
+        mode, master, conflict = resolve_route_mode_and_master(route, key, master_info)
+        if conflict:
+            conflicts.append(key)
+        elif master is not None:
+            compatible.append((mode, master))
+    if len(compatible) == 1:
+        mode, master = compatible[0]
+    else:
+        mode, master = route["mode"], None
+    return mode, master, conflicts, [key for _, key in compatible]
+
+
 MOTORIZED_ROAD_CLASSES = {
     "motorway",
     "motorway_link",
@@ -792,7 +809,7 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
     relations = RelationHandler()
     relations.apply_file(str(transport_pbf))
 
-    master_for_relation = {}
+    master_for_relation = defaultdict(set)
     master_info = {}
 
     for master in relations.masters:
@@ -800,7 +817,7 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         master_info[master_key] = master
 
         for relation_id in master["members"]:
-            master_for_relation[relation_id] = master_key
+            master_for_relation[relation_id].add(master_key)
 
     node_ids = set()
     stop_way_ids = set()
@@ -834,14 +851,15 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
     rail_routes_outside_area = 0
     mismatched_route_masters = []
     quarantined_way_conflicts = []
+    ambiguous_masters = []
+    missing_member_routes = []
 
     for route in relations.routes:
         relation_id = route["relation_id"]
-        parent_key = master_for_relation.get(relation_id)
-        mode, master_key, master_conflict = resolve_route_mode_and_master(
-            route, parent_key, master_info
+        mode, master_key, conflicts, compatible = choose_route_master(
+            route, master_for_relation.get(relation_id, ()), master_info
         )
-        if master_conflict:
+        for parent_key in conflicts:
             parent = master_info[parent_key]
             mismatched_route_masters.append(
                 {
@@ -852,6 +870,14 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
                     "master_id": parent["relation_id"],
                     "master_route": parent["route"],
                     "master_mode": parent["mode"],
+                }
+            )
+        if len(compatible) > 1:
+            ambiguous_masters.append(
+                {
+                    "relation_id": relation_id,
+                    "ref": route.get("ref"),
+                    "compatible_masters": compatible,
                 }
             )
         if mode is None:
@@ -907,7 +933,12 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
         else:
             ref = route.get("ref")
             network = route.get("network")
-        route_key = route_identity(mode, ref, relation_id, master_key)
+        independent = master_key is None and bool(conflicts or len(compatible) > 1)
+        route_key = (
+            f"{mode}:relation:{relation_id}"
+            if independent
+            else route_identity(mode, ref, relation_id, master_key)
+        )
 
         direction_missing = sum(
             stop_id not in objects.objects for stop_id in route["stop_members"]
@@ -922,14 +953,21 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
                 rail=True,
             )
         else:
-            # Leave existing surface route handling unchanged in this release.
-            roles = route.get("stop_roles") or []
-            matched = [
-                (key, roles[i] if i < len(roles) else "")
-                for i, key in enumerate(route["stop_members"])
-                if key in objects.objects
-            ]
-            runs = [matched] if len(matched) >= 2 else []
+            # Surface relations select one member type per station. Missing
+            # members are gaps, not permission to jump between known stops.
+            runs = resolved_route_member_runs(
+                route["stop_members"], route.get("stop_roles") or [], objects.objects
+            )
+        if direction_missing:
+            missing_member_routes.append(
+                {
+                    "relation_id": relation_id,
+                    "mode": mode,
+                    "ref": ref,
+                    "missing": direction_missing,
+                    "continuous_runs": len(runs),
+                }
+            )
         if direction_missing and mode in ("mcd", "train", "mcc", "metro"):
             rail_routes_with_missing_stops.append(
                 {
@@ -967,6 +1005,8 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
                         "stops": resolved_stops,
                         "stop_roles": resolved_stop_roles,
                         "geometry_source": geometry_source,
+                        "independent_route": independent,
+                        "incomplete_members": bool(direction_missing),
                     },
                     "geometry": geometry,
                 }
@@ -1059,6 +1099,8 @@ def build_transport_data(transport_pbf, infer_rail_stops=False):
             "missing_stop_members_by_mode": dict(missing_stops_by_mode),
             "rail_routes_with_missing_stops": rail_routes_with_missing_stops,
             "route_master_mode_conflicts": mismatched_route_masters,
+            "ambiguous_route_masters": ambiguous_masters,
+            "routes_with_missing_members": missing_member_routes,
             "quarantined_route_way_conflicts": quarantined_way_conflicts,
             "named_station_candidates": [
                 {

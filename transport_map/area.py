@@ -256,6 +256,8 @@ def clip_transport_features(collection, region):
             new_props = dict(props)
             new_props["stops"] = [stop_id for stop_id, role in run]
             new_props["stop_roles"] = [role for stop_id, role in run]
+            if len(run) != len(members):
+                new_props["incomplete_members"] = True
             routes.append(
                 {"type": "Feature", "properties": new_props, "geometry": geometry}
             )
@@ -291,6 +293,25 @@ def clip_transport_features(collection, region):
         if props.get("mode") in SURFACE_MODES:
             surface_networks[props.get("network") or "(unknown)"] += 1
     audit["surface_networks"] = dict(sorted(surface_networks.items()))
+    retained_ids = {route["properties"].get("relation_id") for route in routes}
+    for key in (
+        "route_master_mode_conflicts",
+        "ambiguous_route_masters",
+        "routes_with_missing_members",
+        "rail_routes_with_missing_stops",
+    ):
+        audit["retained_" + key] = [
+            item
+            for item in audit.get(key, [])
+            if item.get("relation_id") in retained_ids
+        ]
+    # Counts refer to relations with at least one surviving direction, not
+    # proof that a missing member lies within the displayed region.
+    print(
+        "[area] retained relations with missing members:",
+        len(audit["retained_routes_with_missing_members"]),
+        flush=True,
+    )
     result["extraction_audit"] = audit
     if surface_networks:
         print("[area] Surface route directions by OSM network:", flush=True)

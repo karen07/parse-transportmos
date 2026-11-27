@@ -14,7 +14,7 @@ except ImportError:
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
 
 
-PROJECT_VERSION = "0.17.1"
+PROJECT_VERSION = "0.17.3"
 
 
 def cache_implementation():
