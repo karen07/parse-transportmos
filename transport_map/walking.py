@@ -38,10 +38,7 @@ WALK_HIGHWAYS = {
 WALK_GRID_M = 100.0
 
 
-WALK_CACHE_VERSION = 14
-
-
-# Explicit test-only override of four OSM ways found by the v0.7.6 inspector.
+# Explicit test-only override of four OSM ways found by the station inspector.
 # These ways are tagged access=private. Do not apply the exception globally.
 MOSKVORECHYE_PRIVATE_WAYS = frozenset(
     {

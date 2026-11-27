@@ -50,7 +50,7 @@ def simplify_screen(points, epsilon=0.4):
 
 def grouped_paths(data):
     """Use equal x/y scale, no arbitrary byte cap or partial path truncation."""
-    if data.get("format") not in ("moscow-major-roads-v1", "moscow-major-roads-v2"):
+    if data.get("format") != "moscow-major-roads":
         raise ValueError("Unsupported major road geometry")
     mx, my = data["extent"]
     if not all(math.isfinite(v) and v > 0 for v in (mx, my)):

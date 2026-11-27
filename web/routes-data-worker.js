@@ -1,13 +1,4 @@
 function unpackCompactPayload(data) {
-    function base64Bytes(value) {
-        const raw = atob(value);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) {
-            bytes[i] = raw.charCodeAt(i);
-        }
-        return bytes;
-    }
-
     function reader(bytes) {
         let position = 0;
         return {
@@ -42,8 +33,11 @@ function unpackCompactPayload(data) {
     }
 
     const transfers = data.walk_transfers;
-    if (transfers && transfers.format === 'csr-delta-varint-cm-v1') {
-        const input = reader(base64Bytes(transfers.arcs));
+    if (transfers) {
+        if (transfers.format !== 'csr-delta-varint-cm' || !(transfers.arcs instanceof Uint8Array)) {
+            throw new Error('Invalid transfer format');
+        }
+        const input = reader(transfers.arcs);
         const offsets = new Uint32Array(transfers.stop_count + 1);
         const to = new Uint32Array(transfers.arc_count);
         const meters = new Float64Array(transfers.arc_count);
@@ -73,8 +67,11 @@ function unpackCompactPayload(data) {
     }
 
     const packed = data.route_geometries;
-    if (packed && packed.format === 'route-delta-varint-e7-v1') {
-        const input = reader(base64Bytes(packed.data));
+    if (packed) {
+        if (packed.format !== 'route-delta-varint-e7' || !(packed.data instanceof Uint8Array)) {
+            throw new Error('Invalid geometry format');
+        }
+        const input = reader(packed.data);
         const geometries = [];
         for (let i = 0; i < packed.count; i++) {
             const type = input.byte();
@@ -104,51 +101,75 @@ function unpackCompactPayload(data) {
         if (!input.complete()) {
             throw new Error('Trailing transport geometry bytes');
         }
-        for (const route of Object.values(data.routes)) {
-            for (const direction of route.directions) {
-                if (typeof direction.geometry === 'number') {
-                    const geometry = geometries[direction.geometry];
-                    if (!geometry) {
-                        throw new Error('Unknown transport geometry index');
-                    }
-                    direction.geometry = geometry;
-                }
-            }
-        }
+        if (data.routes) throw new Error('Geometry must be a separate resource');
+        data.geometries = geometries;
         delete data.route_geometries;
     }
 }
 
 async function decodeTransportBytes(bytes) {
     if (!bytes.length) throw new Error('Downloaded data file is empty');
-    let text;
     if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
         if (typeof DecompressionStream !== 'function') {
             throw new Error('This browser requires DecompressionStream(gzip)');
         }
         const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-        text = await new Response(stream).text();
-    } else {
-        // Accept gzip already decompressed by an HTTP Content-Encoding header.
-        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        bytes = new Uint8Array(await new Response(stream).arrayBuffer());
     }
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const binary =
+        bytes.length >= 12 &&
+        bytes[0] === 84 &&
+        bytes[1] === 77 &&
+        decoder.decode(bytes.subarray(0, 8)) === 'TMAPDATA';
     self.postMessage({
         type: 'phase',
         stage: 'PARSING JSON',
         detail: 'Decoding the transport network...',
     });
-    const data = JSON.parse(text);
-    unpackCompactPayload(data);
-    if (data.walking && data.walking.format === 'delta-varint-dm-v1') {
-        const graph = data.walking;
-        const decode = (value) => {
-            const raw = atob(value);
-            const bytes = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) {
-                bytes[i] = raw.charCodeAt(i);
+    if (!binary) throw new Error('Invalid binary network magic');
+    let data;
+    {
+        const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(
+            8,
+            true,
+        );
+        let cursor = 12 + length;
+        if (cursor > bytes.length) throw new Error('Truncated binary network header');
+        data = JSON.parse(decoder.decode(bytes.subarray(12, cursor)));
+        const allowed = new Set([
+            'walking.nodes',
+            'walking.edges',
+            'walk_transfers.arcs',
+            'route_geometries.data',
+        ]);
+        if (!Array.isArray(data.binary_sections)) throw new Error('Missing binary sections');
+        for (const [group, key, size] of data.binary_sections) {
+            if (
+                !allowed.delete(group + '.' + key) ||
+                !data[group] ||
+                !Number.isSafeInteger(size) ||
+                size < 0 ||
+                size > bytes.length - cursor
+            ) {
+                throw new Error('Invalid binary network section');
             }
-            return bytes;
-        };
+            data[group][key] = bytes.subarray(cursor, cursor + size);
+            cursor += size;
+        }
+        if (cursor !== bytes.length) throw new Error('Trailing binary network bytes');
+        delete data.binary_sections;
+    }
+    unpackCompactPayload(data);
+    if (data.walking) {
+        const graph = data.walking;
+        if (
+            graph.format !== 'delta-varint-dm' ||
+            !(graph.nodes instanceof Uint8Array) ||
+            !(graph.edges instanceof Uint8Array)
+        ) {
+            throw new Error('Invalid walking graph format');
+        }
         const reader = (bytes) => {
             let position = 0;
             return {
@@ -179,8 +200,8 @@ async function decodeTransportBytes(bytes) {
                 },
             };
         };
-        const xy = reader(decode(graph.nodes));
-        const arcs = reader(decode(graph.edges));
+        const xy = reader(graph.nodes);
+        const arcs = reader(graph.edges);
         // Packed, transferable arrays avoid cloning millions of small JS arrays.
         const nodeXY = new Int32Array(graph.node_count * 2);
         const edgeAB = new Uint32Array(graph.edge_count * 2);
@@ -224,10 +245,52 @@ async function decodeTransportBytes(bytes) {
     return data;
 }
 
+// Build adjacency off the UI thread; all three buffers are transferred.
+function buildWalkingCSR(walking) {
+    const walkNodes = { length: walking.nodeCount };
+    const walkEdges = { length: walking.edgeCount };
+    const walkEdgeAB = walking.edgeAB;
+    const walkEdgeDirs = walking.edgeDirs;
+    const walkEdgeLengths = walking.edgeLengths;
+    const walkDegree = new Uint32Array(walkNodes.length);
+    for (let i = 0; i < walkEdges.length; ++i) {
+        const direction = walkEdgeDirs[i];
+        if (direction !== 3 && direction !== 13) walkDegree[walkEdgeAB[2 * i]]++;
+        if (direction !== 2 && direction !== 12) walkDegree[walkEdgeAB[2 * i + 1]]++;
+    }
+    const walkOffsets = new Uint32Array(walkNodes.length + 1);
+    for (let i = 0; i < walkNodes.length; ++i) {
+        walkOffsets[i + 1] = walkOffsets[i] + walkDegree[i];
+    }
+    const walkTo = new Uint32Array(walkOffsets[walkNodes.length]);
+    const walkWeight = new Float32Array(walkTo.length);
+    const walkNext = walkOffsets.slice(0, walkNodes.length);
+    for (let i = 0; i < walkEdges.length; ++i) {
+        const a = walkEdgeAB[2 * i],
+            b = walkEdgeAB[2 * i + 1];
+        const length = walkEdgeLengths[i],
+            direction = walkEdgeDirs[i];
+        if (direction !== 3 && direction !== 13) {
+            const slot = walkNext[a]++;
+            walkTo[slot] = b;
+            walkWeight[slot] = length;
+        }
+        if (direction !== 2 && direction !== 12) {
+            const slot = walkNext[b]++;
+            walkTo[slot] = a;
+            walkWeight[slot] = length;
+        }
+    }
+
+    walking.offsets = walkOffsets;
+    walking.to = walkTo;
+    walking.weight = walkWeight;
+}
+
 // Graph decode uses transferable typed arrays, not deep structured cloning.
 self.onmessage = async (event) => {
     try {
-        const { url } = event.data;
+        const { url, geometryOnly } = event.data;
         self.postMessage({
             type: 'phase',
             stage: 'FETCHING DATA',
@@ -281,6 +344,17 @@ self.onmessage = async (event) => {
         const decodedStarted = performance.now();
         const data = await decodeTransportBytes(bytes);
         const decodeMs = Math.round(performance.now() - decodedStarted);
+        if (geometryOnly) {
+            if (!Array.isArray(data.geometries)) throw new Error('Missing route geometry');
+            self.postMessage({ type: 'ready', data, decodeMs });
+            return;
+        }
+        const csrStarted = performance.now();
+        if (!data.walking || !data.walk_transfers || !data.routes || !Array.isArray(data.stops)) {
+            throw new Error('Missing required network data');
+        }
+        buildWalkingCSR(data.walking);
+        const csrMs = Math.round(performance.now() - csrStarted);
         const transfer = [];
         for (const value of Object.values(data.walking)) {
             if (ArrayBuffer.isView(value)) transfer.push(value.buffer);
@@ -293,7 +367,7 @@ self.onmessage = async (event) => {
             stage: 'BUILDING GRAPH',
             detail: 'Transferring binary graph buffers to the map...',
         });
-        self.postMessage({ type: 'ready', data, decodeMs }, transfer);
+        self.postMessage({ type: 'ready', data, decodeMs, csrMs }, transfer);
     } catch (error) {
         self.postMessage({ type: 'error', message: String(error.message || error) });
     }

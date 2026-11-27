@@ -10,12 +10,16 @@ from array import array
 from collections import OrderedDict, defaultdict
 from pathlib import Path
 
-from .common import SURFACE_MODES, TRANSFERS_CACHE_NAME, TRANSFERS_TEST_CACHE_NAME
+from .common import (
+    SURFACE_MODES,
+    TRANSFERS_CACHE_NAME,
+    TRANSFERS_TEST_CACHE_NAME,
+    cache_implementation,
+)
 from .walking import MOSKVORECHYE_PLATFORM_IDS
 
 # Offline walking transfer graph: directed CSR with network shortest paths.
 # This is distinct from the full OSM graph needed for on-map coverage.
-WALK_TRANSFER_CACHE_VERSION = 11
 
 
 def merge_interchange_hints(offsets, targets, meters, hints, stop_count):
@@ -223,7 +227,7 @@ def load_or_build_walk_transfers(
             )
         )
     metadata = {
-        "version": WALK_TRANSFER_CACHE_VERSION,
+        "implementation": cache_implementation(),
         "stop_fingerprint": fingerprint.hexdigest(),
         "source": source_key,
         "radius_m": radius_m,

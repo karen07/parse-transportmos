@@ -3,6 +3,7 @@
 import hashlib
 import math
 import re
+from pathlib import Path
 
 try:
     import osmium
@@ -13,7 +14,26 @@ except ImportError:
 OsmiumSimpleHandler = osmium.SimpleHandler if osmium is not None else object
 
 
-PROJECT_VERSION = "0.16.22"
+PROJECT_VERSION = "0.17.1"
+
+
+def cache_implementation():
+    """Fingerprint the code that defines generated graph caches."""
+    digest = hashlib.sha256()
+    root = Path(__file__).parent
+    for name in (
+        "common.py",
+        "walking.py",
+        "pedestrian.py",
+        "station_access.py",
+        "station_osm.py",
+        "transfers.py",
+        "transport_index.py",
+        "transport.py",
+    ):
+        digest.update(name.encode("ascii"))
+        digest.update((root / name).read_bytes())
+    return digest.hexdigest()
 
 
 # OSM extraction and normalization
@@ -42,19 +62,19 @@ MERGED_SOURCE_NAME = "moscow-regions-osmlab.osm.pbf"
 MERGED_MANIFEST_NAME = "moscow-regions-osmlab.sources.json"
 
 
-TRANSPORT_CACHE_NAME = "moscow-transport-osmlab-v1.osm.pbf"
+TRANSPORT_CACHE_NAME = "moscow-transport-osmlab.osm.pbf"
 
 
-PEDESTRIAN_CACHE_NAME = "moscow-pedestrian-osmlab-v1.json.gz"
+PEDESTRIAN_CACHE_NAME = "moscow-pedestrian-osmlab.json.gz"
 
 
-PEDESTRIAN_TEST_CACHE_NAME = "moscow-pedestrian-osmlab-v1-private-test.json.gz"
+PEDESTRIAN_TEST_CACHE_NAME = "moscow-pedestrian-osmlab-private-test.json.gz"
 
 
-TRANSFERS_CACHE_NAME = "moscow-walk-transfers-osmlab-v1.json.gz"
+TRANSFERS_CACHE_NAME = "moscow-walk-transfers-osmlab.json.gz"
 
 
-TRANSFERS_TEST_CACHE_NAME = "moscow-walk-transfers-osmlab-v1-private-test.json.gz"
+TRANSFERS_TEST_CACHE_NAME = "moscow-walk-transfers-osmlab-private-test.json.gz"
 
 
 SURFACE_MODES = {"bus", "tram", "trolleybus"}

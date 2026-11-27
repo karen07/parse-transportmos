@@ -1,9 +1,7 @@
 """Cli for the Moscow transport map."""
 
 import argparse
-import gzip
 import json
-import re
 import time
 from pathlib import Path
 
@@ -246,49 +244,20 @@ def main():
             return
     if args.refresh_web_assets:
         output = Path(args.output)
-        data_file = output.with_name(output.stem + ".json.gz")
         config_file = output.with_name(output.stem + "-config.json")
-        if not data_file.is_file():
-            raise FileNotFoundError(f"Transport data missing: {data_file}")
-        if config_file.exists():
-            # Fast path: refreshing source assets does not read or decode gzip.
-            old_config = json.loads(config_file.read_text(encoding="ascii"))
-            packed = {
-                "origin": [old_config["origin_lon"], old_config["origin_lat"]],
-                "grid_size": old_config["grid_size"],
-                "through_service_policy": (
-                    "estimated" if old_config["infer_through_service"] else "strict"
-                ),
-            }
-            walk_speed = old_config["walk_speed"]
-            walk_minutes = old_config["initial_walk_minutes"]
-            opacity = old_config["initial_opacity"]
-        else:
-            # Backwards-compatible refresh of sites generated before v0.15.10.
-            old_html = output.read_text(encoding="utf-8")
-            old_js = output.with_suffix(".js").read_text(encoding="utf-8")
-            packed = json.loads(gzip.decompress(data_file.read_bytes()))
-            if packed.get("walking", {}).get("format") != "delta-varint-dm-v1":
-                raise ValueError("Existing .json.gz is not a compatible walking graph")
-
-            def old_constant(pattern, text):
-                match = re.search(pattern, text, flags=re.DOTALL)
-                if match is None:
-                    raise ValueError(
-                        "Cannot preserve old generated setting: " + pattern
-                    )
-                return float(match.group(1))
-
-            packed["grid_size"] = old_constant(r"const GRID_SIZE = ([0-9.]+);", old_js)
-            walk_speed = old_constant(
-                r"const WALK_SPEED_M_PER_MIN = ([0-9.]+);", old_js
-            )
-            walk_minutes = old_constant(
-                r'id="walk-time"[^>]*?value="([0-9.]+)"', old_html
-            )
-            opacity = old_constant(
-                r'id="circle-opacity"[^>]*?value="([0-9.]+)"', old_html
-            )
+        if not config_file.is_file():
+            raise FileNotFoundError("Run a full build before refreshing web assets")
+        config = json.loads(config_file.read_text(encoding="ascii"))
+        packed = {
+            "origin": [config["origin_lon"], config["origin_lat"]],
+            "grid_size": config["grid_size"],
+            "through_service_policy": (
+                "estimated" if config["infer_through_service"] else "strict"
+            ),
+        }
+        walk_speed = config["walk_speed"]
+        walk_minutes = config["initial_walk_minutes"]
+        opacity = config["initial_opacity"]
         if args.circle_opacity is not None:
             opacity = args.circle_opacity
         print("[build] Refreshing page assets; keeping existing OSM data", flush=True)
@@ -302,7 +271,10 @@ def main():
             cache_dir=Path(args.cache_dir),
         )
         write_atomic_bytes(output, html.encode("utf-8"))
-        print("[build] Web assets refreshed, transport data unchanged", flush=True)
+        print(
+            "[build] Web assets refreshed; transport graph content preserved",
+            flush=True,
+        )
         return
     if args.allow_moskvorechye_private:
         print(

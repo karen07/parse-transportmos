@@ -10,6 +10,7 @@ from pathlib import Path
 from .common import (
     PEDESTRIAN_CACHE_NAME,
     PEDESTRIAN_TEST_CACHE_NAME,
+    cache_implementation,
     osmium,
     stop_fingerprint,
 )
@@ -23,7 +24,6 @@ from .station_access import (
 from .station_osm import StationEntranceCollector
 from .walking import (
     MOSKVORECHYE_PRIVATE_WAYS,
-    WALK_CACHE_VERSION,
     WalkNodeCollector,
     WalkWayCollector,
     choose_boarding_platforms,
@@ -292,7 +292,10 @@ def load_or_build_pedestrian(
         else PEDESTRIAN_CACHE_NAME
     )
     path = cache_dir / filename
-    cache_version = WALK_CACHE_VERSION + int(allow_private_station_ways)
+    private_ways = (
+        sorted(MOSKVORECHYE_PRIVATE_WAYS) if allow_private_station_ways else []
+    )
+    implementation = cache_implementation()
     fingerprint = stop_fingerprint(index["stops"])
     source_path = Path(source)
     source_stat = source_path.stat() if source_path.is_file() else None
@@ -305,8 +308,9 @@ def load_or_build_pedestrian(
         with gzip.open(path, "rt", encoding="ascii") as stream:
             cached = json.load(stream)
         if (
-            cached.get("version") == cache_version
-            and cached.get("stop_fingerprint") == fingerprint
+            cached.get("stop_fingerprint") == fingerprint
+            and cached.get("allowed_private_ways") == private_ways
+            and cached.get("implementation") == implementation
             and cached.get("walk_limit_m") == limit_m
             and cached.get("source_key") == source_key
         ):
@@ -327,13 +331,11 @@ def load_or_build_pedestrian(
         allow_private_station_ways=allow_private_station_ways,
     )
     content = {
-        "version": cache_version,
+        "implementation": implementation,
         "stop_fingerprint": fingerprint,
         "walk_limit_m": limit_m,
         "source_key": source_key,
-        "allowed_private_ways": (
-            sorted(MOSKVORECHYE_PRIVATE_WAYS) if allow_private_station_ways else []
-        ),
+        "allowed_private_ways": private_ways,
         "stop_nodes": [stop["walk_node"] for stop in index["stops"]],
         "stop_access_kinds": [
             stop.get("station_access_kind") for stop in index["stops"]

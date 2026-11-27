@@ -1,10 +1,10 @@
 """Site builder for the Moscow transport map."""
 
-import base64
 import gzip
+import hashlib
 import json
 import re
-import time
+import struct
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -56,11 +56,11 @@ def pack_walking_payload(data):
         arcs.append(direction)
         previous_a = a
     encoded = {
-        "format": "delta-varint-dm-v1",
+        "format": "delta-varint-dm",
         "node_count": len(walking["nodes"]),
         "edge_count": len(walking["edges"]),
-        "nodes": base64.b64encode(vertices).decode("ascii"),
-        "edges": base64.b64encode(arcs).decode("ascii"),
+        "nodes": bytes(vertices),
+        "edges": bytes(arcs),
     }
     return {**data, "walking": encoded}
 
@@ -94,10 +94,10 @@ def pack_transfers_payload(graph):
                 raise ValueError("Transfer distance would lose precision")
             encode_unsigned_varint(out, centimeters)
     return {
-        "format": "csr-delta-varint-cm-v1",
+        "format": "csr-delta-varint-cm",
         "stop_count": stop_count,
         "arc_count": len(targets),
-        "arcs": base64.b64encode(out).decode("ascii"),
+        "arcs": bytes(out),
     }
 
 
@@ -116,7 +116,7 @@ def pack_route_geometry_payload(data):
             compact_direction = dict(direction)
             compact_direction.pop("geometry_source", None)
             # Keep roundtrip=yes! The browser needs it for topology-based
-            # circle continuation; the old compact payload dropped it.
+            # circle continuation.
             geometry = direction.get("geometry") or {}
             kind = geometry.get("type")
             if kind in ("LineString", "MultiLineString"):
@@ -143,9 +143,9 @@ def pack_route_geometry_payload(data):
         compact_route["directions"] = directions
         packed_routes[key] = compact_route
     return packed_routes, {
-        "format": "route-delta-varint-e7-v1",
+        "format": "route-delta-varint-e7",
         "count": count,
-        "data": base64.b64encode(encoded).decode("ascii"),
+        "data": bytes(encoded),
     }
 
 
@@ -161,6 +161,66 @@ def pack_html_payload(data):
     trimmed.pop("grid", None)
     trimmed.pop("grid_size", None)
     return pack_walking_payload(trimmed)
+
+
+# Envelope: magic, little-endian JSON length, JSON metadata, raw varint streams.
+# The metadata records section sizes; the reader rejects missing/trailing bytes.
+BINARY_MAGIC = b"TMAPDATA"
+BINARY_SECTIONS = (
+    ("walking", "nodes"),
+    ("walking", "edges"),
+    ("walk_transfers", "arcs"),
+    ("route_geometries", "data"),
+)
+
+
+def encode_binary_payload(packed):
+    metadata = dict(packed)
+    sections = []
+    chunks = []
+    for group, key in BINARY_SECTIONS:
+        if group not in packed:
+            continue
+        if group not in [item[0] for item in sections]:
+            metadata[group] = dict(packed[group])
+        raw = packed[group][key]
+        metadata[group].pop(key)
+        sections.append([group, key, len(raw)])
+        chunks.append(raw)
+    metadata["binary_sections"] = sections
+    header = json.dumps(metadata, ensure_ascii=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+    return b"".join((BINARY_MAGIC, struct.pack("<I", len(header)), header, *chunks))
+
+
+def write_binary_network(packed, output_path):
+    """Write the current network and deferred geometry as binary resources."""
+    core = dict(packed)
+    geometry = core.pop("route_geometries", None)
+    geometry_filename = None
+    if geometry is not None:
+        geometry_id = hashlib.sha256(geometry["data"]).hexdigest()
+        core["geometry_id"] = geometry_id
+        geometry_raw = encode_binary_payload(
+            {
+                "geometry_id": geometry_id,
+                "route_geometries": geometry,
+            }
+        )
+        geometry_filename = (
+            output_path.stem + "-geometry-" + geometry_id[:16] + ".bin.gz"
+        )
+        compressed = gzip.compress(geometry_raw, compresslevel=9, mtime=0)
+        write_atomic_bytes(output_path.with_name(geometry_filename), compressed)
+        print(f"[build] route geometry: {len(compressed) / (1024 * 1024):.2f} MiB")
+    raw = encode_binary_payload(core)
+    compressed = gzip.compress(raw, compresslevel=9, mtime=0)
+    network_id = hashlib.sha256(raw).hexdigest()[:16]
+    data_filename = output_path.stem + "-network-" + network_id + ".bin.gz"
+    write_atomic_bytes(output_path.with_name(data_filename), compressed)
+    print(f"[build] binary network: {len(compressed) / (1024 * 1024):.2f} MiB")
+    return data_filename, geometry_filename
 
 
 # Static page generator (HTML + CSS + JS + worker + compressed payload)
@@ -251,32 +311,29 @@ def build_html(
     reuse_data=False,
     cache_dir=Path("build"),
 ):
+    output_path = Path(output_path)
+    base = output_path.stem
     if not reuse_data:
-        html_started = time.monotonic()
-        print("[build] START JSON serialization", flush=True)
-        raw_payload = json.dumps(
-            pack_html_payload(data),
-            ensure_ascii=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        print(
-            "[build] DONE JSON serialization:",
-            f"{time.monotonic()-html_started:.3f}s",
-            flush=True,
+        data_filename, geometry_filename = write_binary_network(
+            pack_html_payload(data), output_path
         )
-        html_started = time.monotonic()
-        print("[build] START gzip compression", flush=True)
-        compressed_payload = gzip.compress(raw_payload, compresslevel=9, mtime=0)
-        print(
-            "[build] DONE gzip compression:",
-            f"{time.monotonic()-html_started:.3f}s",
-            flush=True,
-        )
-        print(
-            "external data:",
-            f"{len(raw_payload) / (1024 * 1024):.1f} MiB raw ->",
-            f"{len(compressed_payload) / (1024 * 1024):.1f} MiB gzip",
-        )
+    else:
+        config_path = output_path.with_name(base + "-config.json")
+        config = json.loads(config_path.read_text(encoding="ascii"))
+        data_filename = config["data_file"]
+        geometry_filename = config["geometry_file"]
+        for name in (data_filename, geometry_filename):
+            if not name or Path(name).name != name or not name.endswith(".bin.gz"):
+                raise ValueError(
+                    "Run a full build to generate current binary resources"
+                )
+            if not output_path.with_name(name).is_file():
+                raise FileNotFoundError(name)
+            with gzip.open(output_path.with_name(name), "rb") as stream:
+                if stream.read(len(BINARY_MAGIC)) != BINARY_MAGIC:
+                    raise ValueError(
+                        "Run a full build to generate current binary resources"
+                    )
 
     origin_lon, origin_lat = data["origin"]
     grid_size = data["grid_size"]
@@ -293,9 +350,6 @@ def build_html(
 
     catalogs = load_catalogs()
 
-    output_path = Path(output_path)
-    base = output_path.stem
-    data_filename = base + ".json.gz"
     js_filename = base + ".js"
     css_filename = base + ".css"
     data_worker_filename = base + "-data-worker.js"
@@ -317,6 +371,7 @@ def build_html(
             "width_degrees": 2 * VIEW_X_METERS / METERS_PER_DEGREE_LON,
         },
         "data_file": data_filename,
+        "geometry_file": geometry_filename,
         "data_worker_file": data_worker_filename,
         "maplibre_worker_file": maplibre_worker_filename,
         "walk_speed": walk_speed,
@@ -343,8 +398,6 @@ def build_html(
         write_atomic_bytes(
             output_path.with_name(name), (icon_assets / name).read_bytes()
         )
-    if not reuse_data:
-        write_atomic_bytes(output_path.with_name(data_filename), compressed_payload)
     write_atomic_bytes(
         output_path.with_name(config_filename),
         (json.dumps(config, ensure_ascii=True, indent=4) + "\n").encode("ascii"),
@@ -364,8 +417,6 @@ def build_html(
         content = (WEB_SOURCE_DIR / "styles" / filename).read_bytes()
         write_atomic_bytes(output_path.parent / "styles" / filename, content)
     publish_catalogs(output_path.parent / "i18n", catalogs, write_atomic_bytes)
-    # Older releases copied this stylesheet, but it is now inlined for FCP.
-    output_path.with_name("boot-loader.css").unlink(missing_ok=True)
     # Prefer to vendor the official matching CSP worker once at build time.
     # If unavailable, fall back to a same-origin shim importing from the
     # same unpkg origin that already serves MapLibre's main JS bundle.
@@ -404,6 +455,4 @@ def build_html(
         ),
         flush=True,
     )
-    # Preview is available on the same page via ?boot-preview=1.
-    output_path.with_name("boot-preview.html").unlink(missing_ok=True)
     return result

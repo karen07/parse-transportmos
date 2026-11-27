@@ -43,7 +43,7 @@ CLASS_INDEX = {key: index for index, key in enumerate(CLASS_NAMES)}
 MAIN_HIGHWAYS = {"motorway", "trunk", "primary"}
 PROFILES = (10, 11, 12)
 DEFAULT_ZOOM = 11
-ROAD_FORMAT = "moscow-major-roads-v2"
+ROAD_FORMAT = "moscow-major-roads"
 # Named corridors may change OSM highway class along their length.
 RING_NAMES = (
     (

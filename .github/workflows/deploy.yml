@@ -30,7 +30,6 @@ jobs:
           test -s site/routes.js
           test -s site/routes.css
           test -s site/routes-config.json
-          test -s site/routes.json.gz
           test -s site/routes-data-worker.js
           test -s site/routes-maplibre-worker.js
           test -s site/boot-loader.js
@@ -41,7 +40,20 @@ jobs:
           test -s site/styles/light.json
           test -s site/styles/dark.json
           test -s site/moscow-major-roads.svg
-          gzip -t site/routes.json.gz
+          python3 - <<'PY'
+          import gzip
+          import json
+          from pathlib import Path
+          site = Path("site")
+          config = json.loads((site / "routes-config.json").read_text())
+          for name in (config["data_file"], config.get("geometry_file")):
+              if name:
+                  assert Path(name).name == name
+                  with gzip.open(site / name, "rb") as stream:
+                      assert stream.read(8) == b"TMAPDATA"
+                      while stream.read(1024 * 1024):
+                          pass
+          PY
       - name: Prepare website
         run: cp site/routes.html site/index.html
       - name: Set artifact name

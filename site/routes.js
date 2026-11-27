@@ -49,7 +49,7 @@ function writeShareState(url, state) {
     }
     point('lat', 'lon', state.origin);
     point('to_lat', 'to_lon', state.target);
-    // Remove obsolete camera parameters from links created by older versions.
+    // Camera position is never part of the shared state.
     for (const key of ['map_lat', 'map_lon', 'zoom']) params.delete(key);
     set('modes', state.modes.join(','));
     set('walk', state.walk);
@@ -304,6 +304,59 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     const stops = data.stops;
     const routes = data.routes;
+    // Geometry is not needed by RAPTOR or the walking wave. Fetch once when
+    // a visible route, focused route, or destination itinerary needs it.
+    let geometryState = transportConfig.geometry_file ? 'deferred' : 'ready';
+    let geometryPromise = null;
+    function ensureRouteGeometry() {
+        if (geometryState === 'ready' || geometryState === 'failed') return Promise.resolve();
+        if (geometryPromise) return geometryPromise;
+        geometryState = 'loading';
+        geometryPromise = new Promise((resolve, reject) => {
+            const worker = new Worker(new URL(transportConfig.data_worker_file, document.baseURI));
+            worker.onmessage = ({ data: message }) => {
+                if (message.type !== 'ready' && message.type !== 'error') return;
+                worker.terminate();
+                if (message.type === 'error') reject(new Error(message.message));
+                else resolve(message.data);
+            };
+            worker.onerror = (event) => {
+                worker.terminate();
+                reject(new Error(event.message || 'Geometry Worker failed'));
+            };
+            worker.postMessage({
+                url: new URL(transportConfig.geometry_file, document.baseURI).href,
+                geometryOnly: true,
+            });
+        })
+            .then((payload) => {
+                if (payload.geometry_id !== data.geometry_id)
+                    throw new Error('Geometry version mismatch');
+                const assignments = [];
+                for (const route of Object.values(routes)) {
+                    for (const direction of route.directions) {
+                        if (typeof direction.geometry !== 'number') continue;
+                        const shape = payload.geometries[direction.geometry];
+                        if (!shape) throw new Error('Unknown geometry index');
+                        assignments.push([direction, shape]);
+                    }
+                }
+                for (const [direction, shape] of assignments) direction.geometry = shape;
+                geometryState = 'ready';
+            })
+            .catch((error) => {
+                // The same explicit stop-chain fallback as incomplete OSM geometry.
+                geometryState = 'failed';
+                console.error('[map] Geometry unavailable; using stop chains', error);
+                showLocationStatus('geometryUnavailable');
+            })
+            .finally(() => {
+                scheduleRoutePaint();
+                profileCheckIdle();
+            });
+        return geometryPromise;
+    }
+
     const modeInputs = Array.from(document.querySelectorAll('.mode-input'));
     if (initialShare.modes !== null) {
         for (const input of modeInputs) input.checked = initialShare.modes.includes(input.value);
@@ -380,6 +433,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     let circleOpacity = Number(circleOpacityInput.value) / 100.0;
     let selectedPoint = null;
     let selectedRouteFocus = null;
+    let presentationFocus = false;
+    let basePresentationKey = null;
     let renderFrame = null;
     let renderGeneration = 0;
     // Profiling reports wall time to FULLY IDLE, not just the end of RAPTOR.
@@ -392,14 +447,46 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         return Math.round(performance.now() - p.started);
     }
 
+    function canvasAllocation() {
+        const bytes = (canvas) => canvas.width * canvas.height * 4;
+        const coverage = [coverageCanvas, ...coverageCanvases].reduce((n, c) => n + bytes(c), 0);
+        const routes = [...routeCanvases, routeLabelCanvas].reduce((n, c) => n + bytes(c), 0);
+        const stops = bytes(stopCanvas);
+        return { coverage, routes, stops, total: coverage + routes + stops };
+    }
+
+    function routeQueueCounts(remaining = false, visible = null) {
+        const counts = [0, 0, 0];
+        for (let i = 0; i < routeEdgeRecords.length; ++i) {
+            if (visible !== null && visible !== routeQueueVisible(i)) continue;
+            counts[Math.floor(i / 2)] +=
+                routeEdgeRecords[i].length - (remaining ? routeCanvasCursors[i] : 0);
+        }
+        return counts;
+    }
+
     function profileSnapshot(p) {
         const wave = p.wave;
         const walk = wave ? wave.stats() : null;
         const stopPending = Math.max(0, stopPaintQueue.length - stopPaintCursor);
         return {
             elapsedMs: profileElapsed(p),
-            phase: p.searchDone && wave && !wave.idle() ? 'Walking coverage wave' : p.currentPhase,
+            phase: p.finished
+                ? 'Fully idle'
+                : p.searchDone
+                  ? wave && !wave.idle()
+                      ? 'Walking coverage wave'
+                      : 'Finishing Canvas'
+                  : p.currentPhase,
+            zoom: map.getZoom(),
+            visibility: {
+                rail: zoomFade(map.getZoom(), RAIL_ROUTE_MIN_ZOOM),
+                surface: zoomFade(map.getZoom(), SURFACE_ROUTE_MIN_ZOOM),
+                stops: zoomFade(map.getZoom(), STOP_MIN_ZOOM),
+                routeLabels: zoomFade(map.getZoom(), ROUTE_LABEL_MIN_ZOOM),
+            },
             transportDone: p.searchDone,
+            geometryState,
             wave: walk,
             walkingLines: [0, 1, 2, 3].map((tier) => coverageLinesForTier(tier).length),
             walkingPaintPending: coverageCursor.map(
@@ -407,11 +494,26 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             ),
             dirtyCoverageTiles: coverageMasksDirty ? 1 : 0,
             coverageComposites: coverageCompositeCount,
-            routeEdges: routeEdgeRecords.map((items) => items.length),
-            routePaintPending: routeEdgeRecords.map(
-                (items, tier) => items.length - routeCanvasCursors[tier],
-            ),
+            routeEdges: routeQueueCounts(),
+            routePaintPending: routeQueueCounts(true, true),
+            routePaintDeferred: routeQueueCounts(true, false),
             stopCount: displayedStopIndexes.size,
+            visibleStopCount: visibleStopIndexes.size,
+            canvasBytesEstimate: canvasAllocation(),
+            walkingIndex: walkSegmentGrid
+                ? {
+                      type: walkSegmentGrid.dense ? 'csr' : 'sparse',
+                      bytes: walkSegmentGrid.bytes,
+                  }
+                : null,
+            cacheEntries: {
+                reachability: reachabilitySearchCache.size,
+                itineraries: itineraryCache.size,
+                walkingPoints: walkPointCache.size,
+                boarding: boardingOptionsCache.size,
+                routeEdgeMetrics: routeEdgeMetricsCache.size,
+                routePaintGeometry: routePaintGeometryCache.size,
+            },
             stopPaintPending: stopPending,
             stopRedrawPending: stopCanvasRedrawItems.length - stopCanvasRedrawIndex,
             cpuMs: { ...p.cpu },
@@ -423,11 +525,22 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function profilePending(p) {
         if (!p.searchDone || !p.wave || !p.wave.idle()) return true;
-        if (hasUnpaintedCoverage() || coveragePaintFrame !== null) return true;
-        if (routePaintFrame !== null || routeCanvasZooming) return true;
-        if (routeEdgeRecords.some((items, tier) => items.length !== routeCanvasCursors[tier]))
+        if (
+            hasUnpaintedCoverage() ||
+            coveragePaintFrame !== null ||
+            coverageViewFrame !== null ||
+            coverageZooming
+        )
             return true;
-        if (stopPaintFrame !== null || stopCanvasRedrawFrame !== null) return true;
+        if (routePaintFrame !== null || routeViewFrame !== null || routeCanvasZooming) return true;
+        if (hasPendingRoutePaint()) return true;
+        if (
+            stopPaintFrame !== null ||
+            stopCanvasRedrawFrame !== null ||
+            stopCanvasRepaintTimer !== null ||
+            stopCanvasZooming
+        )
+            return true;
         if (stopPaintCursor < stopPaintQueue.length) return true;
         if (stopCanvasRedrawIndex < stopCanvasRedrawItems.length) return true;
         return false;
@@ -464,7 +577,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             clearInterval(p.timer);
             if (p.longTaskObserver) p.longTaskObserver.disconnect();
             const report = {
-                version: '0.7.3',
+                applicationVersion: transportConfig.version,
                 run: p.serial,
                 settings: p.settings,
                 totalWallMs: profileElapsed(p),
@@ -483,6 +596,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 longTasks: p.longTasks,
             };
             window.transportLastProfile = report;
+            if (!selectedRouteFocus && coverageState) basePresentationKey = selectionKey();
             setTiming(() =>
                 transportI18n.t('resultsDone', {
                     result: (report.resultsReadyMs / 1000).toFixed(1),
@@ -493,6 +607,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             console.table(p.phases);
             console.info('[map] FINAL REPORT (copy window.transportLastProfile)', report);
         });
+    }
+
+    function profileCheckIdle() {
+        if (runProfile && runProfile.searchDone) profileFinish(runProfile);
     }
 
     function profileMarkPaint(name, elapsed, count = 0) {
@@ -612,11 +730,31 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     let displayedStopIndexes = new Set();
     // Stop dots use one Canvas, not one Leaflet object per stop.
     const directionShapeCache = new WeakMap();
+    const routePaintGeometryCache = new Map();
+    const ROUTE_PAINT_GEOMETRY_LIMIT = 4096;
     const routeLegTraversalCache = new Map();
     const boardingOptionsCache = new Map();
     const routeEdgeMetricsCache = new Map();
     const reachabilitySearchCache = new Map();
     const itineraryCache = new Map();
+    const REACHABILITY_CACHE_LIMIT = 4;
+    const ITINERARY_CACHE_LIMIT = 16;
+    const WALK_POINT_CACHE_LIMIT = 12;
+
+    function cacheGetRecent(cache, key) {
+        const value = cache.get(key);
+        if (value !== undefined) {
+            cache.delete(key);
+            cache.set(key, value);
+        }
+        return value;
+    }
+
+    function cacheSetBounded(cache, key, value, limit) {
+        cache.delete(key);
+        cache.set(key, value);
+        while (cache.size > limit) cache.delete(cache.keys().next().value);
+    }
     let travelRenderTimer = null;
 
     const map = L.map('map', {
@@ -848,7 +986,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function shouldShowStopDots() {
-        return zoomFade(map.getZoom(), STOP_MIN_ZOOM) > 0;
+        return !presentationFocus && zoomFade(map.getZoom(), STOP_MIN_ZOOM) > 0;
     }
 
     function routeFade(routeKey) {
@@ -857,7 +995,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function shouldShowBackgroundRoute(routeKey) {
-        return routeFade(routeKey) > 0;
+        return !presentationFocus && routeFade(routeKey) > 0;
     }
 
     function updateTargetControls() {
@@ -960,45 +1098,12 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     // CSR adjacency avoids millions of per-node JavaScript arrays.
-    const csrStarted = performance.now();
-    const walkDegree = new Uint32Array(walkNodes.length);
-    for (let i = 0; i < walkEdges.length; ++i) {
-        const direction = walkEdgeDirs[i];
-        if (direction !== 3 && direction !== 13) walkDegree[walkEdgeAB[2 * i]]++;
-        if (direction !== 2 && direction !== 12) walkDegree[walkEdgeAB[2 * i + 1]]++;
+    if (!walking.offsets || !walking.to || !walking.weight) {
+        throw new Error('Missing pedestrian CSR from worker');
     }
-    const walkOffsets = new Uint32Array(walkNodes.length + 1);
-    for (let i = 0; i < walkNodes.length; ++i) {
-        walkOffsets[i + 1] = walkOffsets[i] + walkDegree[i];
-    }
-    const walkTo = new Uint32Array(walkOffsets[walkNodes.length]);
-    const walkWeight = new Float32Array(walkTo.length);
-    const walkNext = walkOffsets.slice(0, walkNodes.length);
-    for (let i = 0; i < walkEdges.length; ++i) {
-        const a = walkEdgeAB[2 * i],
-            b = walkEdgeAB[2 * i + 1];
-        const length = walkEdgeLengths[i],
-            direction = walkEdgeDirs[i];
-        if (direction !== 3 && direction !== 13) {
-            const slot = walkNext[a]++;
-            walkTo[slot] = b;
-            walkWeight[slot] = length;
-        }
-        if (direction !== 2 && direction !== 12) {
-            const slot = walkNext[b]++;
-            walkTo[slot] = a;
-            walkWeight[slot] = length;
-        }
-    }
-
-    console.info(
-        '[map] BOOT pedestrian CSR',
-        Math.round(performance.now() - csrStarted),
-        'ms; nodes:',
-        walkNodes.length,
-        'arcs:',
-        walkTo.length,
-    );
+    const walkOffsets = walking.offsets;
+    const walkTo = walking.to;
+    const walkWeight = walking.weight;
 
     // All walking searches use the existing CSR arrays in this thread.
     // Bounded generator steps let the browser render between expensive searches.
@@ -1030,15 +1135,20 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     async function warmWalkingPoint(point, token) {
         const xy = project(point.lon, point.lat);
         const key = xy[0].toFixed(1) + ':' + xy[1].toFixed(1) + ':' + walkRadius;
-        if (walkPointCache.has(key)) return true;
-        if (!(await warmWalkSegmentGrid(token))) return false;
+        if (cacheGetRecent(walkPointCache, key)) return true;
+        if (!(await warmWalkSegmentGrid(token)) || token !== renderGeneration) return false;
         const anchor = snapWalkXY(xy[0], xy[1]);
         if (!anchor) {
-            walkPointCache.set(key, {
-                anchor: null,
-                distance: new Map(),
-                stopsReached: new Map(),
-            });
+            cacheSetBounded(
+                walkPointCache,
+                key,
+                {
+                    anchor: null,
+                    distance: new Map(),
+                    stopsReached: new Map(),
+                },
+                WALK_POINT_CACHE_LIMIT,
+            );
             return true;
         }
         const result = await drainWalkingSteps(
@@ -1047,89 +1157,101 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             true,
         );
         if (!result || token !== renderGeneration) return false;
-        walkPointCache.set(key, { anchor, ...result });
-        if (walkPointCache.size > 12) {
-            walkPointCache.delete(walkPointCache.keys().next().value);
-        }
+        cacheSetBounded(walkPointCache, key, { anchor, ...result }, WALK_POINT_CACHE_LIMIT);
         return true;
     }
 
     const WALK_GRID_METERS = 100;
-    const WALK_MAX_SNAP_METERS = 35;
+    const WALK_MAX_SNAP_METERS = 100;
+    const WALK_APPROX_SNAP_METERS = 35;
     let walkSegmentGrid = null;
     let walkSegmentGridIterator = null;
     let walkPointCache = new Map();
 
     function makeMinHeap() {
-        const array = [];
-        return {
-            push(distance, node) {
-                const item = [distance, node];
-                let i = array.length;
-                array.push(item);
-                while (i) {
-                    const parent = (i - 1) >> 1;
-                    if (array[parent][0] <= item[0]) break;
-                    array[i] = array[parent];
-                    i = parent;
-                }
-                array[i] = item;
-            },
-            pop() {
-                if (!array.length) return null;
-                const first = array[0];
-                const last = array.pop();
-                if (array.length) {
-                    let i = 0;
-                    while (2 * i + 1 < array.length) {
-                        let child = 2 * i + 1;
-                        if (child + 1 < array.length && array[child + 1][0] < array[child][0])
-                            child++;
-                        if (array[child][0] >= last[0]) break;
-                        array[i] = array[child];
-                        i = child;
-                    }
-                    array[i] = last;
-                }
-                return first;
-            },
-            get size() {
-                return array.length;
-            },
-        };
+        return makeCoverageHeap();
     }
 
+    // Dense CSR grid for ordinary city-sized graphs. Sparse fallback prevents
+    // excessive allocation when a source graph contains distant outliers.
     function* buildWalkSegmentGridSteps() {
-        const grid = new Map();
-        for (let i = 0; i < walkEdges.length; ++i) {
-            const direction = walkEdgeDirs[i];
-            if (direction === 5 || direction >= 10) continue; // No virtual links.
-            const a = walkEdgeAB[2 * i],
-                b = walkEdgeAB[2 * i + 1];
-            const ax = walkNodeXY[2 * a],
-                ay = walkNodeXY[2 * a + 1];
-            const bx = walkNodeXY[2 * b],
-                by = walkNodeXY[2 * b + 1];
-            const cellSize = WALK_GRID_METERS * 10;
-            const x0 = Math.floor(Math.min(ax, bx) / cellSize);
-            const x1 = Math.floor(Math.max(ax, bx) / cellSize);
-            const y0 = Math.floor(Math.min(ay, by) / cellSize);
-            const y1 = Math.floor(Math.max(ay, by) / cellSize);
-            if ((x1 - x0 + 1) * (y1 - y0 + 1) > 10000) continue;
-            for (let x = x0; x <= x1; ++x) {
+        const cellSize = WALK_GRID_METERS * 10;
+        let minX = Infinity,
+            minY = Infinity,
+            maxX = -Infinity,
+            maxY = -Infinity;
+        for (let i = 0; i < walkNodes.length; ++i) {
+            const x = Math.floor(walkNodeXY[2 * i] / cellSize);
+            const y = Math.floor(walkNodeXY[2 * i + 1] / cellSize);
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+            if ((i & 4095) === 0) yield;
+        }
+        const width = maxX - minX + 1;
+        const height = maxY - minY + 1;
+        const dense = width > 0 && height > 0 && width * height <= 4000000;
+        const offsets = dense ? new Uint32Array(width * height + 1) : null;
+        const sparse = dense ? null : new Map();
+        function* scan(fill, edges, cursor) {
+            for (let i = 0; i < walkEdges.length; ++i) {
+                if ((i & 1023) === 0) yield;
+                const direction = walkEdgeDirs[i];
+                if (direction === 5 || direction >= 10) continue;
+                const a = walkEdgeAB[2 * i],
+                    b = walkEdgeAB[2 * i + 1];
+                const ax = walkNodeXY[2 * a],
+                    ay = walkNodeXY[2 * a + 1];
+                const bx = walkNodeXY[2 * b],
+                    by = walkNodeXY[2 * b + 1];
+                const x0 = Math.floor(Math.min(ax, bx) / cellSize);
+                const x1 = Math.floor(Math.max(ax, bx) / cellSize);
+                const y0 = Math.floor(Math.min(ay, by) / cellSize);
+                const y1 = Math.floor(Math.max(ay, by) / cellSize);
+                if ((x1 - x0 + 1) * (y1 - y0 + 1) > 10000) continue;
                 for (let y = y0; y <= y1; ++y) {
-                    const key = x + ':' + y;
-                    let entries = grid.get(key);
-                    if (!entries) {
-                        entries = [];
-                        grid.set(key, entries);
+                    for (let x = x0; x <= x1; ++x) {
+                        if (dense) {
+                            const cell = (y - minY) * width + x - minX;
+                            if (fill) edges[cursor[cell]++] = i;
+                            else offsets[cell + 1]++;
+                        } else {
+                            const key = x + ':' + y;
+                            let entries = sparse.get(key);
+                            if (!entries) sparse.set(key, (entries = []));
+                            entries.push(i);
+                        }
                     }
-                    entries.push(i);
                 }
             }
-            if ((i & 1023) === 0) yield;
         }
-        walkSegmentGrid = grid;
+        yield* scan(false);
+        let edges = null;
+        if (dense) {
+            for (let i = 1; i < offsets.length; ++i) {
+                offsets[i] += offsets[i - 1];
+                if ((i & 16383) === 0) yield;
+            }
+            edges = new Uint32Array(offsets[offsets.length - 1]);
+            yield* scan(true, edges, offsets.slice(0, -1));
+        }
+        walkSegmentGrid = {
+            minX,
+            minY,
+            maxX,
+            maxY,
+            dense,
+            sparse,
+            bytes: dense ? offsets.byteLength + edges.byteLength : null,
+            get(x, y) {
+                if (x < minX || x > maxX || y < minY || y > maxY) return null;
+                if (!dense) return sparse.get(x + ':' + y);
+                const cell = (y - minY) * width + x - minX;
+                if (offsets[cell] === offsets[cell + 1]) return null;
+                return edges.subarray(offsets[cell], offsets[cell + 1]);
+            },
+        };
         walkSegmentGridIterator = null;
         return true;
     }
@@ -1161,14 +1283,13 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         let best = null;
         for (let dx = -1; dx <= 1; ++dx) {
             for (let dy = -1; dy <= 1; ++dy) {
-                const entries = walkSegmentGrid.get(gx + dx + ':' + (gy + dy));
+                const entries = walkSegmentGrid.get(gx + dx, gy + dy);
                 if (!entries) continue;
                 for (const edgeIndex of entries) {
                     if (checked.has(edgeIndex)) continue;
                     checked.add(edgeIndex);
-                    const edge = walkEdgeAt(edgeIndex);
-                    const a = walkNodeAt(edge[0]);
-                    const b = walkNodeAt(edge[1]);
+                    const a = walkNodeAt(walkEdgeAB[2 * edgeIndex]);
+                    const b = walkNodeAt(walkEdgeAB[2 * edgeIndex + 1]);
                     const ux = b[0] - a[0];
                     const uy = b[1] - a[1];
                     const length2 = ux * ux + uy * uy;
@@ -1252,16 +1373,13 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function walkContextForXY(x, y) {
         const key = x.toFixed(1) + ':' + y.toFixed(1) + ':' + walkRadius;
-        const cached = walkPointCache.get(key);
+        const cached = cacheGetRecent(walkPointCache, key);
         if (cached) return cached;
         const anchor = snapWalkXY(x, y);
         const context = anchor
             ? { anchor, ...walkDijkstra(walkSeeds(anchor), walkRadius) }
             : { anchor: null, distance: new Map(), stopsReached: new Map() };
-        walkPointCache.set(key, context);
-        if (walkPointCache.size > 12) {
-            walkPointCache.delete(walkPointCache.keys().next().value);
-        }
+        cacheSetBounded(walkPointCache, key, context, WALK_POINT_CACHE_LIMIT);
         return context;
     }
 
@@ -1467,6 +1585,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function clearResult() {
+        presentationFocus = false;
+        basePresentationKey = null;
         clearProgressiveRoutes();
         clearProgressiveStops();
         pendingCoverageDisks = [[], [], []];
@@ -1622,9 +1742,9 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     // Route drawing is incremental and independent of the walking wave.
     // Each confirmed traversed edge is retained once per transfer tier, so
     // a zoom/pan redraw does not require repeating the transport search.
-    const routeEdgeRecords = [[], [], []];
-    const routeEdgeKeys = [new Set(), new Set(), new Set()];
-    const routeCanvasCursors = [0, 0, 0];
+    const routeEdgeRecords = Array.from({ length: 6 }, () => []);
+    const routeEdgeKeys = Array.from({ length: 6 }, () => new Set());
+    const routeCanvasCursors = Array(6).fill(0);
     let routePaintFrame = null;
     let routeViewFrame = null;
     let routeCanvasOrigin = L.point(0, 0);
@@ -1633,6 +1753,26 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     let routeCanvasZooming = false;
     let routePaintTier = 0;
     let routeFirstPaintMs = null;
+
+    function routeQueueVisible(index) {
+        if (presentationFocus) return false;
+        const minimum = index % 2 === 0 ? RAIL_ROUTE_MIN_ZOOM : SURFACE_ROUTE_MIN_ZOOM;
+        return zoomFade(map.getZoom(), minimum) > 0;
+    }
+
+    function hasPendingRoutePaint() {
+        return routeEdgeRecords.some(
+            (items, i) => routeQueueVisible(i) && routeCanvasCursors[i] < items.length,
+        );
+    }
+
+    // Keep hidden canvas backing stores at 1 x 1, not viewport size.
+    function resizePaintCanvas(canvas, width, height, visible) {
+        const w = visible ? width : 1;
+        const h = visible ? height : 1;
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+    }
 
     function positionRouteCanvases() {
         const size = map.getSize();
@@ -1646,22 +1786,27 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         routeLabelCanvas.style.width = size.x + 'px';
         routeLabelCanvas.style.height = size.y + 'px';
         routeLabelCanvas.style.opacity = String(zoomFade(map.getZoom(), ROUTE_LABEL_MIN_ZOOM));
-        routeLabelCanvas.width = width;
-        routeLabelCanvas.height = height;
+        resizePaintCanvas(
+            routeLabelCanvas,
+            width,
+            height,
+            zoomFade(map.getZoom(), ROUTE_LABEL_MIN_ZOOM) > 0,
+        );
         routeLabelContext.setTransform(scale, 0, 0, scale, 0, 0);
         for (let index = 0; index < routeCanvases.length; ++index) {
             const tier = Math.floor(index / 2);
             const canvas = routeCanvases[index];
-            const fade = zoomFade(
-                map.getZoom(),
-                index % 2 === 0 ? RAIL_ROUTE_MIN_ZOOM : SURFACE_ROUTE_MIN_ZOOM,
-            );
+            const fade = presentationFocus
+                ? 0
+                : zoomFade(
+                      map.getZoom(),
+                      index % 2 === 0 ? RAIL_ROUTE_MIN_ZOOM : SURFACE_ROUTE_MIN_ZOOM,
+                  );
             canvas.style.opacity = String(ROUTE_LINE_OPACITIES[tier] * fade);
             canvas.style.width = size.x + 'px';
             canvas.style.height = size.y + 'px';
             L.DomUtil.setPosition(canvas, routeCanvasOrigin);
-            if (canvas.width !== width) canvas.width = width;
-            if (canvas.height !== height) canvas.height = height;
+            resizePaintCanvas(canvas, width, height, fade > 0);
             routeContexts[index].setTransform(scale, 0, 0, scale, 0, 0);
             routeContexts[index].lineWidth = ROUTE_LINE_WIDTHS[tier];
             routeContexts[index].lineCap = 'round';
@@ -1697,7 +1842,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function clearProgressiveRoutes() {
         cancelRoutePaint();
-        for (let tier = 0; tier < 3; ++tier) {
+        for (let tier = 0; tier < routeEdgeRecords.length; ++tier) {
             routeEdgeRecords[tier].length = 0;
             routeEdgeKeys[tier].clear();
             routeCanvasCursors[tier] = 0;
@@ -1711,9 +1856,11 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         if (tier < 0 || tier > 2 || pos <= 0 || !direction) return;
         if (!direction.stops || pos >= direction.stops.length) return;
         const key = routeKey + ':' + relationKey(direction) + ':' + pos;
-        if (routeEdgeKeys[tier].has(key)) return;
-        routeEdgeKeys[tier].add(key);
-        routeEdgeRecords[tier].push({ routeKey, direction, pos });
+        const rail = isRailRouteMode(routeModeOf(routeKey));
+        const index = tier * 2 + (rail ? 0 : 1);
+        if (routeEdgeKeys[index].has(key)) return;
+        routeEdgeKeys[index].add(key);
+        routeEdgeRecords[index].push({ routeKey, direction, pos });
         scheduleRoutePaint();
     }
 
@@ -1780,39 +1927,43 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function paintOneRouteEdge(item, tier) {
         if (!shouldShowBackgroundRoute(item.routeKey)) return;
-        const part = {
-            direction: item.direction,
-            startPos: item.pos - 1,
-            endPos: item.pos,
-        };
-        const geometry =
-            routeSinglePartGeometry(part) ||
-            stopChainGeometry(item.direction, part.startPos, part.endPos);
-        if (!geometry) return;
+        const key = item.routeKey + ':' + relationKey(item.direction) + ':' + item.pos;
+        let cached = cacheGetRecent(routePaintGeometryCache, key);
+        if (!cached) {
+            const part = { direction: item.direction, startPos: item.pos - 1, endPos: item.pos };
+            const geometry =
+                routeSinglePartGeometry(part) ||
+                stopChainGeometry(item.direction, part.startPos, part.endPos);
+            if (!geometry) return;
+            const lines = [];
+            for (const line of geometryLines(geometry)) {
+                if (line.length < 2) continue;
+                let minLon = Infinity,
+                    maxLon = -Infinity;
+                let minLat = Infinity,
+                    maxLat = -Infinity;
+                for (const [lon, lat] of line) {
+                    minLon = Math.min(minLon, lon);
+                    maxLon = Math.max(maxLon, lon);
+                    minLat = Math.min(minLat, lat);
+                    maxLat = Math.max(maxLat, lat);
+                }
+                lines.push({ line, minLon, maxLon, minLat, maxLat });
+            }
+            cached = { geometry, lines };
+            cacheSetBounded(routePaintGeometryCache, key, cached, ROUTE_PAINT_GEOMETRY_LIMIT);
+        }
         const rail = isRailRouteMode(routeModeOf(item.routeKey));
         const ctx = routeContexts[tier * 2 + (rail ? 0 : 1)];
         ctx.strokeStyle = routeColor(item.routeKey, true);
         ctx.beginPath();
         let visible = false;
-        for (const line of geometryLines(geometry)) {
-            if (line.length < 2) continue;
-            // Bounding boxes retain lines crossing the viewport even if both
-            // endpoints are offscreen; all coordinates remain OSM-derived.
-            const box = routeCanvasBounds;
-            const west = box.getWest(),
-                east = box.getEast();
-            const south = box.getSouth(),
-                north = box.getNorth();
-            let minLon = Infinity,
-                maxLon = -Infinity;
-            let minLat = Infinity,
-                maxLat = -Infinity;
-            for (const coord of line) {
-                minLon = Math.min(minLon, coord[0]);
-                maxLon = Math.max(maxLon, coord[0]);
-                minLat = Math.min(minLat, coord[1]);
-                maxLat = Math.max(maxLat, coord[1]);
-            }
+        const box = routeCanvasBounds;
+        const west = box.getWest(),
+            east = box.getEast();
+        const south = box.getSouth(),
+            north = box.getNorth();
+        for (const { line, minLon, maxLon, minLat, maxLat } of cached.lines) {
             if (maxLon < west || minLon > east || maxLat < south || minLat > north) continue;
             let first = true;
             for (const coord of line) {
@@ -1827,7 +1978,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         }
         if (visible) {
             ctx.stroke();
-            paintRouteLabel(item.routeKey, geometry);
+            paintRouteLabel(item.routeKey, cached.geometry);
         }
     }
 
@@ -1837,18 +1988,21 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         if (routeCanvasZooming) return;
         const deadline = performance.now() + 3;
         let painted = 0;
-        let attempted = 0;
-        // Rotate the tiers so outer routes cannot starve direct routes.
-        while (attempted < 64 && performance.now() < deadline) {
-            const tier = routePaintTier;
-            routePaintTier = (routePaintTier + 1) % 3;
-            if (routeCanvasCursors[tier] >= routeEdgeRecords[tier].length) {
-                if (++attempted >= 3) break;
+        let empty = 0;
+        // Rotate visible queues only; hidden geometry stays available for zoom-in.
+        while (performance.now() < deadline) {
+            const index = routePaintTier;
+            routePaintTier = (routePaintTier + 1) % routeEdgeRecords.length;
+            if (
+                !routeQueueVisible(index) ||
+                routeCanvasCursors[index] >= routeEdgeRecords[index].length
+            ) {
+                if (++empty >= routeEdgeRecords.length) break;
                 continue;
             }
-            attempted = 0;
-            const item = routeEdgeRecords[tier][routeCanvasCursors[tier]++];
-            paintOneRouteEdge(item, tier);
+            empty = 0;
+            const item = routeEdgeRecords[index][routeCanvasCursors[index]++];
+            paintOneRouteEdge(item, Math.floor(index / 2));
             painted++;
         }
         if (painted && routeFirstPaintMs === null) {
@@ -1859,14 +2013,11 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function scheduleRoutePaint() {
-        if (
-            routeCanvasZooming ||
-            routePaintFrame !== null ||
-            zoomFade(map.getZoom(), RAIL_ROUTE_MIN_ZOOM) <= 0
-        )
+        if (routeCanvasZooming || routePaintFrame !== null || !hasPendingRoutePaint()) return;
+        if (geometryState === 'deferred' || geometryState === 'loading') {
+            void ensureRouteGeometry();
             return;
-        if (!routeEdgeRecords.some((items, tier) => routeCanvasCursors[tier] < items.length))
-            return;
+        }
         routePaintFrame = requestAnimationFrame(paintProgressiveRouteFrame);
     }
 
@@ -1913,6 +2064,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         routeViewFrame = requestAnimationFrame(() => {
             routeViewFrame = null;
             redrawProgressiveRoutes();
+            profileCheckIdle();
         });
     }
 
@@ -1977,6 +2129,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     const coverageCursor = [0, 0, 0, 0];
     // The wave stores per-vertex best budgets. Canvas queues only visible edge IDs.
     let coverageState = null;
+    let coverageBufferPool = null;
     const coverageViewEdges = [[], [], [], []];
     let coverageViewIterator = null;
     let coverageBounds = null;
@@ -2108,33 +2261,49 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     function* rebuildCoverageViewSteps() {
         if (!coverageState || !walkSegmentGrid) return;
         const seen = new Uint8Array(walkEdges.length);
-        const x0 = Math.floor(coverageBounds[0] / WALK_GRID_METERS);
-        const x1 = Math.floor(coverageBounds[2] / WALK_GRID_METERS);
-        const y0 = Math.floor(coverageBounds[1] / WALK_GRID_METERS);
-        const y1 = Math.floor(coverageBounds[3] / WALK_GRID_METERS);
+        const grid = walkSegmentGrid;
+        const x0 = Math.max(grid.minX, Math.floor(coverageBounds[0] / WALK_GRID_METERS));
+        const x1 = Math.min(grid.maxX, Math.floor(coverageBounds[2] / WALK_GRID_METERS));
+        const y0 = Math.max(grid.minY, Math.floor(coverageBounds[1] / WALK_GRID_METERS));
+        const y1 = Math.min(grid.maxY, Math.floor(coverageBounds[3] / WALK_GRID_METERS));
+        if (x0 > x1 || y0 > y1) return;
         let checked = 0;
-        for (let y = y0; y <= y1; ++y) {
-            for (let x = x0; x <= x1; ++x) {
-                const ids = walkSegmentGrid.get(x + ':' + y);
-                if (!ids) continue;
-                for (const id of ids) {
-                    if (seen[id]) continue;
-                    seen[id] = 1;
-                    const direction = walkEdgeDirs[id];
-                    if (direction === 5 || direction >= 10) continue;
-                    const a = walkEdgeAB[2 * id],
-                        b = walkEdgeAB[2 * id + 1];
-                    if (!coverageEdgeInViewAB(a, b)) continue;
-                    for (let tier = 0; tier < 4; ++tier) {
-                        const reached = coverageState.settled[tier];
-                        if (reached[a] || reached[b]) {
-                            coverageViewEdges[tier].push(id);
-                        }
+        function* append(ids) {
+            for (const id of ids) {
+                if ((++checked & 2047) === 0) yield;
+                if (seen[id]) continue;
+                seen[id] = 1;
+                const a = walkEdgeAB[2 * id],
+                    b = walkEdgeAB[2 * id + 1];
+                if (!coverageEdgeInViewAB(a, b)) continue;
+                for (let tier = 0; tier < 4; ++tier) {
+                    const reached = coverageState.settled[tier];
+                    if (
+                        reached[a] ||
+                        reached[b] ||
+                        (tier === 3 && coverageState.originInterval?.id === id)
+                    ) {
+                        coverageViewEdges[tier].push(id);
                     }
-                    if ((++checked & 2047) === 0) yield;
                 }
             }
-            if ((y & 7) === 0) yield;
+        }
+        if (!grid.dense && (x1 - x0 + 1) * (y1 - y0 + 1) > grid.sparse.size) {
+            for (const [key, ids] of grid.sparse) {
+                if ((++checked & 2047) === 0) yield;
+                const split = key.indexOf(':');
+                const x = Number(key.slice(0, split)),
+                    y = Number(key.slice(split + 1));
+                if (x >= x0 && x <= x1 && y >= y0 && y <= y1) yield* append(ids);
+            }
+        } else {
+            for (let y = y0; y <= y1; ++y) {
+                for (let x = x0; x <= x1; ++x) {
+                    if ((++checked & 2047) === 0) yield;
+                    const ids = grid.get(x, y);
+                    if (ids) yield* append(ids);
+                }
+            }
         }
     }
 
@@ -2249,7 +2418,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     // One stroke for a bounded batch: no one-path-per-edge DOM allocations.
     function drawCoverageBatch(tier, deadline) {
-        if (!coverageState) return drawLegacyCoverageBatch(tier, deadline);
+        if (!coverageState) return drawExplicitCoverageBatch(tier, deadline);
         const ids = coverageViewEdges[tier];
         const ctx = coverageContexts[tier];
         const budgets = coverageState.remaining[tier];
@@ -2272,7 +2441,11 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 direction === 3 || !settled[a] ? 0 : Math.min(1, Math.max(0, budgets[a] / length));
             const right =
                 direction === 2 || !settled[b] ? 0 : Math.min(1, Math.max(0, budgets[b] / length));
-            if (left <= 0 && right <= 0) continue;
+            const origin =
+                tier === 3 && coverageState.originInterval?.id === id
+                    ? coverageState.originInterval
+                    : null;
+            if (left <= 0 && right <= 0 && !origin) continue;
             coveragePixel(a);
             coveragePixel(b);
             const px = coveragePixelX[a],
@@ -2280,9 +2453,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             const dx = coveragePixelX[b] - px;
             const dy = coveragePixelY[b] - py;
             const full = left + right >= 1;
-            for (let part = 0; part < (full ? 1 : 2); ++part) {
-                const from = full ? 0 : part ? 1 - right : 0;
-                const to = full ? 1 : part ? 1 : left;
+            const parts = full ? 1 : origin ? 3 : 2;
+            for (let part = 0; part < parts; ++part) {
+                const from = full ? 0 : part === 2 ? origin.from : part ? 1 - right : 0;
+                const to = full ? 1 : part === 2 ? origin.to : part ? 1 : left;
                 if (to <= from) continue;
                 const x0 = px + dx * from,
                     y0 = py + dy * from;
@@ -2321,7 +2495,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     // Used only by explicit non-streaming coverage outside the reachability wave.
-    function drawLegacyCoverageBatch(tier, deadline) {
+    function drawExplicitCoverageBatch(tier, deadline) {
         const lines = coverageLinesForTier(tier);
         const ctx = coverageContexts[tier];
         const bounds = map.getBounds();
@@ -2478,6 +2652,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             if (coverageZooming) return;
             redrawCoverageOverlay();
             coverageCanvas.style.visibility = 'visible';
+            profileCheckIdle();
         });
     }
 
@@ -2530,12 +2705,19 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     function startProgressiveCoverage(token, streaming = false) {
         const count = walkNodes.length;
         const heap = makeCoverageHeap();
-        const remaining = Array.from({ length: 4 }, () => {
-            const array = new Float32Array(count);
-            array.fill(-1);
-            return array;
-        });
-        const settled = Array.from({ length: 4 }, () => new Uint8Array(count));
+        // Old waves check their generation before resuming after every yield.
+        // A different generation can safely reclaim these fixed-size buffers.
+        if (!coverageBufferPool || coverageBufferPool.token === token) {
+            coverageBufferPool = {
+                remaining: Array.from({ length: 4 }, () => new Float32Array(count)),
+                settled: Array.from({ length: 4 }, () => new Uint8Array(count)),
+                token,
+            };
+        }
+        coverageBufferPool.token = token;
+        const { remaining, settled } = coverageBufferPool;
+        for (const array of remaining) array.fill(-1);
+        for (const array of settled) array.fill(0);
         const sources = Array.from({ length: 3 }, () => new Map());
         const waveStats = {
             sources: 0,
@@ -2545,7 +2727,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             yields: 0,
             peakHeap: 0,
         };
-        const state = { remaining, settled };
+        const state = { remaining, settled, originInterval: null };
         coverageState = state;
         let started = false;
         let running = false;
@@ -2569,6 +2751,21 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 const xy = project(selectedPoint.lon, selectedPoint.lat);
                 const anchor = snapWalkXY(xy[0], xy[1]);
                 if (anchor) {
+                    // The origin can reach the middle of an edge even when neither
+                    // endpoint is within budget. Preserve that interval for painting.
+                    if (anchor.edgeIndex !== undefined && originRadius > anchor.offset) {
+                        const id = anchor.edgeIndex;
+                        const length = walkEdgeLengths[id];
+                        const direction = walkEdgeDirs[id];
+                        if (length > 0) {
+                            const span = (originRadius - anchor.offset) / length;
+                            state.originInterval = {
+                                id,
+                                from: direction === 2 ? anchor.t : Math.max(0, anchor.t - span),
+                                to: direction === 3 ? anchor.t : Math.min(1, anchor.t + span),
+                            };
+                        }
+                    }
                     for (const [node, distance] of walkSeeds(anchor)) {
                         seed(3, node, originRadius - distance);
                     }
@@ -2581,7 +2778,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 sources[tier].clear();
             }
             start();
-            if (!heap.size) profilePhaseEnd('Walking coverage wave', 'no sources');
+            if (!heap.size) {
+                profilePhaseEnd('Walking coverage wave', 'no sources');
+                redrawCoverageOverlay();
+            }
         }
 
         async function expand() {
@@ -2589,7 +2789,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             while (heap.size && token === renderGeneration) {
                 const startTime = performance.now();
                 let processed = 0;
-                while (heap.size && performance.now() - startTime < 8) {
+                while (heap.size && ((processed & 63) !== 0 || performance.now() - startTime < 8)) {
                     const [negative, packed] = heap.pop();
                     const tier = Math.floor(packed / count);
                     const node = packed % count;
@@ -2753,8 +2953,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         stopCanvas.style.height = size.y + 'px';
         const width = Math.max(1, Math.round(size.x * scale));
         const height = Math.max(1, Math.round(size.y * scale));
-        if (stopCanvas.width !== width) stopCanvas.width = width;
-        if (stopCanvas.height !== height) stopCanvas.height = height;
+        resizePaintCanvas(stopCanvas, width, height, shouldShowStopDots());
         stopContext.setTransform(scale, 0, 0, scale, 0, 0);
     }
 
@@ -2817,7 +3016,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         let count = 0;
         while (
             stopCanvasRedrawIndex < stopCanvasRedrawItems.length &&
-            count < 100 &&
+            count < 512 &&
             performance.now() - start < 3
         ) {
             const [stopIndex, tier] = stopCanvasRedrawItems[stopCanvasRedrawIndex++];
@@ -2841,6 +3040,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         clearStopPixels();
         if (!shouldShowStopDots()) {
             stopCanvas.style.visibility = 'hidden';
+            profileCheckIdle();
             return;
         }
         stopCanvas.style.visibility = 'visible';
@@ -2851,6 +3051,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         stopCanvasRedrawIndex = 0;
         if (stopCanvasRedrawItems.length) {
             stopCanvasRedrawFrame = requestAnimationFrame(paintStopCanvasFrame);
+        } else {
+            profileCheckIdle();
         }
     }
 
@@ -2938,7 +3140,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         let count = 0;
         while (
             stopPaintCursor < stopPaintQueue.length &&
-            count < 48 &&
+            count < 512 &&
             performance.now() - started < 3
         ) {
             const stopIndex = stopPaintQueue[stopPaintCursor++];
@@ -2968,7 +3170,15 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         if (previous !== undefined) progressiveStopCounts[previous]--;
         progressiveStopCounts[tier]++;
         pendingStopTiers.set(stopIndex, tier);
-        if (previous === undefined || renderedStopTiers.has(stopIndex)) {
+        if (!shouldShowStopDots()) {
+            // Store results immediately. A later zoom redraw uses the same tiers.
+            displayedStopIndexes.add(stopIndex);
+            renderedStopTiers.set(stopIndex, tier);
+            if (runProfile && !runProfile.finished) {
+                runProfile.frames.stopPaintDeferred =
+                    (runProfile.frames.stopPaintDeferred || 0) + 1;
+            }
+        } else if (previous === undefined || renderedStopTiers.has(stopIndex)) {
             stopPaintQueue.push(stopIndex);
         }
         if (stopPaintFrame === null) {
@@ -3033,7 +3243,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 anchor: context.anchor,
                 ...walkDijkstra(walkSeeds(context.anchor), walkRadius),
             };
-            walkPointCache.set(key, context);
+            cacheSetBounded(walkPointCache, key, context, WALK_POINT_CACHE_LIMIT);
         }
         const coords = project(b.lon, b.lat);
         const anchor = snapWalkXY(coords[0], coords[1]);
@@ -3625,7 +3835,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function findItineraries(targetStopIndex) {
         const key = selectionKey() + ':' + String(targetStopIndex);
-        const cached = itineraryCache.get(key);
+        const cached = cacheGetRecent(itineraryCache, key);
 
         if (cached) {
             return cached;
@@ -3656,7 +3866,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         }
 
         const filtered = filterReasonableItineraries(result);
-        itineraryCache.set(key, filtered);
+        cacheSetBounded(itineraryCache, key, filtered, ITINERARY_CACHE_LIMIT);
         return filtered;
     }
 
@@ -3682,7 +3892,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function findPointItineraries(point) {
         const key = selectionKey() + ':point:' + targetPointKey(point);
-        const cached = itineraryCache.get(key);
+        const cached = cacheGetRecent(itineraryCache, key);
 
         if (cached) {
             return cached;
@@ -3732,7 +3942,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         }
 
         const filtered = filterReasonableItineraries(result);
-        itineraryCache.set(key, filtered);
+        cacheSetBounded(itineraryCache, key, filtered, ITINERARY_CACHE_LIMIT);
         return filtered;
     }
 
@@ -4530,6 +4740,14 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function renderTrip(point) {
+        if (geometryState === 'deferred' || geometryState === 'loading') {
+            clearResult();
+            const token = renderGeneration;
+            void ensureRouteGeometry().then(() => {
+                if (token === renderGeneration && targetPoint === point) renderTrip(point);
+            });
+            return;
+        }
         clearResult();
         updateControls();
 
@@ -4745,6 +4963,12 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
         const wrapped = map.wrapLatLng([point.lat, point.lon]);
         targetPoint = { lat: wrapped.lat, lon: wrapped.lng };
+        // A pending reachability run must not paint over a destination trip.
+        profileAbort('new destination');
+        ++renderGeneration;
+        if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+        renderFrame = null;
+        setTiming(() => TEXT.ready);
         setTargetPickMode(false);
         tripAlternativeIndex = 0;
         syncShareUrl();
@@ -4927,7 +5151,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function cloneRouteLegParts(parts) {
-        return parts.map((part) => ({ ...part }));
+        return parts.slice();
     }
 
     function routeLegPathKey(leg) {
@@ -4947,7 +5171,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function routeLegsFromBoard(routeKey, startDirection, startPos) {
         const cacheKey = routeKey + '|' + relationKey(startDirection) + '|' + String(startPos);
-        const cached = routeLegTraversalCache.get(cacheKey);
+        const cached = cacheGetRecent(routeLegTraversalCache, cacheKey);
 
         if (cached) {
             return cached;
@@ -5013,8 +5237,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 const edgeMinutes = legEstimatedMinutes(edge).minutes;
                 const nextMinutes = state.rideMinutes + edgeMinutes;
                 const nextParts = cloneRouteLegParts(state.parts);
-                const lastPart = nextParts[nextParts.length - 1];
-                lastPart.endPos = nextPos;
+                const lastIndex = nextParts.length - 1;
+                nextParts[lastIndex] = { ...nextParts[lastIndex], endPos: nextPos };
                 const nextRideStops = state.rideStops + 1;
                 const nextStopIndex = state.direction.stops[nextPos];
                 const leg = {
@@ -5085,7 +5309,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             }
         }
 
-        routeLegTraversalCache.set(cacheKey, result);
+        cacheSetBounded(routeLegTraversalCache, cacheKey, result, 256);
         return result;
     }
 
@@ -5282,8 +5506,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     /*
      * RAPTOR-style reachability engine.
      * Round 0 = first ride, round 1 = one transfer, round 2 = two transfers.
-     * Travel-time changes only filter cached labels; increasing the transfer
-     * limit computes only the missing round.
+     * Travel-time is part of the cache key. Increasing the transfer limit
+     * computes only missing rounds for the same search settings.
      */
     function reachabilitySearchKey() {
         if (!selectedPoint) {
@@ -5300,7 +5524,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     function cloneLegParts(parts) {
-        return parts.map((part) => ({ ...part }));
+        return parts.slice();
     }
 
     function initialRideLeg(routeKey, direction, boardPos) {
@@ -5327,8 +5551,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function extendRideLeg(leg, direction, nextPos) {
         const parts = cloneLegParts(leg.parts);
-        const last = parts[parts.length - 1];
-        last.endPos = nextPos;
+        const index = parts.length - 1;
+        parts[index] = { ...parts[index], endPos: nextPos };
 
         return {
             ...leg,
@@ -5664,9 +5888,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         for (const [boardStopIndex, byLastRoute] of boardSources.entries()) {
             if (++seededStops % 8 === 0) yield null;
             const sources = flattenRaptorSources(byLastRoute);
+            const options = boardingOptionsAtStop(boardStopIndex);
 
             for (const source of sources) {
-                for (const option of boardingOptionsAtStop(boardStopIndex)) {
+                for (const option of options) {
                     if (source.lastRouteKey && source.lastRouteKey === option.routeKey) {
                         continue;
                     }
@@ -5998,16 +6223,11 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     function ensureReachabilitySearch() {
         const cacheKey = reachabilitySearchKey();
-        let context = reachabilitySearchCache.get(cacheKey);
+        let context = cacheGetRecent(reachabilitySearchCache, cacheKey);
 
         if (!context) {
             context = createReachabilitySearch();
-            reachabilitySearchCache.set(cacheKey, context);
-
-            if (reachabilitySearchCache.size > 4) {
-                const firstKey = reachabilitySearchCache.keys().next().value;
-                reachabilitySearchCache.delete(firstKey);
-            }
+            cacheSetBounded(reachabilitySearchCache, cacheKey, context, REACHABILITY_CACHE_LIMIT);
         }
 
         const requiredRounds = Math.min(RAPTOR_ROUNDS, maxTransfers + 1);
@@ -6015,17 +6235,18 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         while (context.builtRounds < requiredRounds) {
             const round = context.builtRounds;
 
+            if (round > 0 && context.boardSources === null) {
+                context.boardSources = buildRaptorTransferSources(context.evidence[round - 1]);
+            }
             if (!context.boardSources || context.boardSources.size === 0) {
                 context.builtRounds = RAPTOR_ROUNDS;
                 break;
             }
 
-            context.evidence[round] = scanRaptorRound(context.boardSources, round);
-            ++context.builtRounds;
-
-            if (context.builtRounds < RAPTOR_ROUNDS) {
-                context.boardSources = buildRaptorTransferSources(context.evidence[round]);
-            }
+            const evidence = scanRaptorRound(context.boardSources, round);
+            context.evidence[round] = evidence;
+            context.boardSources = null;
+            context.builtRounds = round + 1;
         }
 
         return context;
@@ -6033,13 +6254,14 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
     async function ensureReachabilitySearchAsync(token, onEvidence, onRideEdge) {
         const cacheKey = reachabilitySearchKey();
-        let context = reachabilitySearchCache.get(cacheKey);
+        let context = cacheGetRecent(reachabilitySearchCache, cacheKey);
         if (!context) {
             profilePhaseStart('Walking from start point');
-            if (!(await warmWalkingPoint(selectedPoint, token))) return false;
+            if (!(await warmWalkingPoint(selectedPoint, token)) || token !== renderGeneration)
+                return false;
             profilePhaseEnd('Walking from start point');
             context = createReachabilitySearch();
-            reachabilitySearchCache.set(cacheKey, context);
+            cacheSetBounded(reachabilitySearchCache, cacheKey, context, REACHABILITY_CACHE_LIMIT);
             console.info('[map] Reachability cache MISS');
         } else {
             console.info('[map] Reachability cache HIT; rounds:', context.builtRounds);
@@ -6063,6 +6285,17 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         while (context.builtRounds < requiredRounds) {
             if (token !== renderGeneration) return false;
             const round = context.builtRounds;
+            if (round > 0 && context.boardSources === null) {
+                const transferName = 'Walking transfers after round ' + (round - 1);
+                profilePhaseStart(transferName);
+                const nextSources = await buildRaptorTransferSourcesAsync(
+                    context.evidence[round - 1],
+                    token,
+                );
+                if (token !== renderGeneration || nextSources === null) return false;
+                context.boardSources = nextSources;
+                profilePhaseEnd(transferName, 'boarding stops: ' + nextSources.size);
+            }
             if (!context.boardSources || !context.boardSources.size) {
                 context.builtRounds = RAPTOR_ROUNDS;
                 break;
@@ -6076,20 +6309,12 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 onEvidence,
                 onRideEdge,
             );
-            profilePhaseEnd(roundName, 'evidence stops: ' + (evidence ? evidence.size : 0));
             if (token !== renderGeneration || evidence === null) return false;
+            profilePhaseEnd(roundName, 'evidence stops: ' + evidence.size);
+            // The completed evidence is durable; next-round sources are lazy.
             context.evidence[round] = evidence;
-            ++context.builtRounds;
-            if (context.builtRounds < RAPTOR_ROUNDS) {
-                const transferName = 'Walking transfers after round ' + round;
-                profilePhaseStart(transferName);
-                context.boardSources = await buildRaptorTransferSourcesAsync(evidence, token);
-                profilePhaseEnd(
-                    transferName,
-                    'boarding stops: ' + (context.boardSources ? context.boardSources.size : 0),
-                );
-                if (!context.boardSources) return false;
-            }
+            context.boardSources = null;
+            context.builtRounds = round + 1;
         }
         return token === renderGeneration;
     }
@@ -6279,7 +6504,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
     }
 
     async function appendRouteGroup(container, titleKey, routeKeys, transferCount, token) {
-        if (routeKeys.size === 0) {
+        if (token !== renderGeneration || routeKeys.size === 0) {
             return;
         }
 
@@ -6296,15 +6521,14 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
 
         const ordered = Array.from(routeKeys);
 
+        const collator = new Intl.Collator(transportI18n.language, { numeric: true });
         ordered.sort((a, b) => {
             const ar = routes[a];
             const br = routes[b];
             const aa = ar && ar.ref ? ar.ref : '';
             const bb = br && br.ref ? br.ref : '';
 
-            return aa.localeCompare(bb, transportI18n.language, {
-                numeric: true,
-            });
+            return collator.compare(aa, bb);
         });
 
         let processedChips = 0;
@@ -6343,7 +6567,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                     selectedRouteFocus.transferCount === transferCount;
 
                 selectedRouteFocus = same ? null : { routeKey: key, transferCount: transferCount };
-                scheduleRender();
+                scheduleFocusRender();
             });
 
             container.appendChild(item);
@@ -6471,6 +6695,10 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             drawOrigin(selectedPoint.lat, selectedPoint.lon, !progressive);
         }
 
+        if (selectedRouteFocus) {
+            await ensureRouteGeometry();
+            if (token !== renderGeneration) return;
+        }
         const skipGeometry = progressive && preserveWave && !selectedRouteFocus;
         const analysis = await analyzeSelectionAsync(token, skipGeometry);
         if (!analysis || token !== renderGeneration) return;
@@ -6495,11 +6723,12 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             }
 
             if (!hasFocus) {
-                let placedtwoTransferOnlyStops = 0;
+                let placedtwoTransferOnlyStops = performance.now();
                 for (const stopIndex of analysis.twoTransferOnlyStops) {
-                    if (++placedtwoTransferOnlyStops % 64 === 0) {
+                    if (performance.now() - placedtwoTransferOnlyStops >= 3) {
                         await eventLoopYield();
                         if (token !== renderGeneration) return;
+                        placedtwoTransferOnlyStops = performance.now();
                     }
                     if (!preserveWave) {
                         drawCoverage(
@@ -6534,11 +6763,12 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
             }
 
             if (!hasFocus) {
-                let placedtransferOnlyStops = 0;
+                let placedtransferOnlyStops = performance.now();
                 for (const stopIndex of analysis.transferOnlyStops) {
-                    if (++placedtransferOnlyStops % 64 === 0) {
+                    if (performance.now() - placedtransferOnlyStops >= 3) {
                         await eventLoopYield();
                         if (token !== renderGeneration) return;
+                        placedtransferOnlyStops = performance.now();
                     }
                     if (!preserveWave) {
                         drawCoverage(
@@ -6572,11 +6802,12 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         }
 
         if (!hasFocus) {
-            let placeddirectStops = 0;
+            let placeddirectStops = performance.now();
             for (const stopIndex of analysis.directStops) {
-                if (++placeddirectStops % 64 === 0) {
+                if (performance.now() - placeddirectStops >= 3) {
                     await eventLoopYield();
                     if (token !== renderGeneration) return;
+                    placeddirectStops = performance.now();
                 }
                 if (!preserveWave) {
                     drawCoverage(stops[stopIndex], 0, analysis.directArrivalMinutes.get(stopIndex));
@@ -6624,6 +6855,68 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         );
     }
 
+    // A completed unfiltered coverage wave is independent of route focus.
+    // Keep its route records, stop tiers and walking buffers for the next view.
+    function scheduleFocusRender() {
+        if (
+            !basePresentationKey ||
+            basePresentationKey !== selectionKey() ||
+            targetPoint ||
+            !coverageState ||
+            !runProfile?.finished ||
+            !reachabilitySearchCache.has(reachabilitySearchKey())
+        ) {
+            scheduleRender();
+            return;
+        }
+        queueShareUrl();
+        const token = ++renderGeneration;
+        presentationFocus = !!selectedRouteFocus;
+        for (const group of [
+            routeOutlineLayers,
+            directRouteLayer,
+            transferRouteLayer,
+            twoTransferRouteLayer,
+            stopLayer,
+        ])
+            group.clearLayers();
+        redrawProgressiveRoutes();
+        redrawStopCanvas();
+        void (async () => {
+            if (selectedRouteFocus) {
+                await ensureRouteGeometry();
+                if (token !== renderGeneration) return;
+            }
+            const analysis = await analyzeSelectionAsync(token, !selectedRouteFocus);
+            if (!analysis || token !== renderGeneration) return;
+            const focused = focusedRouteStops(analysis);
+            if (focused && selectedRouteFocus) {
+                const tier = selectedRouteFocus.transferCount;
+                const maps = [
+                    analysis.directRouteSegments,
+                    analysis.transferRouteSegments,
+                    analysis.twoTransferRouteSegments,
+                ];
+                const key = selectedRouteFocus.routeKey;
+                drawRoute(key, tier, maps[tier].get(key));
+                drawFocusedRouteStops(analysis);
+            } else if (presentationFocus) {
+                presentationFocus = false;
+                redrawProgressiveRoutes();
+                redrawStopCanvas();
+            }
+            await updateRouteList(
+                analysis.directRoutes,
+                analysis.transferRoutes,
+                analysis.twoTransferRoutes,
+                token,
+            );
+        })().catch((error) => {
+            console.error('[map] Focus redraw failed', error);
+            if (token === renderGeneration) scheduleRender();
+        });
+    }
+
     function scheduleRender() {
         queueShareUrl();
         profileAbort('new settings or point');
@@ -6631,7 +6924,8 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         const token = ++renderGeneration;
         if (renderFrame !== null) cancelAnimationFrame(renderFrame);
         if (!selectedPoint) return;
-        profileBegin(token);
+        if (!targetPoint) profileBegin(token);
+        else setTiming(() => TEXT.ready);
         profilePhaseStart('Clear previous results');
         clearResult();
         document.getElementById('routes').replaceChildren();
@@ -6665,14 +6959,33 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 // Only the spatial index is needed. Do not construct an unused
                 // 2 * edges reverse-lookup index (tens of MB on the Moscow graph).
                 profilePhaseStart('Walking snap index');
-                if (!(await warmWalkSegmentGrid(token))) return;
+                if (!(await warmWalkSegmentGrid(token)) || token !== renderGeneration) return;
                 profilePhaseEnd('Walking snap index');
-                if (token !== renderGeneration) return;
-                if (locationStatusKey === 'locationFound' && selectedPoint.accuracy != null) {
-                    const xy = project(selectedPoint.lon, selectedPoint.lat);
-                    if (!snapWalkXY(xy[0], xy[1])) {
-                        showLocationStatus('locationNoGraph');
-                    }
+                const xy = project(selectedPoint.lon, selectedPoint.lat);
+                const anchor = snapWalkXY(xy[0], xy[1]);
+                if (!anchor) {
+                    showLocationStatus('locationNoGraph');
+                } else if (anchor.offset > WALK_APPROX_SNAP_METERS) {
+                    const edge = walkEdgeAt(anchor.edgeIndex);
+                    const a = walkNodeAt(edge[0]),
+                        b = walkNodeAt(edge[1]);
+                    const snapped = walkXYToLatLng([
+                        a[0] + (b[0] - a[0]) * anchor.t,
+                        a[1] + (b[1] - a[1]) * anchor.t,
+                    ]);
+                    L.polyline([[selectedPoint.lat, selectedPoint.lon], snapped], {
+                        color: '#e22236',
+                        weight: 2,
+                        dashArray: '5 5',
+                        interactive: false,
+                        pane: 'originPane',
+                    }).addTo(originLayer);
+                    showLocationStatus('locationApproxGraph', { meters: Math.ceil(anchor.offset) });
+                } else if (
+                    locationStatusKey === 'locationApproxGraph' ||
+                    locationStatusKey === 'locationNoGraph'
+                ) {
+                    showLocationStatus(null);
                 }
                 profilePhaseStart('Start coverage wave');
                 const wave = startProgressiveCoverage(token, true);
@@ -6703,13 +7016,13 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
                 const searchMs = performance.now() - started;
                 profilePhaseStart('Final result analysis and DOM');
                 await renderSelection(true, token, true);
-                profilePhaseEnd('Final result analysis and DOM');
                 if (token !== renderGeneration) return;
+                profilePhaseEnd('Final result analysis and DOM');
                 console.info('Reachability search complete (painting may continue):', {
                     search: Math.round(searchMs),
                     finalize: Math.round(performance.now() - started - searchMs),
                     stopCount: displayedStopIndexes.size,
-                    transitEdges: routeEdgeRecords.map((items) => items.length),
+                    transitEdges: routeQueueCounts(),
                     firstTransitPaint:
                         routeFirstPaintMs === null ? null : Math.round(routeFirstPaintMs - started),
                     transferArcs: transferStats.arcsScanned - transferBefore.arcsScanned,
@@ -6836,6 +7149,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         itineraryCache.clear();
         setTargetPickMode(false);
         clearResult();
+        coverageBufferPool = null;
         analysisSummary.hidden = true;
         tripPanel.hidden = true;
         tripAlternatives.replaceChildren();
@@ -6873,7 +7187,7 @@ function createLocationRequest({ geolocation, secure, status, onLocation }) {
         locationStatus.hidden = !key;
         locationStatus.classList.toggle(
             'location-error',
-            !!key && !['locationPending', 'locationFound'].includes(key),
+            !!key && !['locationPending', 'locationFound', 'locationApproxGraph'].includes(key),
         );
     }
     const locationRequest = createLocationRequest({

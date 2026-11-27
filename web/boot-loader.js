@@ -374,6 +374,7 @@ function loadTransportData() {
             else if (message.type === 'phase') bootPhase(message.stage, message.detail);
             else if (message.type === 'ready') {
                 console.info('[map] WORKER decode', message.decodeMs, 'ms');
+                console.info('[map] WORKER pedestrian CSR', message.csrMs, 'ms');
                 worker.terminate();
                 resolve(message.data);
             } else if (message.type === 'error') {
